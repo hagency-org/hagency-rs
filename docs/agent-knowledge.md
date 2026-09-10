@@ -1581,3 +1581,17 @@ Real namespace creation failure or absent writable delegation fails qualificatio
 ordinary parser/cross-compile tests cannot stand in for it. Root fixture cleanup
 after host/guardian abort does not upgrade the runtime's still-Unsupported full
 POSIX crash guarantee or enable a native production runner.
+
+Owned dispatch foundation (2026-09-10): ADR053 adds a host-only execution crate,
+not a service runner. DomainStore constructs exact frozen input/current task/
+provisioned profile/resource-lease scope and commits Started with writer time
+read after queue and SQLite lock delay. Unknown start receipt never spawns.
+One retained worker owns actual child pipes through cancellation and negative
+historical-attempt reconciliation; a failed negative receipt has a retained
+retry handle. Protocol completion cannot imply canonical Done or Matrix reply.
+Successful dispatch settlement additionally requires known full owner stop and
+fresh exact authority; macOS cleanup remains partial and therefore quarantined.
+Canonicalized resource paths do not prove physical directory/ancestor custody.
+Production workspace/sandbox qualification, helper launch and approval application
+remain gates, and native availability stays false. Operation/report Drop may
+block for bounded retained cleanup; keep it off latency-sensitive HTTP/UI workers.
