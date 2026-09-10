@@ -1188,3 +1188,25 @@ from dispatch_resources joined to unresolved_dispatches, excluding already
 inspected recoveries and settled stops. Preparing one giant schema verification
 query with expanded views exceeded SQLite's 64-table limit; prepare every
 independent check before schema version commit, and again during reopen.
+
+
+Native inventory (2026-09-10): `native/scripts/inventory.mjs --check` compares a
+source-derived snapshot against current tracked files. Espree 11.2.0 is pinned as
+a direct build dependency; no application module executes during inventory.
+Policy file lists explicit helper roles/owners/gates; new or stale helpers fail.
+Defaulted named route installers resolve at direct/member call sites, and reviewed
+module links preserve delivery and inbound/outbound fleet dispatch evidence.
+AST coverage is intentionally bounded: recognized Express receivers/factories,
+`server.tool/registerTool`, selected custom method/path branches and Next exports/
+allowlists. Arbitrary reflection, aliases, generated wrappers and external SDK
+internals require added detector fixtures or an explicit unresolved coverage gate.
+Whole-source hashes detect drift but do not prove a complete execution graph.
+
+Autodeploy watchers and provisioning scripts run in installed deployments. Audit
+and CD commands also invoke package/dependency checks, so those helpers are
+dual-use rather than build-only. Shell literal-path mentions are navigation aids.
+Source inventory never closes runtime/platform gates or marks behavior ported.
+Agent-spec 1.4.0 lifecycle still attempts Cargo selectors for Node contracts even
+with `--layers lint,boundary`; retain its Skip/non-passing result and run exact
+Vitest plus Node binding checks separately. Do not rename or fabricate Rust tests
+to turn those skips into parity evidence.
