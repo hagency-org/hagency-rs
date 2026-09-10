@@ -1511,3 +1511,23 @@ resolution; neither a second typed response nor a generic rejection may follow.
 At 68af16c actual Windows owned IO and Linux CI passed; macOS had a short-sample
 child observation failure now covered by controlled heartbeat pause/actual exit
 fixtures. Do not describe that failed run as green on all three OSes.
+
+## Native MCP coordination boundary (ADR-051, 2026-09-10)
+
+`hagency mcp` now exposes fourteen scoped delegation/conversation/peer/graph
+operations alongside the five assigned-task tools. Graph assignees and peer
+recipients are exact internal participant session IDs returned by conversations;
+delegation assignees are active engagement IDs. Stable mutation call IDs reach
+the existing domain receipts. Graph Complete still requires canonical Done and
+the current node epoch; Failed requires Blocked and fences the worker. No tool
+starts processes, delivers a notice, mints a report grant or asserts host evidence.
+
+The shared local client keeps task bodies at 16 KiB and coordination bodies at
+32 KiB; MCP framing is still 32 KiB and all HTTP responses at most 64 KiB.
+Paginated results default to eight/max32 with strictly increasing unique cursors.
+One dependency result is hydrated per read. A native domain object larger than
+these MCP bounds remains unsupported through this helper, with an explicit error.
+Lost mutation responses stay unknown; POST dependency hydration stays read-only.
+Generated runtime configuration, discovery, files, Matrix history, progress and
+live execution remain separate migration gates. See the scoped contract and
+ADR-051 for the advertised catalog and offline validation boundary.

@@ -2984,3 +2984,33 @@ custom SDK values; fixes are still in its isolated worktree. Linux cgroup and
 Matrix formatting also remain separate. This is a development checkpoint, not
 completion of a migration phase. Original checkout and deployed processes are
 unchanged.
+
+## 2026-09-10 — Native MCP scoped coordination (ADR-051)
+
+Implemented fourteen typed delegation, internal conversation, peer and graph
+tools through the existing runner HTTP API. The five assigned-task tools retain
+their task scope and 16 KiB request bound; coordination bodies are capped at
+32 KiB. Shared response/frame/watchdog limits and host-provisioned capability
+headers remain in force. Page projections reject duplicate/out-of-order cursors;
+strict response DTOs omit unexpected fields and preserve opaque fractional data.
+POST dependency hydration is explicitly read-only for uncertainty handling.
+
+Real rmcp subprocess fixtures against Salvo and canonical SQLite prove exact
+mutation replay, pending delegation admission, cross-project/same-Agent wrong
+session rejection, membership retirement, creator control, graph readiness,
+canonical Done/epoch results, and result reads. Lost graph-result and conversation
+responses leave durable commits; identical reconnect retries replay while changed
+content or stale authority fails. Scripted responses cover corruption, duplicate
+JSON keys, excessive bodies, stalled mutation deadlines, redirects, framing and
+resource/node scope mismatches. The unchanged protocol/task/CLI/watchdog suite
+also passes. Host notice delivery and dispatch starts are synthetic test fixtures;
+no live services or model execution were used.
+
+Focused validation: 15 tests passed, zero failed/ignored, across the hagency lib,
+MCP, task-client and new coordination targets. Clippy with warnings denied passed.
+All 158 native spec selectors resolve. The task lifecycle passed all six bound
+scenarios plus the explicit changed-path boundary (7/7, no fail/skip/uncertain).
+Formatting and diff checks passed. Log prefix: `mcp-coordination-` in the external 2026-09-10 migration
+cache. No dependency or schema changes. Discovery, file/media tools, Matrix
+history, progress hooks, generated MCP configuration, runtime cutover and other
+platform acceptance remain separate migration gates.
