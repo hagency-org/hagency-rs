@@ -1751,3 +1751,13 @@ locally. Only the hosted disposable VM may establish the final kernel result.
 A positive authenticated delivery journal may reconcile Sending with its exact fence
 and immutable observation even if the sender lost the claim secret. NotSent still
 requires Uncertain; receipt loss must never fabricate permission to resend.
+
+- ADR-060 adds explicit native `complete_task_with_reply`: one canonical writer
+  transaction commits Done + immutable held final body and retires execution.
+  Only the same retained started owner may publish after all three stop facts,
+  fresh epoch/route/attempt checks and an in-transaction cancellation checkpoint.
+  Plain task-only Done remains report-missing; no epoch refresh or task rerun.
+  Schema 016 completion rows are send custody, bounded to 30k global/128 per session,
+  with a 30 s/original-cap deadline. Ownerless restart and incomplete macOS cleanup
+  keep content unsendable. Native MCP catalog has 20 tools; generated task helper
+  enables only get_task/update_task_execution/transition_task/complete_task_with_reply.

@@ -3596,3 +3596,34 @@ inventory, local privileged invocation or deployment/push was performed.
 - Added host-only claimed preview and current Sending validation, so the native Matrix sender can match its private transport account before send-start and recheck exact current scope before IO. Neither method performs network IO or changes reply state.
 - A journaled exact Delivered observation can now reconcile Sending directly after sender receipt/secret loss. NotSent remains Uncertain-only; immutable body/route, send fence and durable inspection digest still determine acceptance and replay. No runner endpoints or native schema changes.
 - Focused reply repository suite covers wrong secrets/fences/IDs, expiry, null-root DM promotion, substituted delivery fields, NotSent refusal and exact positive replay. All 16 focused reply tests and Store Clippy passed. The scoped agent-spec 1.4 lifecycle passed 3/3 with no failed/skipped/uncertain scenarios using the store package as its code root; ADR059 owns actual Matrix sender consumption separately.
+
+### Native owned completion handoff (ADR-060 / schema 016)
+
+Implemented explicit canonical Done plus held final text through the real native
+MCP/HTTP boundary. Exact historical receipt replay is isolated from ordinary runner
+commands. The retained owned runner stops before final admission; no protocol text
+or epoch refresh grants execution, marks Done, or releases unrelated custody.
+The writer checks cancellation after queue/lock and rechecks original route,
+completed epoch, attempt and finite deadline before publishing stored content.
+
+Focused evidence: the complete store package passed 115 tests; runtime/execution
+regressions passed 51; native MCP/task-client tests passed 13. Actual local native
+helper finish commits Done and preserves the macOS whole-tree refusal gate. The
+new MCP endpoint rejects foreign task/route/capability, conflicting replay and
+oversized encoded input; identical post-fence replay returns only its receipt.
+Capacity, migration, queue reply loss, cancellation and wrong-scope/route/resource
+fixtures retain canonical and custody invariants. Native and cross-target checks
+and both focused task lifecycles are recorded with this slice's validation.
+
+Native service remains disabled. Actual Linux/Windows positive completion cleanup
+and the complete authenticated Matrix input-to-final-send workflow require the
+combined platform integration/CI; ADR-059 owns the final Matrix sender. Task-only
+Done and ownerless held content still require an explicit future reporting or
+inspection path rather than automatic re-execution.
+
+Final scoped validation: 195 tests across the selected packages and native helper
+integration targets (16 core, 115 store, 51 runtime/execution, 13 helper/client).
+Native and Windows GNU cross-target all-target Clippy pass with warnings denied;
+fmt/diff checks pass. Agent-spec 1.4 package-scoped lifecycles pass all 8 store
+scenarios and 3 native integration scenarios plus both boundaries, quality 100%,
+with zero fail/skip/uncertain. Cross-compilation is not Windows runtime evidence.
