@@ -72,3 +72,9 @@ in a clean worktree. Branch `feat/rust-migration`; baseline `5dbef22`.
    fixtures remain a CI gate for this step; macOS still refuses that guarantee.
 5. Continue M3–M9 in the migration plan; keep production deployments independent
    until every cutover gate is met. A foundation build is not full migration parity.
+
+6. M6 content-format proof now lives in `hagency-matrix-format` (ADR050):
+   JavaScript oracle, original body/relations, allowlisted Markdown and bounded
+   edits. It is not wired to Matrix sending. Continue host event-size/chunking,
+   private-route/crypto integration and actual client round-trip qualification
+   before calling this complete M6 formatting or media parity.
