@@ -1861,3 +1861,12 @@ Cross-platform evidence is revision-specific. All three native platforms and Nod
 are green at 75f47f1; the integrated Matrix-to-owned-completion checkpoint adds new
 platform paths. Local macOS final-send refusal cannot stand in for Linux/Windows
 positive delivery or for complete migration parity.
+
+ADR046 approval cancellation fixtures must synchronize on actual write entry.
+A 30 ms cancellation timer started before consume returns may observe durable
+Applying with no byte attempt, which is already covered by the exact real
+lost-response fixture. Windows c0afefc failed only the unqualified seen assertion;
+the original log does not prove its exact scheduling interleaving. Gate the
+blocked-write case on WireGate's real durable Applying check, then use the same
+30 ms cancellation and retain restart uncertainty/no replay. Do not change
+production deadlines or count later transport diagnostics as approval evidence.
