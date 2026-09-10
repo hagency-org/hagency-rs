@@ -3596,3 +3596,38 @@ inventory, local privileged invocation or deployment/push was performed.
 - Added host-only claimed preview and current Sending validation, so the native Matrix sender can match its private transport account before send-start and recheck exact current scope before IO. Neither method performs network IO or changes reply state.
 - A journaled exact Delivered observation can now reconcile Sending directly after sender receipt/secret loss. NotSent remains Uncertain-only; immutable body/route, send fence and durable inspection digest still determine acceptance and replay. No runner endpoints or native schema changes.
 - Focused reply repository suite covers wrong secrets/fences/IDs, expiry, null-root DM promotion, substituted delivery fields, NotSent refusal and exact positive replay. All 16 focused reply tests and Store Clippy passed. The scoped agent-spec 1.4 lifecycle passed 3/3 with no failed/skipped/uncertain scenarios using the store package as its code root; ADR059 owns actual Matrix sender consumption separately.
+
+## 2026-09-10 — Native authenticated Matrix outgoing custody
+
+ADR059 adds actual bounded authenticated notice/final sending to the owned
+Matrix collector, consuming the separately tested ADR033 host send checkpoints.
+The protected outgoing journal preserves original route/fence/formatted bytes,
+SDK key-share/ciphertext writes and accepted HTTP responses. Domain Sending
+precedes key sharing; fresh identity/full-state/recipient checks and current
+claim validation gate each write, including after the awaited Possible marker.
+No claim secret is persisted and uncertain bytes are never automatically resent.
+
+Real local HTTPS fixtures cover plaintext formatted notices/finals and encrypted
+DM/group delivery with strict SDK decryption and new group sessions. Additional
+faults cover malformed fresh cross-signing/device keys despite cached trust,
+retirement during journal persistence, lost HTTP/SDK/domain replies, SQLite
+rollback, late retired notice acceptance, nine corrupted protected history
+shapes on reopen and 64 actual sends followed by capacity refusal without eviction.
+Only exact current notice acceptance activates its task; historical acceptance
+records delivery without restoring authority.
+
+The complete Matrix package passes 49 tests (40 unit including 19 outgoing, plus
+9 transport), with zero failed/ignored tests. Native package Clippy with warnings
+denied passes after correcting two collapsible conditions and boxing the private
+notice Source variant. Cargo.lock changes only the existing package's local
+formatting/SHA dependency metadata; no locked version changes. Earlier compile,
+fixture and Clippy failure logs remain under the external evidence cache's
+matrix-outgoing-* prefix. Full workspace/three-platform integration is reserved
+for the coordinator; no duplicate broad isolated build or live service ran.
+
+The existing notice/store regression suite passes 14/14. Agent-spec 1.4
+lifecycle passes 7/7: six exact selectors and all 18 explicit changed paths,
+with zero failures, skips, pending reviews or uncertain results. Live key upload,
+missing-session claims, trust establishment, automatic uncertain-send recovery,
+receipt compaction, media, production wiring and overall M5 completion remain
+explicit gates. No native availability toggle, domain migration or deployment.
