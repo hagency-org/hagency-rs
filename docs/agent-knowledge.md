@@ -1390,3 +1390,15 @@ current dispatch, and generic park(false) checks the same barrier. An old observ
 application may record truth without restoring an expired capability. Scope-grant
 revocation after consumption cannot undo an operation that was already authorized.
 Live runtime mapping, inspection and Matrix transport remain unimplemented gates.
+
+- Codex 0.153.4 `serverRequest/resolved` is callback termination, not proof of the
+  chosen permission's application. Pinned source emits it before parsing and
+  submitting command/file/permission responses and also after cancellation.
+  ADR-046 records exact primary-source paths. The native permissions coordinator
+  must keep Applying/Uncertain; do not infer Applied from flush, resolved, model
+  text or item completion. A future post-core-application acknowledgment or
+  validated host inspection must close this gate before native cutover.
+- Native `hagency-permissions` owns the opted-in validated session/capability and
+  invokes schema13 request/consume/observation commands. Runtime remains database
+  independent; default OwnedSession still rejects approvals. Host workspace ID
+  plus session cwd/read-only settings are checked against an actual current lease.
