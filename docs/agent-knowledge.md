@@ -1694,3 +1694,15 @@ the Matrix scripted-peer correction and separated guardian CLI exit proof.
 Earlier failed runs remain evidence, not retroactive passes. New three-platform
 CI and actual Linux cgroup qualification still have to pass before advertising
 those updated platform guarantees.
+
+
+Linux CI probe staging (2026-09-10): ae284b9's nested-user log proves exec126
+permission refusal but did not record source-ancestor modes. The provisioner now
+stages only the two fixed bounded native binaries in fresh root-owned/sealed0555
+storage under fixed traversable/tmp, preserving all original source permissions.
+Retained inode identities gate nonrecursive cleanup; replacements survive refusal.
+A separate fresh fixture-UID0700 ancestor reproduces the access mechanism and is
+explicitly not namespace qualification. Actual nested cases must still return
+native78/exact initial-namespace diagnostic. Never accept126, skip a missing
+namespace capability, chmod checkout ancestors or run privileged qualification
+locally. Only the hosted disposable VM may establish the final kernel result.
