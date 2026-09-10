@@ -1236,3 +1236,31 @@ Agent-spec 1.4.0 lifecycle still attempts Cargo selectors for Node contracts eve
 with `--layers lint,boundary`; retain its Skip/non-passing result and run exact
 Vitest plus Node binding checks separately. Do not rename or fabricate Rust tests
 to turn those skips into parity evidence.
+
+
+Outbound custody (2026-09-10, ADR-037): custody.sqlite3 schema 2 remains independent
+from domain.sqlite3. Managed host activation cannot adopt a fixture binding, and
+fixture receive cannot write a managed one. Pin canonical side/fleet/registration
+identity once; machine generation rotates separately. Preserve the stable UUID
+consumer, full Matrix/request payload, original registration receipt and machine
+origin. Retired uncertain leases are not accepted ACKs. Current scope and exact
+poll/lease tickets prevent late responses from mutating replacement state.
+Advance the supplied host clock by monotonic elapsed time at writer execution;
+arrival-time authorization cannot survive a delayed queue. Round elapsed
+milliseconds upward and reject clock overflow. Controlled queued Start/Complete
+tests cover expiry while the writer is paused.
+
+Transport payload canonicalization accepts finite fractions and every opaque JSON
+key; it does not weaken signed authority or execution-payload encoders. Start is
+one-shot; started timeouts, restart and explicit uncertainty require inspection
+against the domain/adapter owner's receipt. Completed payloads compact while
+content/result tombstones remain bounded and replayable. Capacity rejects new
+identities rather than forgetting arbitrary IDs.
+
+Freeze publications before I/O and reuse exact bytes/sequence after uncertainty;
+never rewrite observedAt on resend. Rotation fences old publications and probes.
+Probe receipts require equal completed work-probe results under the current
+machine generation, but that is not authenticated Matrix proof. Retained Matrix
+transactions can contain old probe events; the future authenticated adapter must
+suppress those events' connection-proof effect while retaining all stored bytes.
+No native network collector or domain admission shortcut exists in this slice.
