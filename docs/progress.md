@@ -3172,3 +3172,25 @@ cleanup must pass there. Kernel/user/cgroup namespace and delegation absence
 fail qualification rather than becoming skipped proof. Root fixture cleanup
 after simultaneous host/guardian loss does not upgrade the runtime's explicit
 Unsupported full POSIX crash-containment guarantee. Live services remain unchanged.
+
+
+### 2026-09-10 — Matrix room fixture preserves collector diagnostics
+
+Linux CI431b2ec failed two room tests while the scripted peer awaited a request.
+Both unchanged tests pass locally. The saved Elapsed message cannot determine
+whether collection was still performing SDK work or had already returned an
+error. The fixture's three-second request wait was shorter than the ten-second
+SDK bootstrap/mutation budget between requests. Its wait now derives from SDK
+plus HTTP budgets. The two affected scripts race collector completion and report
+an early error directly, instead of concealing it with a later peer timeout.
+Production request, SDK and cancellation deadlines are unchanged.
+
+The complete transport integration target passes nine tests, including a real
+scripted request separated by a controlled 3.1-second SDK-sized interval and an
+actual wrong-account whoami refusal that must surface Identity immediately.
+Scoped rustfmt/diff and Clippy pass; ADR-047 parse/lint and the full lifecycle
+pass all seven scenarios plus the explicit four-path boundary (8/8), with no
+fail/skip/uncertain. Evidence is recorded in matrix-room-fixture-* under the
+2026-09-10 migration cache. Fresh Linux execution remains an integration check. The first local new-test run caught a double-slash fixture
+URL and was corrected before the final nine-test run. Concurrent ADR-054 intake
+work remains uncommitted and is excluded from this fixture commit.
