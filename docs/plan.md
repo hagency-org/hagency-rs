@@ -82,3 +82,8 @@ in a clean worktree. Branch `feat/rust-migration`; baseline `5dbef22`.
    in isolated parallel worktrees; no operational cutover is enabled.
 5. Continue M3–M9 in the migration plan; keep production deployments independent
    until every cutover gate is met. A foundation build is not full migration parity.
+
+6. M6 progress policy/coalescing proof is now isolated in `hagency-progress`
+   (ADR052): fixed redacted summaries, exact JS policy/CLI vectors and bounded
+   host-run receipts. Runtime attachment, persistent uncertain-attempt recovery,
+   editable Matrix status and route/crypto/delivery qualification remain open.

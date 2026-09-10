@@ -1548,3 +1548,18 @@ proxy isolation child (242 printed passes), 159 bound selectors, and 8/8 Matrix
 lifecycle checks. The preceding 911f1f5 Native CI passed Linux/macOS/Windows
 (run34522180950) and Node CI passed (34522180924). Do not confuse that CI
 qualification with the newly integrated Matrix collector until its own run ends.
+
+Native progress policy (2026-09-10, ADR052): `hagency-progress` owns only a pure
+filter and one bounded in-memory run projection. RunId/attempt/delivery types are
+host-created, not deserialized runtime authority. Exact input receipts, tool
+exclusion, deduplicated failures and lifetime totals prevent misleading summaries.
+Unknown progress acceptance blocks another claim; accepted progress does not
+prove an answer was delivered. Finish uses optional exact host inspection count
+and proof category and never mutates canonical tasks. There is no global anchor,
+reset/import, hook or Matrix integration. Replay/run identity loss needs a future
+persistent host lifecycle, not recreation of the old RunId. The JS oracle keeps
+known legacy corrections separate from unchanged cases.
+ACP initial status is current state, so completed/failed initial notices matter.
+Pending calls are explicit pending/unresolved attempts and never completed work;
+a later completion remains publishable even after a pending notice was accepted.
+Hooks provide reported PostToolUse activity only, not independent success proof.
