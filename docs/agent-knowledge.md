@@ -1761,3 +1761,6 @@ requires Uncertain; receipt loss must never fabricate permission to resend.
   with a 30 s/original-cap deadline. Ownerless restart and incomplete macOS cleanup
   keep content unsendable. Native MCP catalog has 20 tools; generated task helper
   enables only get_task/update_task_execution/transition_task/complete_task_with_reply.
+- Owned completion publication carries the original operation's monotonic deadline
+  through the writer queue/DB lock. The persisted finish/cap deadline cannot extend
+  it; expiry before writer eligibility preserves held content and leases.

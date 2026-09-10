@@ -3627,3 +3627,11 @@ Native and Windows GNU cross-target all-target Clippy pass with warnings denied;
 fmt/diff checks pass. Agent-spec 1.4 package-scoped lifecycles pass all 8 store
 scenarios and 3 native integration scenarios plus both boundaries, quality 100%,
 with zero fail/skip/uncertain. Cross-compilation is not Windows runtime evidence.
+
+ADR-060 review closure: pass the original operation Instant into queued publication
+and check it together with cancellation after writer queue/DB lock acquisition.
+The new actual queued-expiry test preserves held body/lease even when the separate
+persisted completion deadline is later. Three completion worker tests and five
+actual helper/MCP tests pass, as does native all-target Clippy. Documentation now
+distinguishes decoded body32KiB, native MCP/client encoded32KiB, and direct private
+HTTP encoded64KiB limits; no handler or permission limit was relaxed.
