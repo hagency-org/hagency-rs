@@ -1743,3 +1743,11 @@ explicitly not namespace qualification. Actual nested cases must still return
 native78/exact initial-namespace diagnostic. Never accept126, skip a missing
 namespace capability, chmod checkout ancestors or run privileged qualification
 locally. Only the hosted disposable VM may establish the final kernel result.
+
+### Native send checkpoints (2026-09-10)
+
+`preview_final_reply` is a private Claimed-route read, not send permission.
+`validate_final_reply_send` rechecks only the current Sending claim before host IO.
+A positive authenticated delivery journal may reconcile Sending with its exact fence
+and immutable observation even if the sender lost the claim secret. NotSent still
+requires Uncertain; receipt loss must never fabricate permission to resend.
