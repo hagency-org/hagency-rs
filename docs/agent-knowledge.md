@@ -1161,3 +1161,16 @@ Drain buffered reports before treating EOF as missing output; never reinterpret
 EINVAL as successful cleanup. The Unix unit test name shares the existing
 native_guardian_early_exit selector, which also runs real Windows Job Object
 early-exit coverage without inventing a Windows Unix-socket test.
+
+
+Native Codex protocol foundation (2026-09-10): `hagency-runtime` is IO-free and
+not linked into the server. Codex 0.153.4 generated envelope schemas and reusable
+wire vectors are recorded under its tests; see ADR-032. JSONL is bounded to 1 MiB,
+64 value levels and a 10-second absolute partial-line lifetime. IDs retain signed
+integer/string distinctions, initialize gates ordinary requests, and unknown or
+duplicate response IDs fence the whole connection. Server request tombstones are
+never evicted; only explicit unsupported-handler errors are currently available.
+Interrupt ACK, turn notification, child cleanup and canonical completion remain
+separate. The future adapter must supply ordered bounded IO, real stdin ACK,
+current thread/turn/item authority, applied owner decisions and guardian custody.
+A clean protocol EOF is not a clean dispatch outcome. Native execution stays off.
