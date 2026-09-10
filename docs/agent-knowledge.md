@@ -1647,3 +1647,11 @@ ACP initial status is current state, so completed/failed initial notices matter.
 Pending calls are explicit pending/unresolved attempts and never completed work;
 a later completion remains publishable even after a pending notice was accepted.
 Hooks provide reported PostToolUse activity only, not independent success proof.
+
+Guardian CLI fixture (2026-09-10): test native `--version` through the owned
+piped guardian/Job path with exact bounded stdout/stderr and unchanged five-second
+LeaderExited/scope observation. Keep fresh Unicode state initialization in the
+separate crash/restart fixture. A missing report during database initialization
+is not sufficient to attribute failure to guardian identity or to call it a
+scheduling flake; the historical f4cdead timeout remains undiagnosed. The fixture
+split changes no production timing or custody guarantees.
