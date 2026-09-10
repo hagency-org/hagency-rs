@@ -3694,3 +3694,22 @@ owned generated target is cleaned; source and all original logs are preserved.
 - Added host-only claimed preview and current Sending validation, so the native Matrix sender can match its private transport account before send-start and recheck exact current scope before IO. Neither method performs network IO or changes reply state.
 - A journaled exact Delivered observation can now reconcile Sending directly after sender receipt/secret loss. NotSent remains Uncertain-only; immutable body/route, send fence and durable inspection digest still determine acceptance and replay. No runner endpoints or native schema changes.
 - Focused reply repository suite covers wrong secrets/fences/IDs, expiry, null-root DM promotion, substituted delivery fields, NotSent refusal and exact positive replay. All 16 focused reply tests and Store Clippy passed. The scoped agent-spec 1.4 lifecycle passed 3/3 with no failed/skipped/uncertain scenarios using the store package as its code root; ADR059 owns actual Matrix sender consumption separately.
+
+## 2026-09-10 — Bounded shutdown phase diagnostics
+
+- Preserved the original Windows 79b036c MCP/runner teardown failures. Source
+  inspection cannot assign them to queueing, SQLite destruction or scheduling.
+  Added optional per-job fixed atomic timestamps and an original-verdict snapshot;
+  no deadline, retry, Drop-before-ack, ordinary shutdown or authority change.
+- Four focused selectors passed: actual normal ownership release, enqueue versus
+  queued reply timeout, controlled Drop/ack phase pauses, and independently
+  published bounded snapshots. The initial private tests ran in 4.22 seconds and
+  actual repository success fixture in 0.13 seconds. Added explicit zero-time and
+  partial-order checks; root review corrected a test race where a second shutdown
+  can observe either enqueue-closed or reply-closed after the first acknowledgement.
+- MCP/runner fixture shutdown still fails on the original error and prints only
+  that error plus the static snapshot. Success remains silent. Focused Store
+  Clippy and scoped agent-spec lifecycle pass; the lifecycle includes four bound
+  behaviors plus boundary with no failures, skips or uncertainty. Validation logs
+  are external under the shutdown prefix. No full workspace rebuild was run;
+  affected MCP/runner suites and Windows qualification belong to integration.
