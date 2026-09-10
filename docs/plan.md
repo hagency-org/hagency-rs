@@ -91,5 +91,8 @@ in a clean worktree. Branch `feat/rust-migration`; baseline `5dbef22`.
 
 6. M6 progress policy/coalescing proof is now isolated in `hagency-progress`
    (ADR052): fixed redacted summaries, exact JS policy/CLI vectors and bounded
-   host-run receipts. Runtime attachment, persistent uncertain-attempt recovery,
-   editable Matrix status and route/crypto/delivery qualification remain open.
+   host-run receipts. ADR056 now attaches redacted, exact-instance Codex tool
+   evidence through `hagency-progress-runtime`, including native pipe cancellation
+   tests. Current domain/owned-worker binding, persistent uncertain-attempt
+   recovery, editable Matrix status and route/crypto/delivery qualification
+   remain open.

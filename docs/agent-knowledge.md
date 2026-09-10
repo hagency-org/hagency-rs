@@ -1647,3 +1647,18 @@ ACP initial status is current state, so completed/failed initial notices matter.
 Pending calls are explicit pending/unresolved attempts and never completed work;
 a later completion remains publishable even after a pending notice was accepted.
 Hooks provide reported PostToolUse activity only, not independent success proof.
+
+
+Native progress attachment (2026-09-10, ADR056): construct only from a Running
+SessionDriver/OwnedSession before consuming updates. Opaque receipt sources bind
+exact driver allocation identity plus upstream thread/turn and ordered sequence;
+identical text IDs on another connection cannot impersonate them. Command success
+needs terminal lifecycle, completed status and integer int32 exitCode0. Missing
+or inconsistent result evidence remains unresolved, and contradicting final tool
+snapshots retire only this optional projection. File completion remains upstream
+observation, not filesystem proof. Unsupported tools expose only a fixed gated
+count; raw payloads never enter summary/Debug/serialization. Cancellation borrows
+and retains the original runtime/process owner, retires projection and preserves
+pending local submission uncertainty. No host execution/domain/Matrix integration
+or canonical Done/delivery inference exists; same-run reconstruction after state
+loss is forbidden until a persistent host lifecycle exists.
