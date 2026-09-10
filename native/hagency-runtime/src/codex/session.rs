@@ -1,7 +1,9 @@
 //! Typed upstream observations for one host-owned turn, never domain authority.
 mod driver;
 mod state;
+mod task_mcp;
 pub use driver::SessionDriver;
+pub use task_mcp::{TASK_MCP_ENV, TASK_MCP_TOOLS, TaskMcp};
 
 use super::transport;
 use serde_json::{Value, json};
@@ -111,6 +113,7 @@ pub struct Settings {
     model: String,
     effort: String,
     read_only: bool,
+    task_mcp: Option<TaskMcp>,
 }
 impl Settings {
     pub fn new(cwd: PathBuf, model: String, effort: String) -> Result<Self, Error> {
@@ -138,6 +141,7 @@ impl Settings {
             model,
             effort,
             read_only: false,
+            task_mcp: None,
         })
     }
     pub fn read_only(mut self) -> Self {
@@ -173,6 +177,10 @@ impl Settings {
     fn thread_request(&self, resume: Option<&str>) -> Value {
         let mut params = json!({ "cwd": self.cwd, "model": self.model, "sandbox": self.mode(),
             "approvalPolicy": "on-request", "approvalsReviewer": "user" });
+        if let Some(helper) = &self.task_mcp {
+            params["config"] = helper.config(&self.cwd);
+            params["developerInstructions"] = helper.guidance().into();
+        }
         if let Some(id) = resume {
             params["threadId"] = id.into();
             params["excludeTurns"] = true.into();
