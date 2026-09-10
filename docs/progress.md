@@ -3407,3 +3407,33 @@ targets pass 22 tests. Logs are retained under `combined-owned-progress-metering
 `integrated-matrix-fixture-*`. This local result does not replace actual Linux,
 Windows or cgroup qualification for the new commit. The next CI run must provide
 that evidence. No live service is enabled or replaced.
+
+## 2026-09-10 — Bounded native workspace file snapshots
+
+ADR-058 adds `hagency-files`: host-opened directory authority, strict portable
+relative selections, retained component/file handles, immutable bounded byte
+copies and SHA256, plus shared snapshot-count custody through Drop. Real fixtures
+cover Unicode, hardlinks, symlinks/FIFO, root/ancestor/leaf replacement, mutation
+during copying, size limits and concurrent capacity. The Windows fixture creates
+actual symlinks and a junction and refuses unsupported prerequisites visibly.
+CONIN$/CONOUT$ and other DOS aliases are rejected portably. A same-size overwrite
+with restored modification time documents why copied bytes are not an atomic
+source-version guarantee.
+
+All 11 focused tests pass on local macOS. Clippy passes for native macOS and
+cross-target Windows GNU/Linux GNU. The first local fixture compilation exposed
+an unavailable Apple `rustix::mkfifoat`; the test now creates its real FIFO using
+a bounded fixed command. No production command API was added. All 412 pre-existing
+locked package identities are unchanged; 12 additions include the new crate and
+pinned cap-std/cap-fs-ext/cap-primitives 4.0.3 dependency chain. Logs are under the
+operator cache's `file-snapshot-*` prefix. Actual Windows/Linux execution still
+requires CI; this slice does not claim protected physical workspace provisioning,
+atomic source consistency, persistent staging, live service wiring or Matrix media.
+
+Task lifecycle passes 6/6: five exact native selectors and all 11 explicit changed
+paths, with zero failures, skips or uncertain results. It runs against the new
+crate directory to avoid rebuilding unrelated workspace packages. Full workspace
+binding enumeration hit host disk exhaustion; its failure log is retained, and a
+subsequent reduced-artifact attempt was stopped for coordinated cleanup. Only this
+worktree's generated target was cleaned. Combined binding verification is pending
+on the root integration target; neither interrupted run counts as passing.
