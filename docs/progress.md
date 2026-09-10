@@ -3590,3 +3590,25 @@ The first lifecycle attempt exited during local disk exhaustion with no usable
 result; only generated targets from completed worktrees were cleaned, and the
 successful rerun is separately recorded. No source/log deletion, full binding
 inventory, local privileged invocation or deployment/push was performed.
+
+### 2026-09-10 — Legacy supervisor fixture port custody and diagnostics
+
+The original 88534b0 Node failure passed health assertions, then timed out waiting
+for exactly four event rows. Its log omitted rows/ports/restarts, so the cause
+cannot be assigned retrospectively. Unmodified local supervisor tests pass 8/8.
+A controlled real-child same-port run reports healthy at 236 ms but yields only
+three ready events, six dashboard restarts and EADDRINUSE after 3237 ms. This proves
+the fixture's independently released ephemeral ports were allowed to collide.
+
+The isolated test-only fix keeps both listeners reserved until selection ends
+and closes both in finally, including callback failure. Four added regressions
+exercise actual bind conflicts/release, real extra stopped events remaining a
+failure and bounded redaction. Startup still requires exactly four rows within
+3000 ms. Production service code, lease duration, probes and deployments remain
+unchanged. The expanded focused file passes 12/12 in 4.12 s; preserved logs use the
+external cache's node-supervisor prefix. Parse/lint quality is 100%, all five
+scenario bindings exist, and syntax/diff checks pass. Native lifecycle remains
+non-passing: despite its requested lint/boundary layers it launched Cargo for a
+Node selector and was stopped; the Node-directory attempt then reported missing
+Cargo execution. Neither is a passing boundary or behavioral result. Only the
+owned generated target is cleaned; source and all original logs are preserved.
