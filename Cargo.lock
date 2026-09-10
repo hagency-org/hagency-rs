@@ -997,6 +997,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hagency-matrix"
+version = "0.1.0"
+dependencies = [
+ "hagency-core",
+ "hagency-store",
+ "http",
+ "matrix-sdk-base",
+ "matrix-sdk-common",
+ "matrix-sdk-crypto",
+ "matrix-sdk-sqlite",
+ "matrix-sdk-store-encryption",
+ "reqwest",
+ "ruma",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+]
+
+[[package]]
 name = "hagency-palpo"
 version = "0.1.0"
 dependencies = [
@@ -1619,6 +1643,7 @@ dependencies = [
  "futures-util",
  "growable-bloom-filter",
  "matrix-sdk-common",
+ "matrix-sdk-crypto",
  "matrix-sdk-store-encryption",
  "regex",
  "ruma",

@@ -1437,3 +1437,33 @@ Old development claims lack epoch/send-start proof and migrate conservatively;
 never adopt current task or room state for old output. The actual Matrix adapter
 still needs current membership/encryption recipient and cancellation coordination
 before IO; durable intent state alone cannot retract an accepted event.
+
+
+Native Matrix observation collector (2026-09-10, ADR-047): `hagency-matrix`
+uses pinned BaseClient 0.18 and bounded HTTPS, not a high-level client send loop.
+SDK high-level HTTP collection has no application body cap; SDK custom-value
+storage also does not encrypt caller bytes. The new sync journal explicitly
+uses StoreCipher and a wrapped private cipher key. It preserves complete pending
+JSON, including fractional values, before SDK mutation; pending restart is
+unknown and requires inspection. Never treat SDK same-token skipping as a
+content receipt. Current limits deliberately stop at 16 host-pinned rooms,
+64 completed sync receipts, 1 MiB responses and 1000 events; retention and room-set
+changes need a separate lifecycle, not silent truncation or key reset.
+
+Schema15 adds exact negative Matrix transport observations. Device/registration
+identity is independent of Palpo machine generation. Failed collection fences
+both the captured prior incarnation and an attempted positive incarnation whose
+commit response might be lost, never an unrelated newer owner. Unsafe/full-state
+failures also invalidate the captured shared room generation so other Agents'
+old room routes retire. Same-generation positive replay cannot undo a negative.
+The existing notice/final uncertain-send custody is preserved; own Agent grants
+retire without revoking unrelated Agents' owner approval rooms. Negative storage
+failure is explicitly unknown and requires the eventual live host to stop use.
+
+Only whoami with the exact full MXID and present device ID permits SDK bootstrap.
+This does not prove remote published keys or cross-signing. The collector exposes
+no event admission, message send, approval verdict or public SDK handle. SDK
+ownership stays locked through accepted commands, store close and runtime drop,
+even after a caller timeout. Successful close is acknowledged after release;
+close errors stay unknown. Live encrypted send, key publication/identity matching,
+event provenance and recovery of pending SDK work remain unimplemented gates.
