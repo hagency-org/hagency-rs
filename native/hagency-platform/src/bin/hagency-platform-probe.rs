@@ -115,6 +115,7 @@ fn main() -> io::Result<()> {
                     return Err(io::Error::other("invalid fixture guardian"));
                 }
                 rustix::process::kill_process(parent, rustix::process::Signal::KILL)?;
+                fs::write(marker.with_extension("guardian-killed"), b"signal injected")?;
             }
             std::thread::sleep(Duration::from_secs(8));
             Ok(())
