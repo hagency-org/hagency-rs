@@ -3048,3 +3048,21 @@ Worker running status is neither catalog acceptance nor a completed consumer.
   upstream_request_id stays a string; additive upstream_rpc_id preserves type.
   Native40-hex request IDs still require explicit client qualification. Never
   project the packet into the console or invent an Agent task/route for the bot.
+
+### Original private approval SDK sender (ADR112)
+
+Keep the approval SDK purpose separate from Agent transport/session authority.
+Explicit fresh enrollment and the same protected owner precede private card sends.
+The original Arc<Card>, owner cutoff and retained job survive caller loss; opaque
+metadata alone never grants transmission. Every original key-share/room write
+rechecks private snapshots, signed keys and the original domain card after queued
+custody. New card, enrollment and intake mutations cannot step over unknown work.
+Historical acceptance stays network-free; borrowed close retains its first result
+and cannot treat an owner removed by failed shutdown as successful later closure.
+
+A proven no-attempt SDK Read permits a known pre-Start card refusal without
+permanently blocking other cards; mark the job blocking before submitting Start.
+Never clear an original unknown mutation through historical inspection. The64
+non-evicting persisted receipts are an explicit development limit that restart
+does not reclaim. Card48KiB and encrypted-wire60KiB bounds differ because of
+encryption expansion; refusal must not truncate content or raise either bound.

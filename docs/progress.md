@@ -6772,3 +6772,33 @@ passes5/5 (four actual behavioral selectors plus the exact11-path boundary);
 zero-match Cargo targets are excluded. Tests used only isolated local stores.
 The initial four focused tests are retained separately from the final27-test
 qualification; neither is a Matrix send or client-interoperability claim.
+
+### ADR112 original approval SDK enrollment and private-card delivery
+
+The parent approved the exact28-path proposal before implementation. Clean base
+c527314 contains e5fd184 service plus card prerequisite c274d11; append-only docs
+from both prerequisites were preserved. The Task Contract parsed and linted
+before source edits. The first library check caught two missing matrix_room server
+arguments; that original log remains retained. After correcting those callsites,
+the library check passed. The first actual crypto run returned Cancelled after a
+40m13s cold build; this original failure remains separate. The first full Matrix
+package had123 pass/one fixture failure: cancellation before HTTP handoff could
+correctly prevent SDK Apply. The fixture now waits for the actual interrupted
+Apply result before cancellation. No production deadline or retry changed.
+The corrected full Matrix package passes145/145:124 library (including9 new),
+6/6/9 integration; empty doc targets are excluded. Original ordinary enrollment,
+outgoing crypto and approval intake remain covered. Clippy first reported four
+collapsible-if cases and duplicate private helper inclusion; after equivalent
+conditional formatting and one test-only helper annotation, all-target
+warnings-denied Clippy and fmt/diff checks pass. Exact boundary is28 paths.
+Strict lifecycle passes7/7 (exact28-path boundary plus six selectors executing
+nine actual tests;96 empty targets per selector excluded). The final formatted
+source also passes the complete145-test Matrix package. Requirement-trace warnings
+for other mapped project scenarios remain explicit; they do not qualify the
+client, executable or full approval workflow. Original failure logs and final
+source/evidence hashes are retained in the task cache.
+The independent recipient fixture derives state only from real uploads/claims,
+with original Agent constants preserved as defaults. Synthetic receipt capacity,
+injected shutdown-result failure and actual recipient decryption remain distinct
+claims. Persistent64-record capacity does not free on restart; service wiring,
+client qualification and ongoing identity/key management remain separate.
