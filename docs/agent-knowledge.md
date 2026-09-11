@@ -2292,3 +2292,17 @@ Held-stage fixtures run actual SDK/SQLite work, drop callers, verify retained
 lock/committed cursor, and retain original Identity plus failed domain fencing
 while returning the same OutcomeUnknown. This instrumentation changes no
 production/fixture deadline, retry policy, finite queue or authority boundary.
+
+
+- **Original approval cleanup evidence, 2026-09-10:** ADR099 keeps the original
+  Windows 1da8f1b failures separate from later diagnostics. Four direct approval
+  fixture SDK opens and one direct close timed out; the sixth failure's domain
+  snapshot reached repository drop after prompt worker pickup but did not
+  observe completion by the original reply deadline. This does not establish a
+  checkpoint, filesystem or scheduling cause. Approval fixture traces now follow
+  the same original spawned observe/close tasks and direct SDK operations. Only
+  the existing optional shutdown observer adds fixed connection/ownership-file
+  drop timestamps; custody-store field markers remain absent and ordinary
+  shutdown allocates no probe. Explicit observed field destruction preserves
+  connection-before-lock release including unwind cleanup, adds no query or
+  wait, and cannot turn a timed-out result into successful closure.
