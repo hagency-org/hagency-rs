@@ -5037,3 +5037,29 @@ Native all-target Matrix Clippy with warnings denied, rustfmt and diff checks
 pass. Focused and lifecycle logs are retained externally with followup names;
 there was no repeat full Matrix run or native Windows execution in this followup.
 The original six Windows failures remain failed with unresolved inner causes.
+
+## 2026-09-10 — Retain enqueued Matrix invalidations (ADR091)
+
+The ADR089 read-only review traced a separate domain custody defect: call's
+receiver-closed guard discarded an already queued negative Matrix observation
+when its caller dropped. Created a clean706172d worktree and parsed/linted the
+six-path contract before implementation. Only transport and room invalidations
+now select a private retained execution mode; ordinary calls keep their existing
+cancellation guard, queue and byte permits, deadlines and transaction semantics.
+
+Five focused actual-writer tests pass. Two agents share a real fixture room:
+transport retirement affects the original agent's route, while room retirement
+removes both routes. Delayed negatives preserve actual newer incarnations.
+Dropped positive observations and canonical task creation remain unexecuted.
+Both invalidation forms time out with the original OutcomeUnknown, then a
+separate query observes their queued mutation after the held writer is released.
+No live HTTP provenance or native Windows result is claimed. Strict lifecycle,
+full store regression and Clippy verification follow below.
+
+Final ADR091 validation: strict agent-spec1.4 lifecycle passes6/6 (five exact
+selectors plus all six declared boundaries), with zero failed/skipped/uncertain
+or pending-review verdicts. One full store all-target run passes162/162 across18
+test binaries, zero ignored. Native all-target Clippy with warnings denied,
+rustfmt and diff checks pass. Evidence and handoff are external under
+matrix-invalidation-custody-* and adr091-matrix-invalidation-custody-handoff.md.
+No hosted Windows run or original CI outcome was replaced by these local checks.

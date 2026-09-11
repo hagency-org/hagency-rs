@@ -2210,3 +2210,12 @@ HTTP script: otherwise an early Identity/SDK/domain error could remain hidden
 behind the next request wait. The unobserved helper retains its original join
 behavior. A real wrong-device response verifies the original Identity panic and
 fixed latest phase, without changing HTTP waits or exposing payload values.
+
+ADR091 retains only already enqueued Matrix transport/room invalidations after
+their result receiver drops. Ordinary domain calls still skip execution when
+abandoned before pickup. Exact original expected identity/generation and the
+existing retirement transaction remain authoritative; a newer incarnation is
+protected. The original finite queue/bytes and reply timeout are unchanged.
+Timeout still means OutcomeUnknown even if a separate later query sees the
+original mutation. Pre-enqueue lifetime and failed admission remain the host's
+responsibility; this does not make failed persistence successful.
