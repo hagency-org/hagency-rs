@@ -1,9 +1,9 @@
-use super::{Failure, StatusHandle, config::Prepared, workspace::WorkspaceAccess};
+use super::{Failure, Shared, StatusHandle, config::Prepared, workspace::WorkspaceAccess};
 use hagency_execution::{Operation, Report};
 use hagency_matrix::{CancellationToken, Collector};
 use hagency_store::DomainStore;
 use std::{
-    sync::mpsc::{self, Receiver, SyncSender, TrySendError},
+    sync::mpsc::{self, SyncSender, TrySendError},
     thread::JoinHandle,
     time::Duration,
 };
@@ -17,11 +17,13 @@ pub(super) struct Driver {
     control: SyncSender<Command>,
     thread: Option<JoinHandle<()>>,
     pending_close: Option<oneshot::Receiver<Result<(), Failure>>>,
+    close_unknown: bool,
 }
 impl Driver {
     pub fn start(
         prepared: Prepared,
-        domain: DomainStore,
+        shared: Shared,
+        files: Option<crate::file_service::FileHandle>,
         status: StatusHandle,
     ) -> Result<Self, Failure> {
         let (control, commands) = mpsc::sync_channel(1);
@@ -34,15 +36,11 @@ impl Driver {
         let thread = std::thread::Builder::new()
             .name("hagency-development-driver".into())
             .spawn(move || {
-                let workspace = WorkspaceAccess::new();
-                let collector = match Collector::new(prepared.matrix, domain.clone()) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        status.fail(Failure::Config);
-                        close_failed(commands);
-                        return;
-                    }
-                };
+                let Shared {
+                    domain,
+                    collector,
+                    workspace,
+                } = shared;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let future = run(Attempt {
                         domain: &domain,
@@ -51,6 +49,7 @@ impl Driver {
                         limits: prepared.limits,
                         collector: &collector,
                         workspace: &workspace,
+                        files: files.as_ref(),
                         cancel: &signal,
                         status: &status,
                         #[cfg(test)]
@@ -78,9 +77,7 @@ impl Driver {
                     {
                         Err(Failure::OutcomeUnknown)
                     } else {
-                        runtime
-                            .block_on(collector.close())
-                            .map_err(|_| Failure::OutcomeUnknown)
+                        Ok(()) // Shared Collector closes only after the file owner too.
                     };
                     if outcome.is_ok() {
                         drop(report.take());
@@ -101,6 +98,7 @@ impl Driver {
             control,
             thread: Some(thread),
             pending_close: None,
+            close_unknown: false,
         })
     }
     pub fn cancel(&self) {
@@ -109,6 +107,9 @@ impl Driver {
     /// Non-consuming close. Unknown keeps both the worker and pending receipt.
     pub async fn close(&mut self) -> Result<(), Failure> {
         self.cancel();
+        if self.close_unknown {
+            return Err(Failure::OutcomeUnknown);
+        }
         if self.thread.is_none() {
             return Ok(());
         }
@@ -123,14 +124,25 @@ impl Driver {
         let pending = self.pending_close.as_mut().ok_or(Failure::Worker)?;
         let result = match tokio::time::timeout(Duration::from_secs(2), pending).await {
             Ok(Ok(result)) => result,
-            _ => return Err(Failure::OutcomeUnknown),
+            Ok(Err(_)) => {
+                self.pending_close = None;
+                self.close_unknown = true;
+                return Err(Failure::OutcomeUnknown);
+            }
+            Err(_) => return Err(Failure::OutcomeUnknown),
         };
         self.pending_close = None;
+        if result.is_err() {
+            self.close_unknown = true;
+        }
         result?;
         if let Some(worker) = self.thread.take() {
             // ACK precedes return by only fixed local operations. Never joins
             // an executing model/SDK owner from an HTTP request handler.
-            worker.join().map_err(|_| Failure::Worker)?;
+            if worker.join().is_err() {
+                self.close_unknown = true;
+                return Err(Failure::OutcomeUnknown);
+            }
         }
         Ok(())
     }
@@ -138,11 +150,6 @@ impl Driver {
 impl Drop for Driver {
     fn drop(&mut self) {
         self.cancel();
-    }
-}
-fn close_failed(commands: Receiver<Command>) {
-    if let Ok(Command::Close(reply)) = commands.recv() {
-        let _ = reply.send(Ok(()));
     }
 }
 fn stopped(report: &mut Report) -> bool {
@@ -156,6 +163,7 @@ struct Attempt<'a> {
     limits: hagency_execution::Limits,
     collector: &'a Collector,
     workspace: &'a WorkspaceAccess,
+    files: Option<&'a crate::file_service::FileHandle>,
     cancel: &'a CancellationToken,
     status: &'a StatusHandle,
     #[cfg(test)]
@@ -169,19 +177,41 @@ async fn run(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failure> {
         limits,
         collector,
         workspace,
+        files,
         cancel,
         status,
         #[cfg(test)]
         discard_claim_reply,
     } = input;
     status.phase("refreshing");
-    collector.collect(cancel).await.map_err(|e| {
+    let refresh = collector.collect(cancel).await;
+    // Fresh collect initializes the SDK. Failed refresh may only recover an old
+    // protected receipt; it can never turn historical success into readiness.
+    if files.is_some() {
+        let resumed = collector.resume_outgoing_custody(cancel).await;
+        if refresh.is_ok() {
+            let result = resumed.map_err(|_| Failure::OutcomeUnknown)?;
+            if result.state == hagency_matrix::OutgoingState::Uncertain {
+                return Err(Failure::OutcomeUnknown);
+            }
+        }
+    }
+    refresh.map_err(|e| {
         if matches!(e, hagency_matrix::Error::OutcomeUnknown) {
             Failure::OutcomeUnknown
         } else {
             Failure::Refresh
         }
     })?;
+    if let Some(files) = files {
+        files.initialize().await.map_err(|e| {
+            if e == crate::file_service::FileError::Unknown {
+                Failure::OutcomeUnknown
+            } else {
+                Failure::Startup
+            }
+        })?;
+    }
     if cancel.is_cancelled() {
         return Err(Failure::Cancelled);
     }
@@ -256,8 +286,7 @@ async fn run(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failure> {
 }
 
 #[cfg(test)]
-#[path = "../../../hagency-matrix/tests/common/mod.rs"]
-mod test_common;
+use crate::file_service::test_common;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,12 +367,14 @@ mod tests {
                 BTreeMap::from([("work".into(), root.canonicalize().unwrap())]),
             )
             .unwrap(),
-            matrix: f
-                .config(endpoint)
-                .with_root_pem(include_bytes!(
-                    "../../../hagency-matrix/tests/fixtures/ca.pem"
-                ))
-                .unwrap(),
+            matrix: Some(
+                f.config(endpoint)
+                    .with_root_pem(include_bytes!(
+                        "../../../hagency-matrix/tests/fixtures/ca.pem"
+                    ))
+                    .unwrap(),
+            ),
+            files: None,
             claim: OwnedClaimProfile::new(
                 transport,
                 vec![
@@ -373,7 +404,8 @@ mod tests {
         let mut prepared = fixture(&f, &fake.endpoint).await;
         prepared.discard_claim_reply = true;
         let status = StatusHandle::new(true);
-        let mut driver = Driver::start(prepared, f.store.clone(), status.clone()).unwrap();
+        let shared = Shared::new(prepared.matrix.take().unwrap(), f.store.clone()).unwrap();
+        let mut driver = Driver::start(prepared, shared.clone(), None, status.clone()).unwrap();
         test_common::success(&mut fake, "claim_loss").await;
         let until = tokio::time::Instant::now() + Duration::from_secs(5);
         while status.get().state != "outcome_unknown" {
@@ -414,6 +446,7 @@ mod tests {
             1
         );
         drop(inspect);
+        shared.collector.close().await.unwrap();
         test_common::shutdown_domain(&f.store, "bootstrap lost claim").await;
     }
     #[tokio::test]

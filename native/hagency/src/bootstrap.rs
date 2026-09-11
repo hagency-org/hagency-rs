@@ -1,8 +1,8 @@
 //! Explicit one-attempt development startup; no production scheduler or file tool.
 mod config;
 mod driver;
-mod workspace;
-use hagency_matrix::CancellationToken;
+pub(crate) mod workspace;
+use hagency_matrix::{CancellationToken, Collector};
 use hagency_store::{DomainRepository, DomainStore, Repository, Store, private};
 use salvo::prelude::*;
 use serde::Serialize;
@@ -120,6 +120,24 @@ impl StatusHandle {
         }
     }
 }
+/// One original account/writer/root owner shared only inside the application.
+#[derive(Clone)]
+pub(crate) struct Shared {
+    pub(crate) domain: DomainStore,
+    pub(crate) collector: Arc<Collector>,
+    pub(crate) workspace: workspace::WorkspaceAccess,
+}
+impl Shared {
+    fn new(matrix: hagency_matrix::HostConfig, domain: DomainStore) -> Result<Self, Failure> {
+        Ok(Self {
+            collector: Arc::new(
+                Collector::new(matrix, domain.clone()).map_err(|_| Failure::Config)?,
+            ),
+            domain,
+            workspace: workspace::WorkspaceAccess::new(),
+        })
+    }
+}
 pub struct Bootstrap {
     store: Store,
     domain: DomainStore,
@@ -127,6 +145,10 @@ pub struct Bootstrap {
     listen: SocketAddr,
     prepared: Option<config::Prepared>,
     driver: Option<driver::Driver>,
+    shared: Option<Shared>,
+    files: Option<crate::file_service::FileOwner>,
+    collector_close: Option<tokio::task::JoinHandle<Result<(), hagency_matrix::Error>>>,
+    collector_closed: Option<Result<(), Failure>>,
     status: StatusHandle,
     domain_closed: bool,
     store_closed: bool,
@@ -147,7 +169,7 @@ impl Bootstrap {
         let state = state.canonicalize().map_err(|_| Failure::Startup)?;
         let token =
             private::read_secret(&state.join("operator.token")).map_err(|_| Failure::Startup)?;
-        let prepared = if development {
+        let mut prepared = if development {
             Some(config::Prepared::load(&state, listen)?)
         } else {
             None
@@ -162,11 +184,25 @@ impl Bootstrap {
             queue_capacity,
         )
         .map_err(|_| Failure::Startup)?;
+        let shared = prepared
+            .as_mut()
+            .map(|p| Shared::new(p.matrix.take().ok_or(Failure::Config)?, domain.clone()))
+            .transpose()?;
+        let files = match (&shared, prepared.as_mut().and_then(|p| p.files.take())) {
+            (Some(shared), Some(setup)) => Some(
+                crate::file_service::FileOwner::start(shared.clone(), setup)
+                    .map_err(|_| Failure::Startup)?,
+            ),
+            _ => None,
+        };
         let status = StatusHandle::new(development);
-        let app = crate::App::new(store.clone(), &token, listen)
+        let mut app = crate::App::new(store.clone(), &token, listen)
             .map_err(|_| Failure::Startup)?
             .with_domain(domain.clone())
             .with_development(status.clone());
+        if let Some(files) = &files {
+            app = app.with_files(files.handle());
+        }
         Ok(Self {
             store,
             domain,
@@ -174,6 +210,10 @@ impl Bootstrap {
             listen,
             prepared,
             driver: None,
+            shared,
+            files,
+            collector_close: None,
+            collector_closed: None,
             status,
             domain_closed: false,
             store_closed: false,
@@ -187,8 +227,46 @@ impl Bootstrap {
     /// return an unknown final outcome. Neither wrapper presence nor timeout
     /// proves its repository remains open or has closed. Retain this Bootstrap.
     pub async fn close(&mut self) -> Result<(), Failure> {
+        if let Some(files) = &self.files {
+            files.quiesce();
+        }
+        if let Some(driver) = &self.driver {
+            driver.cancel();
+        }
+        if let Some(shared) = &self.shared {
+            shared.workspace.retire();
+        }
+        if let Some(files) = &mut self.files {
+            files.close().await.map_err(|_| Failure::OutcomeUnknown)?;
+        }
         if let Some(driver) = &mut self.driver {
             driver.close().await?;
+        }
+        if let Some(shared) = &self.shared {
+            if let Some(result) = self.collector_closed {
+                result?;
+            } else {
+                if self.collector_close.is_none() {
+                    let collector = shared.collector.clone();
+                    self.collector_close =
+                        Some(tokio::spawn(async move { collector.close().await }));
+                }
+                let result = match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    self.collector_close
+                        .as_mut()
+                        .ok_or(Failure::OutcomeUnknown)?,
+                )
+                .await
+                {
+                    Ok(Ok(Ok(()))) => Ok(()),
+                    Ok(_) => Err(Failure::OutcomeUnknown),
+                    Err(_) => return Err(Failure::OutcomeUnknown),
+                };
+                self.collector_close = None;
+                self.collector_closed = Some(result);
+                result?;
+            }
         }
         if !self.domain_closed {
             self.domain
@@ -221,7 +299,8 @@ impl Bootstrap {
         if let Some(prepared) = self.prepared.take() {
             self.driver = Some(driver::Driver::start(
                 prepared,
-                self.domain.clone(),
+                self.shared.clone().ok_or(Failure::Startup)?,
+                self.files.as_ref().map(|files| files.handle()),
                 self.status.clone(),
             )?);
         }
