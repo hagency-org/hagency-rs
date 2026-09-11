@@ -4909,3 +4909,26 @@ wording advisories; Node's Cargo-only lifecycle cannot verify these scenarios,
 so no native lifecycle success is claimed. Parent integration and fresh hosted
 Node execution remain separate gates. No live services, credentials, original
 checkout, merge or push changed.
+
+
+## 2026-09-10 — Exact staged-upload input association (ADR090)
+
+In clean97968d8 worktree, parsed/linted the eight-path contract before code.
+Added full private identity/fence association on the original UploadSend and
+a borrowed original namespace digest on actual RestoredEncrypted. Neither checks
+current permission or reconstructs a grant. Existing current validation, journal
+construction, durability evidence and sealed types remain unchanged.
+
+The actual domain regression passes with two same-fence uploads, a replacement
+fence, cancellation and independently valid unrelated work. The media fixture
+now compares the retained original namespace after source replacement and owner
+close alongside unchanged ciphertext/descriptor checks. Final cross-crate strict
+lifecycle and Clippy evidence is external under upload-input-*. No production
+service, schema or remote communication changed. ADR089 consumes these seams.
+
+Final ADR090 validation: all12 domain file-upload tests and all16 media-store
+tests pass, zero failures/ignored. Strict cross-crate lifecycle from the edited
+workspace root passes5/5 across all8 changed paths, zero failed/skipped/uncertain
+or pending-review. All-target Clippy for both affected crates passes with
+warnings denied; rustfmt/diff checks pass. Hosted Windows execution remains
+separate; no cross-compilation or new durability claim is made here.
