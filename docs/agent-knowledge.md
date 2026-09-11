@@ -1,5 +1,13 @@
 # Repository audit knowledge
 
+- **Custody shutdown observation, 2026-09-10:** Palpo uses Store/Repository,
+  separate from DomainStore. ADR082 reuses the fixed phase probe for its original
+  shutdown, retaining both two-second waits and Drop-before-ACK ownership. Only
+  publication-before-reopen fixture errors print the fixed snapshot. Missing
+  phases do not prove rollback or closure.25c01ee original Palpo13/13 passed;
+  later serial diagnostic12/13 failed at shutdown. Historical cause remains
+  unproven and these separate verdicts must be preserved.
+
 - **Native scoped receive bytes, 2026-09-10:** ADR076 joins exact current
   dispatch tickets, retained verified encrypted manifests and configured-origin
   HTTPS decryption. A final writer check fences revocation, null-root promotion,
