@@ -2488,3 +2488,25 @@ runtime outcome is an expected fault observation, never a delivery receipt.
   must be destroyed after close before another owner opens the original store.
   This is an actual lifetime barrier, not a longer timeout or a claim about the
   cause of a previously unobserved error.
+
+
+- **Original SQLite close entry, 2026-09-11:** ADR106 adds one fixed
+  sqlite_close_entered_us field to the existing original shutdown snapshot. The
+  safe CLOSE-only callback ignores all connection data and follows a scoped
+  thread-local Probe through a guard that cannot move across threads. The slot
+  borrow ends before publication; unavailable or nested slots stay unobserved.
+  Normal shutdown installs no hook and allocates no Probe. Connection then
+  ownership-file destruction and both original deadlines remain unchanged;
+  entry is not completion or an ACK. The finite snapshot ceiling is 224 bytes.
+  Twelve bound tests and the full eight-path boundary pass strict lifecycle.
+  Native and Windows GNU all-target store/Matrix Clippy pass. These checks do
+  not explain or replace the five original fed7557 Windows approval failures.
+
+- **Open SQLite dependency assessment, 2026-09-11:** The pinned
+  libsqlite3-sys 0.35.0 bundles SQLite 3.50.2. SQLite's documented WAL-reset
+  issue remains a separate dependency review item; no occurrence is established
+  by the original timeout evidence. ADR106 changes only rusqlite's empty trace
+  feature and performs no dependency upgrade. Exact original source/archive
+  hashes and the primary-source scope are retained in the external migration
+  cache under fed7557-pinned-dependency-source-hashes.json and
+  open-sqlite-wal-reset-dependency-item.json.
