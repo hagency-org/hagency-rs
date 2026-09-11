@@ -5979,3 +5979,15 @@ The first selector also matches the deadline selector, so its actual2-test outpu
 is preserved and not described as a separate unique scenario. Rustfmt and diff
 checks pass. This is not a completed incoming file workflow.
 Original Linux and Windows85427cb hosted failures remain separate open evidence.
+
+
+## 2026-09-11 — Preserve valid CTR byte equality
+
+The isolated CI closure retains original ADR104 Windows run34582323420's failed
+interoperability assertion: ciphertext0x11 can equal plaintext0x11 under CTR.
+The test now checks actual ciphertext hash, SDK/native round trips and independent
+key/IV metadata. A fixed public Node/OpenSSL equality vector passes through the
+actual codec and SDK and still rejects corruption. Production crypto is unchanged.
+The full media integration target passes5/5 locally; fmt and warnings-denied
+Clippy pass. Original FileService startup failures remain independently open.
+See knowledge/context/native-media-ctr-equality.md and the bounded task contract.

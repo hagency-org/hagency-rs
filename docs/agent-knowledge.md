@@ -2589,3 +2589,12 @@ codec and transfer/result pools. Sender declared size remains untrusted; bounded
 actual HTTP bytes and cryptographic verification still decide the result. The
 existing absolute SDK deadline covers queue, manifest lookup, GET and final check.
 Incoming serve/MCP/cache materialization and platform qualification remain open.
+
+
+- **CTR equality CI evidence, 2026-09-11:** original ADR104 Windows Cargo failed
+  because random one-byte ciphertext equaled plaintext. CTR may preserve bytes;
+  never require every nonempty ciphertext to differ from plaintext. Keep actual
+  ciphertext integrity, SDK compatibility and metadata freshness checks, plus the
+  fixed equality regression. This is a test defect, separate from original
+  Linux/Windows FileService startup failures; see
+  `knowledge/context/native-media-ctr-equality.md`.
