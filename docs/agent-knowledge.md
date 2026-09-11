@@ -2152,3 +2152,9 @@ line/end_line offsets changed, with every offset moving up one line. Regenerate
 only after confirming classifications/counts/gates are unchanged; the SSE installer
 assertion moves from7938 to7937. Initial full Node results and later corrected
 runs must remain distinct, including any unrelated subprocess timeout evidence.
+
+The framework detector's promisified Node execFile probes inherit current PATH;
+the backend/helper does not capture or replace PATH for the ACP probe fixture.
+A bounded external all-fake observation confirms exact fixture resolution and
+Claude --version only. The earlier uninstrumented timeout still lacks executable
+identity and scheduling evidence; current successful observation cannot recover it.

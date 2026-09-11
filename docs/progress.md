@@ -4833,3 +4833,21 @@ tests;64nonselected tests are excluded, not scenario passes. ESLint/diff checks
 and explicit parsed scope comparison pass. The post-correction complete suite
 runs separately; original failed verification remains retained. No live runtime,
 service, credential, merge, push or production timeout changed.
+
+Final ADR087 corrected-source verification at7debddc: npm run test:ci exits0 with
+4291passed/0failed/1platformskip across293files. The skip is install-macos's
+non-macOS refusal branch on this macOS host. Sequential npm run verify:ci also
+exits0:543Node selectors resolve and all508kernel/CLI tests pass; the2live-service
+gates remain skipped on absent runtime configuration. These results are distinct
+from initial5e7e31f verifier and full-suite failures. External final logs/JSON use
+node-retry-post-inventory-* and node-retry-final-verification-summary.json.
+
+A separate bounded external observer then used the actual backend/helper with
+all5framework commands replaced by disposable local fake binaries, including
+hermes-acp. It refused any framework resolving outside the fixture before spawn.
+All11observed which/version/ACP-help calls matched fixtures; Claude received only
+which/--version, inherited the current PATH without an explicit env override,
+and returned its exact fixed version with no error. This establishes the
+controlled path behavior, not the executable or scheduling cause of the earlier
+failed framework probe. No installed framework CLI or live model was invoked;
+no diagnostic modified production source or timeout policy.
