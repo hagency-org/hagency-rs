@@ -4079,3 +4079,37 @@ limit: all eight coordinator tests, native and Windows GNU Clippy, and strict
 lifecycle3/3 over all five explicit paths pass. The coordinator verified those
 retained logs and source diff, then completed the commit. Actual Windows rerun
 remains required; cross-compilation and local success do not replace it.
+
+
+## 2026-09-10 — Bounded native encrypted media download
+
+ADR068 adds MediaDownloader over the existing hardened Matrix HTTPS client and
+attachment Codec. Typed MXC components select only a repository path under the
+configured origin. Separate binary framing checks require complete HTTP body EOF,
+finite actual bytes and descriptor hash validation before checked plaintext.
+Clones share active-transfer and retained-result permits; dropped futures and
+static errors release only their own buffers. Descriptor provenance, current
+dispatch authority, media staging, uploads and room sending remain separate gates.
+No SDK or domain/file state is opened; the Linux ADR066 directory-sync correction
+is independent and changes no assumption in this transport.
+
+Focused local TLS tests pass6/6. All affected Matrix and codec tests pass84/84
+(65 Matrix unit, six media-download integration, nine existing transport and four
+codec tests), with no ignored tests. The first focused run correctly refused an
+unclean close-delimited TLS EOF: Fake previously dropped TlsStream without sending
+close_notify. The approved fixture change performs bounded graceful shutdown and
+retains an explicit unclean response; missing chunk terminators, truncated lengths
+and integrity failures still fail. Initial manifest inheritance incorrectly assumed
+base64 was workspace-shared; pinned existing0.22.1 fixed that check. Clippy found
+a complex fixture response tuple, replaced by a named test-only response struct.
+Original failures remain in external media-download-* evidence logs.
+
+Final native and Windows GNU warnings-denied Clippy, formatting and whitespace
+checks pass. Strict agent-spec1.4 lifecycle passes7/7 (six bound selectors plus
+all11 explicit changed paths), with zero failed/skipped/uncertain/pending-review
+results. Nonblocking lint heuristics request metadata and absence/JSON-preservation
+scenario wording; no heuristic warning is counted as a test pass. The unchanged
+JSON path is additionally covered by the complete affected Matrix suite. Parent
+independent review found no blocking issue; allocator wording now distinguishes
+logical payload caps from allocator rounding and total physical RSS. Actual
+Linux/macOS/Windows integrated execution remains the coordinator's CI gate.
