@@ -5139,3 +5139,36 @@ or ignored), and native/Windows GNU all-target warnings-denied Clippy pass.
 Only the declared16 Matrix/dependency/contract/coordination paths changed in this
 slice. Final exact strict lifecycle and fmt/diff checks are recorded immediately
 before the reviewable commit; parent retains integration and hosted CI ownership.
+
+
+### 2026-09-10 — ADR093 retained workspace binding
+
+Host now retains private workspace objects and derives source snapshots from the
+same opened roots used by its fixed runtime configuration. Exact original
+Started acknowledgement fills one Operation handoff; the sealed binding keeps
+the original writer/capability/scope and retires on completion, cancellation,
+worker unwind or drop. Report retains root custody through unresolved owned
+cleanup. Host maps reject duplicate live directories and canonical nesting; a
+smaller file-copy profile refuses excessive configured reads before source IO.
+
+This preserves ADR053/058's trusted stable-ancestor obligation. It does not
+qualify hostile same-UID namespace replacement, actual Codex sandbox behavior,
+MCP file tools, upload, Matrix file delivery or production activation. Pinned
+Codex sandbox canonicalization of cwd/writable roots was traced before rejecting
+descriptor aliases as a complete isolation solution. No guardian, Settings or
+process ownership policy changed.
+
+Local execution/platform regression: 46 tests passed, including eight new tests
+and actual child/guardian fixtures. The two affected hagency CLI targets added
+eight passing MCP/Matrix integration checks, for 54 affected tests total. Native
+and Windows GNU all-target Clippy passed for execution/platform; Windows is
+compile evidence only, with real Windows execution left to integration CI.
+Strict workspace-root lifecycle passed 8/8 (seven bound scenarios plus all 17
+changed paths), with zero failed/skipped/uncertain/pending-review results. Format
+and diff checks passed. This does not claim the separate full knowledge corpus
+gate passes. The
+first fixture run expected Limit where the file primitive returns Capacity; a
+copied SQLite fixture initially used default nonprivate creation and then hit
+correct restart fencing. Final fixture precreates a private file and explicitly
+restores stale rows only as a negative alternate-writer setup; production
+recovery is unchanged. Original failed logs remain external.
