@@ -2670,3 +2670,36 @@ response fields, exact event, ordering, metadata, digest and generated path.
 Task-only Done and actual dispatch completion differ: the former retains original
 final-reply bookkeeping; the latter retires the runner credential. Attachment
 visibility and retained workspace checks remain in the original service.
+## 2026-09-11 — ADR107 retained native usage browser boundary
+
+M7 retains browser components. Native UsageReport is per-engagement evidence and
+cannot be adapted into legacy `/api/usage` fleet/task/allocation totals. The first
+native data mode preserves the existing layout, usage page, Prefs and en/zh
+dictionary, starts unknown without fixture fallback, and selects runtime IDs via
+`/console/usage/?engagement_id=...`. Other page routes remain unavailable.
+
+The Salvo browser facade has independent finite read-only authority. Original
+native operator/runner APIs still refuse browser headers. A closed operator
+issuer and native console-access CLI issue a one-use 120-second fragment ticket; only
+same-origin exchange creates an absolute 15-minute HttpOnly session, at most four. Startup
+retains actual nofollow asset proofs and validates hashes/lengths/count/total;
+HTTP serves immutable bytes rather than reopening a request path. The root path
+walk deliberately rejects macOS `/var` aliases; test host selection uses the
+actual canonical temporary path rather than weakening that rule.
+
+Ordinary Cargo excludes the explicit native-console-browser feature. Its mandatory
+separate CI lane builds the retained artifact and runs real Chromium; disabled
+selectors are unexecuted, never browser evidence. Local artifact 6 contains 134
+assets totaling 6,010,899 bytes (largest 239,884 bytes); actual previously downloaded
+Roboto/Noto font bytes were replayed without network. The browser test creates a
+new canonical engagement while open; the executable test uses an empty runtime
+PATH. These are fresh local fixtures, not live configuration or production parity.
+
+Authority time must be sampled inside the original mutex, including after awaited
+ledger reads. The clock regression inspects that actual held mutex at the sample;
+scheduler timing alone cannot establish this ordering. Browser navigation always
+supersedes an in-flight read, and logout closes admission synchronously before its
+DELETE awaits. An explicit new ticket waits for the original logout. Same-selection
+refresh keeps observations visible with a busy indicator; transport failure marks
+them stale. Different selections, invalid/retired authority and missing records
+clear the observations. No authority or observation state is persisted by scripts.
