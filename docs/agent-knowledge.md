@@ -2136,3 +2136,18 @@ None and state is WritePossible; it never permits another POST or event send.
 Future SDK persistence must reserve bounded space before copying this sealed
 borrow and retain the copied response on uncertain persistence. No public raw
 constructor or response extraction transfers the attempt's lifetime permit.
+
+- **Private upload acceptance journal, 2026-09-10:** ADR084 consumes one actual
+  UploadSend into a separately encrypted SDK custom key with64 permanent reserved
+  response slots. Actual SDK identity and the configured HTTPS/account/device
+  binding cover every exact full-route/stage/fence record. LivePermit also belongs
+  to one ephemeral Owner; loss/reopen cannot reissue it. Queue and shared finite
+  memory custody precede copying ADR083 sealed raw bytes. Exact historical lookup
+  returns only a reference with borrowed bounded metadata and safe receipt
+  commitments; no response body/MXC export, inventory or HTTP grant exists.
+  Marker/key mismatch, corruption and malformed routes fail closed. A failed
+  SQLite write poisons this owner and retains its copied body until explicit
+  close; only committed history survives SDK reopen. The future coordinator must
+  retain the original HTTP attempt and bind its response to the actual domain
+  operation. ADR085 domain identity restoration remains a separate integration
+  gate; this private groundwork is no complete upload or process-restart workflow.
