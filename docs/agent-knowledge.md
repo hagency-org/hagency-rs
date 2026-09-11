@@ -2408,3 +2408,10 @@ is distinct from upload acceptance and canonical task Done.
   separately retained first errors remain bounded. Original crypto-variant
   Collector close needs its own fixed variant scope. The 5a8f7f7 Windows ready-ACK
   and Start timeouts identify observed boundaries, not a proven backend cause.
+
+- **Owned pulse fixtures:** a parent sleep does not acknowledge scheduling or a
+  filesystem write by another process. Preserve the required write and observe
+  it under the already-established absolute deadline. A fixed fixture gate can
+  prove negative-before-release and positive-after-release behavior using a real
+  owned child. The fed7557 historical60ms failure provides no scheduler trace;
+  local repair tests must not be substituted for its original failed verdict.
