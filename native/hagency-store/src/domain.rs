@@ -908,3 +908,5 @@ pub use approvals::responses::{
     ApprovalResponseGrant, ApprovalResponseObservation, ApprovalResponseState,
     ApprovalResponseSummary,
 };
+
+pub use approvals::owned::{OwnedApprovalScope, OwnedApprovalStatus};

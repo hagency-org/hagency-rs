@@ -1,6 +1,8 @@
 #[path = "approvals/clock.rs"]
 mod clock;
 mod common;
+#[path = "approvals/owned.rs"]
+mod owned;
 #[path = "approvals/responses.rs"]
 mod responses;
 use common::*;
@@ -16,6 +18,7 @@ struct Fixture {
     caps: Vec<RunnerCapability>,
     rooms: Vec<ApprovalRoomObservation>,
     contexts: Vec<HostApprovalContext>,
+    fingerprints: Vec<String>,
     response_grants: [Vec<hagency_store::ApprovalResponseGrant>; 2],
 }
 impl Fixture {
@@ -23,6 +26,9 @@ impl Fixture {
         Self::new_at(write, 1000, 60_000)
     }
     fn new_at(write: bool, now: u64, lease_ms: u64) -> Self {
+        Self::configured(write, now, lease_ms, true)
+    }
+    fn configured(write: bool, now: u64, lease_ms: u64, bind: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let mut db = DomainRepository::open(&root.path().join("state")).unwrap();
         db.register(&registration()).unwrap();
@@ -32,6 +38,7 @@ impl Fixture {
         let mut caps = vec![];
         let mut rooms = vec![];
         let mut contexts = vec![];
+        let mut fingerprints = vec![];
         for name in ["a", "b"] {
             let p = proof(&request(name, name, &pool, 20));
             // Shared provisioning evidence has its own fixed observation time;
@@ -105,7 +112,14 @@ impl Fixture {
                 .claim_dispatch(&format!("runner_{name}"), now + 5, lease_ms, 120_000, 8)
                 .unwrap()
                 .unwrap();
-            db.start_dispatch(&cap, now + 6).unwrap();
+            if bind {
+                db.start_dispatch(&cap, now + 6).unwrap();
+            } else {
+                let scope = db.owned_dispatch_scope(&cap, now + 6).unwrap();
+                fingerprints.push(scope.fingerprint().to_owned());
+                db.start_owned_dispatch(&cap, scope.fingerprint(), now + 6)
+                    .unwrap();
+            }
             let room = ApprovalRoomObservation {
                 engagement_id: e.id.clone(),
                 registration_generation: 1,
@@ -133,7 +147,9 @@ impl Fixture {
                 may_write: write,
                 yolo: false,
             };
-            db.bind_approval_context(&cap, &context, now + 8).unwrap();
+            if bind {
+                db.bind_approval_context(&cap, &context, now + 8).unwrap();
+            }
             agents.push(e.id);
             caps.push(cap);
             rooms.push(room);
@@ -146,6 +162,7 @@ impl Fixture {
             caps,
             rooms,
             contexts,
+            fingerprints,
             response_grants: [Vec::new(), Vec::new()],
         }
     }

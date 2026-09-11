@@ -1,4 +1,6 @@
 //! Offline native fixture, never a model or a public runtime-launch endpoint.
+#[path = "approval_probe/mod.rs"]
+mod approval_probe;
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
@@ -218,6 +220,9 @@ fn fake(mode: &str, marker: &Path) -> io::Result<()> {
         &request,
         json!({ "turn": { "id": "owned-turn", "status": "inProgress", "items": [] } }),
     )?;
+    if mode.starts_with("owned-approval") && !approval_probe::run(mode, &mut stdin, marker)? {
+        return Ok(());
+    }
     if mode == "approval" {
         send(
             json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"owned-thread","turnId":"owned-turn","itemId":"command","command":"fixture","cwd":std::env::current_dir()?.to_string_lossy()}}),
