@@ -2506,3 +2506,17 @@ runtime outcome is an expected fault observation, never a delivery receipt.
   probe demonstrates ordinary-user staging and fresh-process recovery; translating
   it into production still requires safe original pending-IO custody rather than
   copying a disposable probe's process-exit policy.
+
+
+- **Original native child diagnostics, 2026-09-11:** An unlabelled scripted HTTP
+  timeout does not distinguish startup, SDK work, a current refusal or child
+  exit. The ADR101 executable fixture now retains one finite observation per
+  launched child with static variant/wait/route labels and a bounded request
+  count. Panic cleanup inspects the same PID before kill/reap and emits only
+  fixed stderr classifications from at most 8193 bytes read through the original
+  retained file handle. Fallible output cannot replace the original panic. It prints no raw stderr,
+  path, credential, room ID or payload. Restart replaces only the fixture's
+  current observation; the old child retains its own record. A real held TLS
+  request and an actual configuration-refused native child prove live/exit
+  distinction and unchanged original panic. Original Linux 85427cb failures
+  remain unexplained; the unchanged local three-test pass is separate evidence.
