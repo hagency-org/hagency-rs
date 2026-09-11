@@ -3,6 +3,7 @@ mod database;
 mod domain;
 mod domain_worker;
 pub mod private;
+pub use domain::PublishedCatalog;
 pub use domain::uploads::UploadSettlement;
 pub use domain::{
     AttachmentTicket, DomainRepository, Effect, EffectOutcome, EffectState, KnownTokens,
