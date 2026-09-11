@@ -2136,3 +2136,12 @@ None and state is WritePossible; it never permits another POST or event send.
 Future SDK persistence must reserve bounded space before copying this sealed
 borrow and retain the copied response on uncertain persistence. No public raw
 constructor or response extraction transfers the attempt's lifetime permit.
+
+Node retry scheduling must preserve the actual claim cutoff. ADR087 fixes a
+confirmed gap: a retry becoming due between claimDispatch and a fresh future-only
+wake lookup matched neither query. The combined claimDispatchWithWake reuses the
+eligibility cutoff from inside the original transaction; due blocked rows cannot
+create an immediate timer loop. The deterministic clock reproduction establishes
+this code defect, while original7cf0dc0 Node CI's30s launch-recovery timeout still
+has no observed inner cause. That fixture now emits fixed-stage and row evidence
+on failure without changing its timeout or assertions.
