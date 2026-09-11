@@ -2497,3 +2497,10 @@ runtime outcome is an expected fault observation, never a delivery receipt.
   files. This joins close-generated jobs only. Preserve safe branch/error details
   in a failed reopen assertion; a later passing run cannot explain a hidden
   original error or prove that a separately found lifetime gap caused it.
+
+
+- **Received-file comparison:** compare the held regular file with another live
+  handle using the full native identity. A hard link correctly identifies the
+  same object, so a receive sink must enforce its separate single-link policy.
+  Equal content and a reused pathname do not establish the original object;
+  comparison alone grants neither current scope nor private-file safety.
