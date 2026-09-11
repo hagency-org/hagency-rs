@@ -4600,3 +4600,23 @@ failed/skipped/uncertain/pending review. Final native warnings-denied Clippy,
 rustfmt and diff checks pass after the reviewed reopen-sync evidence handling.
 External media-preparation-* logs retain exact results. Windows GNU compile and
 actual platform runtime checks remain the root integration step.
+
+
+## 2026-09-10 — Matrix transport fixture error visibility (ADR080)
+
+Windows CI at 25c01ee failed the authenticated HTTPS/restart and bounded
+sync/cancellation tests at the fake peer's SDK-plus-HTTP request timeout. The
+joined collector result was not visible, so the historical cause remains unknown.
+Both identity collections and the bounded sync loop now use the existing
+script-first driver. Early collection completion fails with its actual result;
+all request assertions, authentication, SDK identity, cancellation and negative
+authority checks remain intact. No deadline or production behavior changed.
+
+The accepted contract parsed and linted before code changes. All nine local
+transport tests passed, including the actual early-Identity and legal SDK-gap
+regressions. Transport-target Clippy with warnings denied, rustfmt and diff checks
+passed. Strict agent-spec 1.4 lifecycle passed 5/5 across all five explicit changed
+paths, with zero failed, skipped, uncertain or pending-review verdicts. External
+matrix-fixture-errors-* logs retain these results. Original Windows CI failure and
+independent Palpo shutdown OutcomeUnknown remain failed evidence. Actual Windows
+execution is still required; this change does not establish its historical cause.

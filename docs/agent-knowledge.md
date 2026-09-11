@@ -2088,3 +2088,16 @@ cover plans and returned reads per Store but do not reserve journal space.
 Before IO failures return original Media; possible writes retain Store custody.
 Storage identity accessors provide no runtime or upload authority. A missing or
 newly discovered record never permits replacing keys or replaying a possible POST.
+
+
+### Matrix scripted collector failures — ADR080 (2026-09-10)
+
+A tokio::join! of Collector::collect and a script waiting for further HTTP requests
+can hide an already returned collector error behind Fake::next's later timeout.
+Use the existing common::scripted driver when the full HTTP script must complete
+before the collector settles; its biased script-first race preserves simultaneous
+completion while reporting any earlier actual collector result. Identity/restart
+and bounded sync/cancellation now share the room fixtures' existing driver.
+The wrong-account regression proves early Identity reporting; the SDK-gap
+regression independently preserves the existing legal interval. No production or
+fixture timing limit changes, and no historical Windows failure is reclassified.
