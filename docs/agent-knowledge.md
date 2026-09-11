@@ -2948,3 +2948,17 @@ Runtime response reserve never revives an expired domain decision: capture the
 owner cutoff, domain expiry and original response deadline together before
 parking, or refuse a configuration whose margin does not fit. This prerequisite
 does not introduce a parked renewal or a longer operation timeout.
+
+
+- **Native catalog publisher, 2026-09-11 (ADR109):**
+  `DomainStore::published_catalog` checks the configured canonical registration
+  fingerprint/generation and derives complete public capabilities through the
+  existing fleet-scoped catalog. `Adapter::run_with_resources` explicitly opts
+  its original publication loop into fresh domain observations. Never replace
+  an unacknowledged frozen update with changed resources. After custody waits,
+  `publish_checked` rechecks the current domain registration immediately before
+  HTTP admission; already admitted bytes may finish during rotation. Public
+  catalogs and acknowledgments are not execution or Matrix readiness proof.
+  Actual Palpo c7c400e retains at most200 resources per role; exceeding this
+  refuses instead of silently truncating. The executable still needs separate
+  configuration and lifetime wiring before remote publication is user-visible.

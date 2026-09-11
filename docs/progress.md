@@ -6563,3 +6563,41 @@ in the external approval-router evidence cache. Runtime pumping, finite parked
 maintenance, deadline configuration, actual transmission and executable
 interactive qualification remain separate gates. No runtime, sandbox, timeout,
 dependency or live action changed, and full M6 parity remains incomplete.
+
+
+## 2026-09-11 — Native resource catalog publication library (ADR109)
+
+The original domain writer now observes one current registration and its complete
+qualified public resource catalog. The existing outbound adapter can publish that
+catalog automatically using its retained publication lane and exact frozen retry
+bytes. Empty catalogs withdraw offers; explicit role withdrawal and fleet-scoped
+cross-family qualification remain enforced. DTOs expose public identity/model
+fields only, and more than200 resources per role or excess peer fields refuse
+without partial publication.
+
+Review found a queue window between the first registration observation and HTTP.
+The publisher now checks the original domain registration after custody waits
+immediately before HTTP admission. An actual SQLite-lock regression rotates the
+registration while the publication is queued and verifies no request reaches the
+local HTTPS peer. Already admitted HTTP bytes cannot be recalled by rotation;
+retained catalog data never grants execution authority. Cancellation is rechecked
+before admitting a fresh freeze after awaited domain work.
+
+Focused tests: initial five tests passed; the added queue regression and other
+three HTTPS selectors then passed. Dependency setup initially attempted a missing
+workspace rusqlite entry; it now uses the same pinned0.37.0 bundled SQLite as the
+store, dev-only, without upgrading any lockfile package. Package-wide, lint and
+strict lifecycle results will be recorded after their original runs. Evidence:
+`~/Library/Caches/hagency-rust-migration/2026-09-10/catalog-*`. Native executable
+service ownership/wiring and full M5 acceptance remain separate and unfinished.
+
+
+ADR109 final local qualification: affected store/Palpo packages226/226 with
+zero failures or ignored tests. Strict lifecycle7/7 passes, including six real
+selector tests and the exact change boundary. The original lifecycle preserved
+6 passing selectors but failed its Cargo.lock boundary spelling; changing the
+contract path from Cargo.lock to ./Cargo.lock corrected the parser recognition
+without widening the allowed file. Final Clippy with warnings denied and fmt
+pass. Original Clippy's six unused shared fixture-helper warnings were resolved
+by a test-module-only annotation; no production lint rule changed. The independent
+review's pre-send rotation and pre-freeze cancellation findings are closed.
