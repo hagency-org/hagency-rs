@@ -6027,3 +6027,19 @@ is reinterpreted as passing. This checkpoint awaits the separately bounded exact
 ReceiveWrite capability matcher and fresh writer time after SQLite waits, final
 checks and strict lifecycle. Real Windows file operations and the incoming
 executable workflow remain independent gates.
+### 2026-09-11 — Receive authority integration prerequisite
+
+Closed two integration gaps under an exact seven-path contract. The original
+workspace writer check now samples time after acquiring its SQLite transaction,
+and the unique ReceiveWrite exposes only a complete validated capability match.
+Actual clock test passes1/1; received-file integration passes5/5 including the
+new grant-association test and four unchanged cases. All-target store Clippy
+passes with warnings denied; formatting and diff checks pass. The clock test
+uses an independent actual SQLite lock inspection and expiration while the
+original command is queued. Grant tests change each identity field and malformed
+inputs without reconstructing a grant. Strict lifecycle is recorded separately.
+No platform, physical receive workflow or production readiness is implied.
+
+Strict lifecycle passes3/3: the exact seven-path boundary and two separately
+bound selectors, each executing one actual passing test. No fail skip uncertain
+or pending result is promoted; logs remain in the external migration cache.
