@@ -3026,3 +3026,14 @@ native-file-owned-observation context for exact original provenance and limits.
   Actual Palpo c7c400e retains at most200 resources per role; exceeding this
   refuses instead of silently truncating. The executable still needs separate
   configuration and lifetime wiring before remote publication is user-visible.
+
+
+- **Native private approval card, ADR110, 2026-09-11:**
+  PrivateApprovalCard is an opaque host packet, not send/verdict authority. It
+  combines pending request, current target and private scope in one transaction
+  with a post-lock clock. Its owner cutoff is earlier than or equal to the
+  immutable domain expiry; future senders must retain the original cutoff.
+  Structured content is limited to48KiB and never truncated. Existing v1 client
+  upstream_request_id stays a string; additive upstream_rpc_id preserves type.
+  Native40-hex request IDs still require explicit client qualification. Never
+  project the packet into the console or invent an Agent task/route for the bot.
