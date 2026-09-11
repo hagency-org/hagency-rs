@@ -2600,3 +2600,12 @@ Incoming serve/MCP/cache materialization and platform qualification remain open.
   release them or imply bounded OS completion. Probe success and default-Store
   success are distinct gates, and only actual native Windows execution proves
   the latter. No runtime or upload readiness follows from cross-compilation.
+
+### Current receive workspace authority (2026-09-11)
+
+The original asynchronous workspace check now acquires its SQLite Immediate
+transaction before sampling writer time and inspecting all Started scope facts.
+A read-only ReceiveWrite matcher compares the complete validated original
+capability digest; equal immutable workspace fingerprints alone do not establish
+the same runner fence or secret. The sink must require both the match and current
+original-writer authority. These domain helpers establish no SDK or file proof.
