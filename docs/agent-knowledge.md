@@ -2186,3 +2186,14 @@ must still fail independent current validation. RestoredEncrypted namespace_dige
 is borrowed storage metadata only; no raw constructor or source/send grant is
 added. The actual consuming owner must compare namespace, operation, receipt,
 kind, byte length and qualified sync before accepting staged bytes.
+
+ADR089 StagedUpload failure returns original typed custody; Collector admission
+must recheck full matches because failure.into_input can contain a mismatch.
+Current-token whoami is mandatory even with prior available domain observation
+and existing SDK: config binding excludes token. Negative identity fencing needs
+bounded ownership through enqueue independent of caller cancellation. An abandoned
+run never rearms; release_unstarted locks the same job and terminalizes it before
+removing local retention, without changing durable WritePossible. Only this job's
+actual sealed response or protected SDK accepted history may settle its exact
+upload. Owner reopen is not a second POST. Windows unconfirmed directory sync
+qualifies refusal only; do not count those branches as positive upload workflows.
