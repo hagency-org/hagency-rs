@@ -75,3 +75,9 @@ pub use domain::file_delivery::{
 pub use domain::received_files::{
     ReceiveAdmission, ReceiveIdentity, ReceiveReservation, ReceiveWrite,
 };
+
+// Original one-shot router response authority; no native application proof.
+pub use domain::{
+    ApprovalResponseGrant, ApprovalResponseObservation, ApprovalResponseState,
+    ApprovalResponseSummary,
+};
