@@ -2812,3 +2812,15 @@ DELETE awaits. An explicit new ticket waits for the original logout. Same-select
 refresh keeps observations visible with a busy indicator; transport failure marks
 them stale. Different selections, invalid/retired authority and missing records
 clear the observations. No authority or observation state is persisted by scripts.
+
+
+### 2026-09-11 — Linux received-file directory sync
+
+Pinned cap-primitives4.0.3 opens ambient directories with O_PATH on Linux.
+The original Root retains that descriptor; a duplicate remains O_PATH and fsync
+cannot use it. The b856b47 Linux CI reported Io after actual file writes in four
+workspace cases, plus unknown in three actual incoming workflows after GET=1.
+The sink now opens only '.' relative to that original directory with read access,
+checks private handle and complete same-directory identity, and retains the sync
+handle before destination creation. Windows retains its existing directory-sync
+qualification path. This source correction still requires Linux runtime evidence.
