@@ -2948,3 +2948,19 @@ Runtime response reserve never revives an expired domain decision: capture the
 owner cutoff, domain expiry and original response deadline together before
 parking, or refuse a configuration whose margin does not fit. This prerequisite
 does not introduce a parked renewal or a longer operation timeout.
+
+### Original FileService runtime failure observation (2026-09-11)
+
+The b856b47 Windows original has one failed FileService executable test and four
+passing sibling tests. Its room-event/upload observations do not explain the
+collapsed owned_attempt/protocol unknown verdict. The offline helper's silent
+work interval is only a source-derived timeout candidate. Preserve the original
+logs and distinguish the later compile-cancelled diagnostic step.
+
+The b211301-based observation-only change copies the original runner stage,
+session Unknown reason and first transport cause before cleanup can discard it.
+Optional pending and unfinished-write counts stay private fixed diagnostics,
+never completion or replay authority. Operator status and original helper-receipt
+labels expose no raw payload/path/context. Receipts present before a launch remain
+preexisting; absence is not proof the helper never executed. See the accepted
+native-file-owned-observation context for exact original provenance and limits.
