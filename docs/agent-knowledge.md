@@ -2136,3 +2136,13 @@ None and state is WritePossible; it never permits another POST or event send.
 Future SDK persistence must reserve bounded space before copying this sealed
 borrow and retain the copied response on uncertain persistence. No public raw
 constructor or response extraction transfers the attempt's lifetime permit.
+
+ADR085 distinguishes reopen with retained variables from full process loss.
+Runner stores retain capability hashes, not original secrets, so historical
+uploads cannot restore through restore_upload(cap,request) alone after memory
+loss. restore_upload_settlement compares exact locator/fence/stage/full route to
+the protected original row and returns only sealed historical settlement. SDK
+receipt authenticity still belongs to its actual owner; domain matching is not
+proof of a POST. Restored history never issues capture, claim or send authority,
+and missing history never means unsent. Automatic selector/config/key discovery
+is still a separate host integration gate.
