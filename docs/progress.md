@@ -8577,3 +8577,65 @@ client qualification and ongoing identity/key management remain separate.
   arm — `drop(stdin)` now yields `Io("stdin write")`); execution lib 9
   passed with 23 EPERM SQLite-wall failures (the 23rd is the new scenario
   at the same fixture line, not a regression).
+
+## 2026-09-12 — Withdraw the write-first armed frame; the prepared path's contract returns a buffered update first
+
+- Brief 18 (prerequisite to the final verdict's rule): 10dafd45's product
+  hunks are reverted exactly. `prepared_inner` returns the buffered event at
+  `offset == 0` again (the exact-Vec-custody return is restored verbatim);
+  `drain_parse`/`buffered_event_queued` are removed; the
+  `armed_frame_precedes_buffered_event` scenario, its spec block, the
+  `owned-approval-write-first` probe mode, and the two write-first ADR
+  paragraphs (ADR-034's amendment, ADR-046's paragraph) are deleted. Brief
+  17's never-transmitted paragraph and its tests are untouched — the two
+  briefs touched disjoint lines except the probe bin, where the mode block
+  was removed between two surviving modes.
+- Why (the VM evidence): write-first broke three prepared-path contract
+  tests in `tests/session/control.rs` — they pin that a buffered update is
+  returned ahead of the armed frame — and it converted the loaded silent
+  class into zero-byte `Transport(Closed)` (the final verdict's E1
+  analysis). With it withdrawn, the whole runtime crate's non-spawn targets
+  are green again.
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; `--test session` 26 passed 0 failed (including
+  `native_codex_control_absolute_deadlines`,
+  `native_codex_control_prepared_response_order_and_once`,
+  `native_codex_control_partial_frame_and_pinned_future` — the three the
+  VM flagged); `--test transport` 8 passed 0 failed; `--lib` 5 passed;
+  `tests/codex.rs` 9 passed; execution lib 9 passed with the 22 documented
+  EPERM SQLite-wall failures. `tests/owned.rs` (7 failed + 1 passed) is the
+  pre-existing spawn wall — proven by the stash baseline: identical failure
+  sets with and without the withdrawal.
+
+## 2026-09-12 — Never complete an operation while an approval frame of unknown fate is in flight
+
+- The final verdict's rule (brief 19, resumed from the interrupted tree): with
+  the in-flight flag a turn end no longer cancels an armed entry, but it must
+  not complete the operation over one either. In the turn-end handling
+  (`observations.rs`), an in-flight, receipt-less (`write.is_none()`),
+  **unresolved** entry now decides the failure from the transport's write
+  custody instead of returning the clean exit: bytes accepted → transmitted
+  but fate unknown → `SettlementUnknown` (the send path's mid-write arm maps
+  the same way in `send_failure`); zero bytes → never transmitted → the
+  brief-17 `PeerUnavailable`. A resolved-away (quiet-drop) entry keeps its
+  known fate — never sent — and stays exempt; the pre-admission
+  cancellation is unchanged. The arms are stamped
+  `turn-ended-in-flight-uncertain` / `turn-ended-in-flight-untransmitted`,
+  and the read-only `write_progress()` projection is restored through all
+  three layers (transport → driver → owned session) for exactly this
+  decision — no deadline, retry or transport verdict derives from it.
+- Two scenarios (`native_owned_approval_turn_end_untransmitted`,
+  `native_owned_approval_turn_end_midwrite_uncertain`, additive probe modes
+  `owned-approval-turn-untransmitted` / `owned-approval-turn-midwrite`)
+  assert the two arms: `PeerUnavailable` with zero accepted bytes and no
+  accepted row (never `Completed`); `SettlementUnknown` with the transport
+  cause over accepted-but-unread bytes (never `Completed`). Spec-bound; the
+  trace-vocabulary test pins both arm labels.
+- ADR-046 gains the turn-end paragraph (the rule, the discrimination, the
+  in-flight flag's role, the two pinning tests).
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; runtime crate: lib 5/5, codex 9/9, `--test transport`
+  8/8; `--test owned` 1+7 is the pre-existing spawn wall (stash-baseline
+  proven: identical failure set with and without the change). Execution lib:
+  9 passed + 24 EPERM SQLite-wall failures (the 24th and 25th entries are
+  the two new scenarios at the same fixture line, not logic failures).
