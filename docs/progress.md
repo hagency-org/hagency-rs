@@ -8447,3 +8447,133 @@ client qualification and ongoing identity/key management remain separate.
   `native_owned_approval_resolved_before_first_byte` (quiet outcome),
   `native_approval_trace_labels_every_phase` (vocabulary without
   `write-started`).
+
+## 2026-09-12 — Name the approval arm taken in every trace; pin the quiet pre-send path
+
+- Harness/labels/docs only, per the reshape review (E1–E5); no product-path
+  change. The trace vocabulary now names the rule that fired, not just the
+  arrival: `resolution_arrives` stamps the arrival label
+  (`resolved-before-write`/`resolved-after-write`) plus an arm label
+  (`resolved-cancels` / `resolved-ignored-in-flight` /
+  `resolved-ignored-written`); the TurnEnded loop stamps `turn-ended-unwritten`
+  on arrival plus `turn-ended-cancels` / `turn-ended-ignored-in-flight` /
+  `turn-ended-ignored-written`, and records the cancellation slot only on the
+  cancelling arm — so `cancelled[]` is again exactly "what cancelled", not
+  "what arrived" (review E1's second point: the old loop recorded
+  `cancellation()` for every unwritten entry regardless of the outcome
+  predicate). The send block stamps `send-withheld-for-event` when the
+  transport returns a buffered event instead of writing (path 4, previously
+  only inferable by absence). The vocabulary unit test pins a full quiet-drive
+  sequence so a renamed or withdrawn label fails the suite, not the VM run.
+- E3+E4: scenario 2 now asserts `resolved-before-send` is present in the
+  dispatch trace (only the quiet drop arm stamps it — a turn-end-driven
+  completion can no longer pass), and the probe's
+  `owned-approval-resolve-first` mode waits for a second marker
+  (`approval-turn-release`) after the drop before returning into its terminal
+  turn, so the turn end cannot race the recheck pump's F2 check; the test
+  writes that marker only after the trace assertion holds.
+- E2+E5 in ADR-046: the false justification ("the same quiet completion the
+  pre-admission resolution produces") is replaced with the true rule — a
+  resolution before admission cancels (ADR-046 unchanged,
+  `resolution_before_admission_cancels` pins it); a resolution for an admitted
+  frame whose bytes the transport has accepted or is about to accept is
+  informational and the frame is dropped. A bounded-retention paragraph records
+  that the quiet entry stays `recorded=false`, so the batch's parked
+  reservation is held until `ApprovalRun::stopped()`. The two stale comments
+  (control.rs, scenario 2) were rewritten to match.
+- VM trace reading (df15b3d2): the `recorded=0` loaded failures split into two
+  labelled classes — path 1 (`turn-ended-cancels`: `turn-ended-unwritten` in
+  `cancelled[]` with `ApprovalCancelled`) for `_resume`/`_cancellation`, and
+  the in-flight/quiet class (`resolved-ignored-in-flight` arms, no
+  cancellation) for `_usage`/`_barriers`-shaped traces; lib.log's five
+  failures are distinct (reconcile custody `(1,1,1,0)`; a `BeginGate`
+  `Protocol`; two gate-expiry harness panics; and
+  `resolved_before_first_byte` dying `PeerEof`/`Unknown` because the old
+  `Ok(true)` ended the turn while the host still held the recheck pump — the
+  E4 handshake removes that race). Full per-test reading is in the peer
+  report; the product design for the remaining class is another peer's brief.
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; runtime lib 5 passed; `--test transport` 8 passed 0 failed
+  (contract tests stay green); execution lib 7 passed with the 21 documented
+  EPERM SQLite-wall failures (unchanged in count and cause).
+
+## 2026-09-12 — Write an armed approval frame before delivering a buffered event
+
+- The designer's scoped fix for the armed-frame window (verdict Q3, applied
+  exactly): `prepared_inner` no longer returns a buffered event at
+  `offset == 0`. When a buffered message is queued it drains the input into
+  the event queue (`drain_parse`, parse-only, never deliver) and writes the
+  armed frame first; the buffered events are delivered on a later call,
+  after the receipt. One adaptation: `EventQueue` has no `is_empty`, so
+  `buffered_event_queued` uses `self.events.len() > 0`. The
+  `has_prepared_approval` check stays after the drain, so F2's quiet path
+  still fires on a resolution already parsed before any byte. The old
+  behaviour discarded the write for that call — zero bytes accepted, no
+  receipt — leaving the entry `write: None`, the exact `recorded=0`/
+  `failure=None`/`Completed` VM signature.
+- Scenario `native_owned_approval_armed_frame_precedes_buffered_event`
+  (additive probe mode `owned-approval-write-first`: hold at the recheck
+  gate, emit one usage event, handshake `approval-buffered` BEFORE the
+  release): asserts `Completed` with the macOS cleanup split, exactly one
+  wire frame, `write-accepted` and `recorded` in the trace, one
+  `write_accepted=1` row, and `usage.observed == 1` (the buffered event is
+  delivered after the receipt, nothing lost). Bound in the spec beside the
+  other approval scenarios.
+- Q2's second defect is recorded, not fixed: `accepted 0 of 51` with
+  `Transport(Io)` in `barriers_pending_receipt` is a distinct zero-byte
+  class (transport error on the first write step while the callback is
+  pending, `pending_server_requests: 1`), separated from the ordering class
+  by `transport_cause: Some(Io)` + `write` present with `accepted_bytes: 0`
+  vs the ordering class's `transport_cause: None` + `write: None`. The fix
+  needs the transport's three collapsed I/O error sites
+  (`transport.rs:511-514`) made distinguishable — next brief.
+- ADR-034 gains the armed-frame amendment (the rule, what the old behaviour
+  did, and the structural argument that both pinned contract tests drive
+  the ordinary `send` path and stay green — verified: 8 passed 0 failed);
+  ADR-046 gains the receipt-precedes-any-pre-byte-event sentence.
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; runtime lib 5 passed; `--test transport` 8 passed 0
+  failed; execution lib 7 passed with 22 EPERM SQLite-wall failures (the
+  22nd is the new scenario at the same fixture line, not a regression).
+
+## 2026-09-12 — Report a never-transmitted approval frame distinctly and derive the probe's lifetime
+
+- The designer's second verdict (context-armed-frame-io), both halves:
+  - Harness (the cause of `accepted 0 of 51`): the probe's post-response
+    lifetime was a literal 8 s while the owned harness grants the operation
+    25 s, so on a loaded host the fixture exited while the operation ran and
+    its next write failed as `Io` with zero bytes accepted. The terminal
+    `pulse(marker)` is replaced by `hold_until_stdin_closed(marker, budget)`:
+    pulse for evidence while polling stdin, return on the host's close
+    (ownership stop), with a ceiling of 1.5× the budget passed via
+    `HAGENCY_OPERATION_BUDGET_MS` — the same source the host gate derives
+    from — so no probe-side literal can undercut (or outlive) a host bound.
+    Both owned host builders (approval_loss.rs, owned.rs) pass the env value
+    (25000); harnesses without it keep the legacy pulse.
+  - Product (why it was unreadable): `Error::Io` was a four-way collapse and
+    the approval send path discarded every transport error into
+    `Failure::Protocol`. `Error::Io` now names its arm (`"stdin write"`,
+    `"stdin flush"`, `"stdout read"`, `"stderr read"`) at every site, and the
+    send path maps "peer stream gone at zero accepted bytes" — the
+    termination snapshot's `unconfirmed_write.accepted_bytes == 0` — to the
+    new distinct, non-uncertain `Failure::PeerUnavailable` (own
+    `OwnedFailure::PeerUnavailable` variant, own `peer_unavailable` label).
+    `Protocol` keeps genuine malformed-frame refusals; any byte accepted
+    keeps the existing verdicts and the reconcile's uncertainty.
+- Tests: `native_never_transmitted_frame_is_peer_unavailable` and the
+  negative control `native_partial_write_keeps_protocol_and_uncertainty`
+  (unit, all four transport causes + the Capacity-excluded case);
+  `native_owned_approval_peer_gone_before_first_byte` (e2e, the
+  `owned-approval-eof` probe as the dead-peer fixture): asserts
+  `PeerUnavailable` never `Protocol`, the observation names the arm with
+  `accepted_bytes == 0`/`total_bytes == 51`, no wire frame, no bytes file,
+  zero accepted rows, zero applied rows. Spec binding beside the other
+  approval scenarios.
+- ADR-046 gains the never-transmitted paragraph (the rule, the
+  discriminator, what keeps `Protocol`, the no-retry/no-authority note).
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; runtime lib 5 passed; `--test transport` 8 passed 0
+  failed (the contract test's own `Error::Io` assertion updated to the named
+  arm — `drop(stdin)` now yields `Io("stdin write")`); execution lib 9
+  passed with 23 EPERM SQLite-wall failures (the 23rd is the new scenario
+  at the same fixture line, not a regression).
