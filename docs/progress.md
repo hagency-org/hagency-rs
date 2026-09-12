@@ -8174,3 +8174,79 @@ client qualification and ongoing identity/key management remain separate.
   operation's unchanged 100 ms busy budget) and each scenario rebuilds
   itself a bounded number of times instead of judging it. No product bound
   changed.
+- Harness-only change under ADR-046 stage-1 diagnostics: the approval phase
+  journal and cancellation slot are now keyed by the operation's dispatch id
+  (`RunnerCapability::dispatch_id`, threaded through `Drive`), because the
+  VM trace showed the process-wide cancellation slot interleaving records
+  from parallel tests — one record listed two different phase histories for
+  the same entry id. `last_cancellation_trace(dispatch)` reads only its own
+  operation's records; `reset()` still clears everything; the state unit
+  test pins the isolation with a foreign-dispatch assert. All five assertion
+  sites (four in `approvals.rs`, one in `approval_loss.rs`) and the fixture
+  helper now pass their dispatch.
+- The `write-started` phase label was **not** added: the first OS write of a
+  frame is observable only inside `hagency-runtime`'s transport
+  (`writing.offset` in `Observed::Write`); the execution crate sees write
+  progress solely at termination via `RuntimeWriteObservation`, and adding
+  the label would need a cross-crate dependency outside this brief's
+  ownership. Reported rather than forced.
+- Q4 diagnostics: the five `usage.rs` `Protocol::Completed` assertions now
+  print `failure={:?} runtime={:?}` (a `SettlementUnknown` does not change
+  the protocol, so a bare assert hides a lost write-acceptance record), and
+  `unconfirmed()` prints the wire response ids before both counts
+  assertions.
+- Gates: `cargo fmt --all --check`,
+  `cargo clippy -p hagency-execution --all-targets --locked -- -D warnings`,
+  `cargo check --tests -p hagency-execution --locked` all pass;
+  `native_approval_trace_labels_every_phase` passes (1 passed). The owned
+  integration tests cannot run in this sandbox (EPERM on the SQLite
+  repository open at fixture setup); the orchestrator runs them.
+
+## 2026-09-12 — In-flight approval frame survives its own resolution (ADR-046 amendment)
+
+- ADR-046 amendment (appended today) names the middle case the Windows trace
+  established: an entry committed to the transport whose receipt is not yet
+  recorded was cancelled by its own resolution, because the session's event
+  delivery pops the transport's parsed-event queue unconditionally while the
+  write path returns its receipt only after the flush. The product change is
+  one flag and three small edits in `hagency-execution/src/approval/`:
+  `Pending::in_flight` is set on the same borrow that arms `self.sending`
+  (before the recheck pump, which can deliver the entry's own resolution) and
+  cleared at write acceptance; both cancellation predicates
+  (`resolution_arrives`, `TurnEnded`) become `write.is_none() && !admitted &&
+  !in_flight`. No transport change, no deadline change, no retry; the
+  pre-admission cancellation is untouched. The `in-flight` phase label joins
+  the trace vocabulary and its unit test.
+- Probe: two new modes (`owned-approval-gate-resolve` holding the resolution
+  until the host is provably in flight, and `owned-approval-admitted-resolve-count`
+  failing on any second frame after a legal post-write resolution) plus the
+  small helpers `announce`/`await_release` (the two halves of the original
+  `gate`), `append_bytes` and `timeout_read`, all additive in
+  `approval_probe/mod.rs`.
+- Tests: `native_owned_approval_in_flight_resolution_completes_write` (the
+  middle case, fails on the pre-change predicate),
+  `native_owned_approval_resolution_before_admission_cancels` (asserts the
+  variant), and `native_owned_approval_no_second_frame_after_resolution`
+  (frame counts on both streams); spec scenarios added to the ADR-046 spec.
+- Gates: `cargo fmt --all --check`,
+  `cargo clippy -p hagency-execution -p hagency-runtime --all-targets --locked
+  -- -D warnings`, `cargo check --tests -p hagency-execution -p hagency-runtime
+  --locked`, and the state-machine unit test pass locally; the three new
+  integration tests cannot run in this sandbox (EPERM on the SQLite repository
+  open at fixture setup) — verified by stash that (a) fails on the pre-change
+  code by compilation and assertion reading; the orchestrator validates on the
+  Windows VM under load.
+
+- Review corrections applied after the design review: the entry selection in
+  `control.rs` also excludes in-flight entries (`admitted && write.is_none()
+  && !in_flight`) so an armed entry is never re-armed; the `TurnEnded`
+  predicate is `write.is_none() && !in_flight` (no `!admitted` — a turn end
+  invalidates transmission, so an admitted-but-never-sent frame is still a
+  cancellation; `!admitted` stays only in the resolution arm); the recheck
+  pump's terminal mapping stays `ApprovalCancelled` for a turn end next to an
+  armed frame (documented in code and in the ADR addendum: the wire is
+  closed); and the ADR-046 amendment gained an addendum citing ADR-046's own
+  lines 121–125 and naming the two outcomes (M1 → frame completes to
+  `WriteAccepted`; M2 → truthful `Failure::Protocol`, and the middle-case
+  test correctly fails on that path). Gates re-run clean after the
+  corrections.
