@@ -592,7 +592,20 @@ async fn native_owned_approval_in_flight_resolution_completes_write() {
         report.runtime_observation(),
         crate::approval::diagnostics::last_cancellation_trace(&cap.dispatch_id)
     );
-    assert!(report.failure.is_none());
+    // macOS cannot prove the whole tree stopped, so the crate's owned tests
+    // accept `CleanupUnknown` there and nothing elsewhere; the write itself is
+    // proven by the frame and row counts below.
+    assert_eq!(
+        report.failure,
+        if cfg!(target_os = "macos") {
+            Some(Failure::CleanupUnknown)
+        } else {
+            None
+        },
+        "runtime={:?} trace={}",
+        report.runtime_observation(),
+        crate::approval::diagnostics::last_cancellation_trace(&cap.dispatch_id)
+    );
     assert_eq!(host_response_frames(&work).len(), 1);
     assert_eq!(probe_read_frames(&work).len(), 1);
     let sql = rusqlite::Connection::open(root.path().join("state/domain.sqlite3")).unwrap();
