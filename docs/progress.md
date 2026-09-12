@@ -8250,3 +8250,200 @@ client qualification and ongoing identity/key management remain separate.
   `WriteAccepted`; M2 → truthful `Failure::Protocol`, and the middle-case
   test correctly fails on that path). Gates re-run clean after the
   corrections.
+
+## 2026-09-12 — In-flight approval scenario made deterministic on macOS
+
+- The macOS flake in `native_owned_approval_in_flight_resolution_completes_write`
+  is a test-side ordering race, now explained and closed. (i) The test set
+  `gate.release` before writing the probe's `approval-release` marker, so the
+  host left the recheck hold and armed/wrote its frame while the probe's
+  `resolved()` was still in flight; `Drive::pump` also polls the wire during
+  every store future, so in losing runs the resolution was parsed and consumed
+  by an earlier pump while the entry had only `retained, acknowledged`
+  (pre-admission). `gate.entered` proves only that the recheck hold was
+  reached — never that the resolution was emitted while in flight. (ii) When
+  that pre-admission resolution is consumed by `send_prepared_inner`, the send
+  pops it before writing and returns `PreparedUpdate::Update`; the drive
+  re-enters the send with the same retained frame, but the resolution had
+  already removed `server_pending`, so the write hits `Transport(Closed)` and
+  the operation fails `Failure::Protocol` (0 of 51 bytes) — a real M2-shaped
+  hazard the scenario must not drive.
+- The fix is a three-way handshake, still harness-only: the test writes the
+  release marker first; the probe emits `resolved("approval-1")` and then
+  writes a new `approval-resolving` marker; the test waits for that marker
+  before setting `gate.release`. The resolution is therefore provably on the
+  wire while the host is provably held in flight, and the send that follows
+  can never race it. The orchestrator's macOS-aware verdict edit is applied:
+  the bare `assert!(report.failure.is_none())` became the crate's
+  `CleanupUnknown`-on-macOS expectation with the runtime observation and
+  cancellation trace in the message.
+- Gates: fmt, clippy (execution + runtime, all targets), and
+  `cargo check --tests` pass; the repository-free unit tests
+  (`native_approval_trace_labels_every_phase`,
+  `native_settlement_cause_markers_are_distinct`) pass. The scenario itself
+  cannot run in this sandbox (EPERM on the SQLite repository open at fixture
+  setup); determinism is argued from the trace labels above and the
+  orchestrator validates on the VM.
+
+## 2026-09-12 — Close the two remaining approval windows (transport hold, admissibility, cause)
+
+- The VM load runs after the in-flight fix showed cancellations gone but two
+  windows remained: the missing `write_accepted` row (the acceptance
+  observation's store reply wait mapping to a bare `SettlementUnknown`, which
+  does not change `report.protocol`) and the re-send of an armed frame refused
+  as `Closed` (0 of 51/52 bytes). Three changes close them, per the accepted
+  design.
+- F1 (ADR-034 amendment): the transport's `step()` no longer parses buffered
+  input while a frame has accepted bytes and is not yet flushed; parsing
+  resumes after the flush. A `serverRequest/resolved` for the very frame being
+  written can therefore never be queued between its write and its receipt.
+  Two read-only projections accompany it: `write_progress()` and
+  `prepared_admissible(id)`, threaded through the session layers; the trace
+  stamps `write-started` (update delivered while the transport holds accepted
+  bytes) and `write-flushed` (the receipt arrived) before `write-accepted`.
+- F2: `Failure::ResponseUnavailable` (outwardly the existing protocol
+  verdict, bootstrap label `response_unavailable`) — the send site asks
+  `prepared_admissible` before sending, so a frame whose server request was
+  resolved away is reported by name and never re-sent, never `Closed`.
+- F3: the acceptance pump records the store refusal as `settlement_cause`
+  (reusing the brief-4 marker; `OutcomeUnknown` → `ReplyTimedOut`) before the
+  existing `SettlementUnknown` mapping, so the suite can attribute a missing
+  row. `unconfirmed()` prints the cause, the recorded and expected counts, and
+  the failure alongside the wire ids.
+- `Fault::ReceiptGate` holds between the transport's write receipt and the
+  acceptance observation; two scenarios land with it:
+  `native_owned_approval_receipt_before_resolution` (mode `owned-approval`,
+  whose generic loop reads then resolves — the design's `owned-approval-resolve`
+  early-returns without reading, so the generic loop is the read-then-resolve
+  path it cites) and `native_owned_approval_resolved_before_first_byte` (new
+  mode `owned-approval-resolve-first`, resolution emitted before any response
+  read, handshake-marked for determinism). Both scenarios and the F1/F2 rules
+  are in the ADR-046 spec and amendments to ADR-046 and ADR-034.
+- Gates: fmt (clean after reformat), clippy (runtime + execution + hagency,
+  all targets, clean), `cargo check --tests -p hagency-execution` clean, and
+  the repository-free unit tests pass (trace vocabulary with the two new
+  labels, settlement-cause markers). The runtime suite's 7 owned-pipe tests
+  fail identically with all native changes stashed — a pre-existing sandbox
+  spawn wall (PeerEof at initialize), not a regression; the execution
+  integration tests are EPERM-blocked on the SQLite repository open as since
+  brief 3. The orchestrator runs both on the VM.
+
+## 2026-09-12 — Guard the transport read arm under the F1 hold (blocking review finding)
+
+- An independent review found a blocking defect in brief 10's F1: the hold lets
+  `step()` fall through to its select while `mid_write` is true and unparsed
+  bytes remain in `input`, but the read arm was unguarded and its handler does
+  `input_start = 0; input_end = n` — a stdout read mid-write overwrote unparsed
+  wire bytes. The old early return made the select reachable only with an empty
+  buffer; F1 removed that invariant without replacing it. The route is real:
+  `first_write_step` can deposit bytes at `offset == 0`, the write arm then
+  advances `offset`, and the next `step()` is the one F1 de-suppresses.
+- Fixed with the reviewer's minimal guard exactly: `let read_ready =
+  self.input_start == self.input_end;` before the select, the stdout read arm
+  armed only `if read_ready`, with a comment stating that a read may only ever
+  overwrite an empty buffer and that this mirrors the invariant the early
+  return used to provide. Write/flush/stderr/deadline arms unchanged.
+- The other two read-into-`input` sites need no guard: `control_inner` and
+  `first_write_step` drain `input` via `buffered_event`→`parse_input` before
+  arming reads and run only at `offset == 0` (verified from the code, reported
+  in the ADR sentence).
+- `native_transport_hold_keeps_unparsed_input` (new in-crate `hold_tests`
+  module in `transport.rs` — `prepare_approval`/`send_prepared_or_event` are
+  `pub(in crate::codex)`, so integration-test placement is impossible; stated
+  as the adaptation): the peer task owns the whole wire protocol, holds the
+  52-byte frame mid-write on a duplex(16) stdin, writes the
+  `serverRequest/resolved` for the in-flight id and one more stdout line while
+  the frame is accepted-but-unflushed, sleeps one poll, then drains the frame.
+  The receipt covers the whole frame; afterwards both stdout lines parse in
+  arrival order with nothing lost. The spec gains the scenario with its
+  `Test:` line and ADR-034 gains the read-guard paragraph.
+- Gates: fmt clean; clippy clean on runtime + execution + hagency (all
+  targets); `cargo test -p hagency-runtime --lib --locked` green including the
+  new test (6 passed); `cargo check --tests -p hagency-execution` clean; the
+  repository-free unit tests pass. The execution integration tests remain
+  EPERM-blocked (19, the SQLite repository open) and the runtime owned-pipe
+  suite remains environment-blocked (PeerEof at initialize, pre-existing —
+  proven by the brief-10 stash baseline); the orchestrator runs both on the VM.
+
+## 2026-09-12 — Self-describing loaded Windows failures (harness only)
+
+- Harness-only diagnostics for the candidate's Windows loaded failures
+  (b042044a: `unconfirmed()` printed wire ids/settlement/failure but no
+  approval phases, so a loaded miss could not say which phases happened).
+  `unconfirmed()` now prints, on both assertions, every entry's complete
+  ordered phase trace via the new `diagnostics::dispatch_trace(dispatch)`
+  (keyed by the operation's dispatch id, entries in first-appearance order:
+  `id[retained, acknowledged, …, recorded]`), the recorded cancellation
+  primitives, and the runtime observation. The labels already carry the
+  flags a miss needs (`admitted`, `in-flight`, `write-accepted`,
+  `recorded`); an absent label names the phase that never happened. No new
+  stamping was needed — every expected label is already stamped on the
+  paths in question.
+- The three new scenarios' literal 2 s waits are now derived from one
+  budget source: `Gate::OPERATION_BUDGET_MS` (cfg(test)) sets the gate's
+  bound and `harness_wait()` (a tenth of it, 2.5 s at the 25 s operation
+  budget) sets every marker wait. On expiry each wait now lists the
+  `owned-dispatch.*` marker files actually present (`markers_present`), so
+  a Windows timing miss (marker late) is distinguishable from a logic miss
+  (marker never written).
+- The two failing runtime contract tests are untouched; their defeat lines
+  are recorded in the peer report for the design verdict: F1's mid-write
+  parse hold delays the parse-time capacity check past the write deadline
+  (`pressure_event_count_and_bytes`: `Capacity` → `Timeout` at 100 ms) and
+  defers queueing the early RPC response until after the flush
+  (`write_complete_and_early_rpc_response`: `queued_events() == 0` at the
+  immediate post-receipt assert).
+- Gates: fmt (after one reformat), clippy (runtime + execution + hagency,
+  all targets), `cargo check --tests`, and the runnable unit tests pass
+  (`native_approval_trace_labels_every_phase`,
+  `native_settlement_cause_markers_are_distinct`,
+  `native_transport_hold_keeps_unparsed_input`); the 21 execution lib
+  failures are the documented SQLite EPERM wall (all at the fixture's
+  repository open), unchanged in count and cause.
+
+## 2026-09-12 — Withdraw the transport parse hold; quiet completion on a pre-send resolution
+
+- Per the designer's VM verdict: F1 (the mid-write parse hold) contradicted
+  two ADR-034 contract tests and no scoping could keep both, so it is
+  withdrawn together with its read guard (which only guarded the hold's
+  retained-input clobber). `step()` is restored to its pre-hold shape
+  (parse-first when input is pending; the select's read arm is reachable
+  only with an empty buffer again). `write_progress()` is withdrawn with it
+  — its only consumer was the `write-started` trace stamp, which is gone
+  (the stamp was also dead post-withdrawal: the write loop awaits to flush
+  without consulting `buffered_event`, so a mid-write Update is
+  unreachable); `prepared_admissible(id)` survives (F2 keeps it, read-only).
+  `native_transport_hold_keeps_unparsed_input` and its spec scenario are
+  deleted. Both contract tests pass unchanged again
+  (`--test transport`: 8 passed, 0 failed — `write_complete_and_early_rpc_response`
+  and `pressure_event_count_and_bytes` restored).
+- F2 reshaped: the `prepared_admissible` check stays before the send, but a
+  pre-send resolution now takes the quiet path the pre-admission resolution
+  already produces — the resolution is informational (ADR-046), the armed
+  frame is dropped without sending (never re-sent, never `Closed`), the
+  entry keeps `in_flight` so it is never re-selected, a new
+  `resolved-before-send` trace label is stamped, and the drive continues to
+  `Completed`. `Failure::ResponseUnavailable` and the
+  `response_unavailable` bootstrap label are removed entirely. The probe's
+  `owned-approval-resolve-first` mode now returns into the parent's terminal
+  turn (`turn/completed` ends the drive quietly), and scenario 2 asserts the
+  quiet outcome: protocol `Completed`, the macOS-aware cleanup verdict
+  elsewhere `None`, no `Closed` transport cause, no frame on the wire, no
+  bytes file, and zero accepted rows.
+- Kept as instructed: the in-flight flag, the deterministic scenario,
+  `ReceiptGate` + scenario 1, the brief-13 `unconfirmed()` phase trace and
+  derived bounds, and the reconcile (now VM-verified). The path-4
+  investigation (`Controlled::Event` early return) is deliberately not
+  touched — the next VM run's trace names the path.
+- ADR-034 gains a withdrawal amendment (both contract tests cited, what
+  survives, what is retired and why); ADR-046's hold/named-failures amendment
+  is replaced by the quiet-path amendment. The scenario-2 spec `Then` line
+  now states the quiet outcome.
+- Gates: fmt, clippy (runtime + execution + hagency, all targets),
+  `check --tests` clean; runtime lib 5 passed (hold test gone); execution
+  lib 7 passed with the 21 EPERM SQLite-wall failures (documented,
+  unchanged); `--test transport` 8 passed. Changed `Test:` selectors:
+  `native_transport_hold_keeps_unparsed_input` (deleted),
+  `native_owned_approval_resolved_before_first_byte` (quiet outcome),
+  `native_approval_trace_labels_every_phase` (vocabulary without
+  `write-started`).
