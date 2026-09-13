@@ -125,3 +125,24 @@ second migration's head-pin churn to every test that pins the head.
   D-1: the reporting view must never gate retention; the raw state pins.
 - Prune without the graph move — rejected: a moved binding must be NULL or
   the workflow read returns `Error::State`; the move is part of the delete.
+
+---
+
+## Correction: D-6's premise (`task_outbox` has no acknowledgement path)
+
+Recorded here for when D-6's text lands in this record: the premise the prior
+retention slices rested on — "`task_events` pages a production surface" — is
+**false**, per the decision memo `.peer/evidence/report-task-outbox-decision.md`
+(§4). The reader `task_events(after, limit)` is public API with **no production
+caller**; there is **no `UPDATE task_outbox`** anywhere, so `delivered` is
+**vestigial** — every row is born `0` and stays `0`, and the `delivered=0`
+conjunct and its pending index are constant-true / dead weight. The corrected
+posture: the engagement cascade (Slice 6) deletes `task_outbox` rows **only**
+whose owning `canonical_tasks` row is deleted in the same transaction — adopted
+now, because the cascade's RESTRICT FK would otherwise wedge; and a real
+acknowledgement path (a writer that sets `delivered=1`) is **named as a
+retained-product gap**, not built, because there is no consumer to serve. The
+deferral of a bound prune survives — a cascade-created sequence gap is
+indistinguishable from a quiet period only once a pager with a persisted cursor
+ships — but its *reason* is now the no-consumer fact, not a nonexistent
+production pager.
