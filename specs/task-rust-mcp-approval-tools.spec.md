@@ -23,7 +23,7 @@ here as the divergence so no reader looks for a retained tool to match.
 - Derive `get_approval`'s subject by the by-task lookup — task → session → live dispatch → `approval_contexts(dispatch_id, fence)` → `owner_approvals(context_id)` — pinned deterministically (the live dispatch's current fence; the newest approval at that fence), because `approval_context_dispatch` is non-unique (`013:30`) and `owner_approvals` has no unique `context_id` (`:32`).
 - Catalog the tools within the existing bounds: `get_approval` takes `id` only (the task id, 1..=128, no `call_id`); `consume_approval` takes `id` + `call_id` (1..=512); `additionalProperties:false`; the annotation sets per the design (read: readOnly/idempotent; mutation: destructive/idempotent).
 - Enforce at-most-once through BOTH gates: the `call_id` receipt (same `call_id` + identical content returns the stored response; a differing digest is `Error::Conflict`, `execution.rs:447-461`) and the approval state machine with the plan's named refusal words — `already_consumed` for `applying`/`applied`, `not_consumable` for the other settled states — replacing the generic `Error::RunnerAuthority` at `approvals.rs:880-882`.
-- Serve `ApprovalView` — exactly four keys, `id, state, reusable_scope, choice`, from `ApprovalSummary` (`approvals.rs:97-102`) — and nothing else.
+- Serve `ApprovalView` — exactly four keys, `id, state, reusable_scope, choice`, from `ApprovalSummary` (`hagency-core/src/approvals.rs:97-102`) — and nothing else.
 - Bind every call to the session's task (`mcp.rs:291-293`); a task that is not the session's own refuses.
 - Assert the byte-level negative over the serialized tool response, with the two value classes stated: the escaped-prone values over the decoded strings, the metacharacter-free withheld names over the raw bytes.
 
@@ -98,8 +98,8 @@ Scenario: An approval that failed to deliver is observed as denied
   Test Double: the C1 denial leg over a fixture failed delivery
   Given an approval whose private delivery failed and C1's denial leg has run
   When get_approval serves it
-  Then under the deny assumption it reports state decided with choice deny
-  And under leave-pending it reports state pending with choice null — the scenario asserts whichever D-PC-FC decides, and binds with C1's denial leg, not before
+  Then it reports state decided with choice deny and the denial reason naming the failed send, read from the same owner_approvals row and the same denial_reason column every surface serves
+  And it binds with C1's denial leg, not before
 
 ## Decisions
 
