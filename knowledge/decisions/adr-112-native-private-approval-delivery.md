@@ -89,3 +89,7 @@ Only explicit fresh approval accounts qualify for this initial sender. Historica
 Matrix acceptance does not grant a verdict or runtime application. Service wiring,
 client compatibility, identity recovery and general ongoing key management remain
 separate. Already-admitted HTTP bytes cannot be recalled after later changes.
+
+*Cross-reference (PC-C1): a failed private send denies the pending request
+with a named reason (D-PC-FC, in force) — ADR-137's record; this record's
+`Accepted` semantics and custody stages are unchanged by it.*
