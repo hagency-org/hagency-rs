@@ -174,7 +174,8 @@ fn observes_completion<T>(drive: &Result<T, Failure>) -> bool {
         Err(Failure::Cancelled
             | Failure::Deadline
             | Failure::UnsupportedApproval
-            | Failure::PeerUnavailable)
+            | Failure::PeerUnavailable
+            | Failure::SettlementUnknown)
     )
 }
 
@@ -979,10 +980,16 @@ mod tests {
             );
         }
         // Everything else — other named failures and any success — still
-        // observes custody; their settlement rules are unchanged.
-        assert!(observes_completion(&Err::<(), Failure>(
-            Failure::SettlementUnknown
-        )));
+        // observes custody. `SettlementUnknown` does NOT: ADR-060's landed
+        // precedence rule — a settlement verdict outranks the completion
+        // path, and the failure finalization is the single writer of
+        // failure and settlement — so it joins the exclusion list.
+        assert!(
+            !observes_completion(&Err::<(), Failure>(
+                Failure::SettlementUnknown
+            )),
+            "SettlementUnknown outranks the completion path (ADR-060)"
+        );
         assert!(observes_completion(&Err::<(), Failure>(Failure::Protocol)));
         assert!(observes_completion(&Ok::<(), Failure>(())));
     }
