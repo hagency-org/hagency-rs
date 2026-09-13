@@ -239,7 +239,12 @@ rather than trusting the selector.
 Where readiness is `unknown`, expired, or `uncertain`, the dispatch does not
 fail opaquely and is not retried in a loop: it **parks with the named reason
 `account_readiness_unknown`** — the existing parked-update shape
-(`approvals.rs:152-161`) — and parking is a legal resting state everywhere
+(`approvals.rs:152-161`) — and **the reason has a storage home**: migration
+**030** adds one nullable `park_reason TEXT` to `runner_attempts` via
+`ADD COLUMN`, so the park is auditable as `outcome='parked'` plus
+`park_reason='account_readiness_unknown'` on the attempt row (029 stays
+MA-S4's per the ledger; the schema-head pin moves to 30 in the same commit).
+Parking is a legal resting state everywhere
 the lifecycle enumerates it. A parked dispatch is **re-evaluated when a new
 readiness fact is observed** (the next selector pass after a receipt
 settles), never on a timer: there is no retry loop, and a park is visible as
