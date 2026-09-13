@@ -86,6 +86,24 @@ restated): this phase is the pin owner of the three corpus tables; cascade
 delete rights remain the later execution phase's — invisible to a grep
 today and exactly why the contract records it.
 
+**The graph-move's two builder-facing consequences, named (the reconciliation
+map's C12/C13/C16).** (C16) The graph move is a **release of custody**: a
+moved binding is NULL, so a terminal-node read that no longer matches
+returns the arm the design chose — the message is gone and the recovery must
+be re-driven from identity, never silently re-admitted. (C12) Concretely,
+`admit_recovery` (`graphs.rs:374`) admits a `complete` node *as well as*
+live states, so **a moved binding refuses there with `RunnerAuthority` — and
+that is the intended direction**, not a defect: the recovery a pruned
+message would authorize is exactly the replay the identity store covers.
+(C13) The P2′ release is **three-triggered, not one**: besides a closed
+conversation (`close()` fences and sets `state='closed'`), the pair also
+leaves `conversation_peer_inputs` when its **engagement deactivates**
+(`write_engagement`'s state write) or its **session binding is lost** (an
+`internal_participants` row deleted on the session-retire path). All three
+are the same direction — release, never re-pin — so P2′ stays monotone, and
+the acceptance line is: *if a reopen, engagement reactivation, or
+participant re-insert appears on the base, P2′ must be revisited.*
+
 ## Consequences
 
 Good, because the second-fastest corpus gains the same bound, the same

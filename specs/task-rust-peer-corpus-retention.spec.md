@@ -19,17 +19,19 @@ slot. Mirrors the messages-phase set scenario-for-scenario.
 ## Constraints
 
 ### Must
-- Implement the pin rule exactly: P1 recency outside the newest CEILING; P2′ unprocessed-and-live conversation input; P3′ claimed-not-processed (`dispatch_id` set, `processed_at` null); P4 any live dispatch; P5 any `outcome_unknown` dispatch (the raw state pins — `unresolved_dispatches` never releases); P6 a graph node inside its release boundary. `wake` never pins.
+- Implement the pin rule exactly: P1 recency outside the newest CEILING; P2′ an input is pinned only while `processed_at IS NULL` **and** its pair is a member of `conversation_peer_inputs` — the view that additionally requires the conversation `state='active'`, the engagement `state='active'`, and matching generation/binding — so a closed conversation **releases** its unread (P2′ = unprocessed + still-live-and-bound, never "unprocessed alone"); P3′ claimed-not-processed (`dispatch_id` set, `processed_at` null); P4 any live dispatch; P5 any `outcome_unknown` dispatch (the raw state pins — `unresolved_dispatches` never releases); P6 a graph node inside its release boundary. `wake` never pins.
+- Freeze the bound's numbers (the design's four, unmeasured hypotheses but the checked constants): `PEER_RETENTION_CEILING = 5000`, `PEER_RETENTION_FLOOR = 100` (the ceiling clamps up to it, never down), `PEER_RECEIPT_CEILING = 10_000` (the identity store's DDL-level bound), and the peer phase's initial batch **512**.
 - Delete children-first in one transaction per tick: the paired graph move (when releasable), then `peer_dispatch_inputs`, then `peer_session_inputs`, then `peer_messages`, then the identity insert — a parent is deleted only with all of its children.
 - Create `retained_peer_index(source_key PK, digest, sequence, pruned_at_ms)` in migration 027 (`IF NOT EXISTS`), pruned oldest-first in the same tick, bounded by the DDL-level `PEER_RECEIPT_CEILING`.
 - Consult the identity store on `admit`'s live-miss idempotency lookup (`peers.rs:166-182`), so a redelivered send keeps its `Conflict`/`replayed` answer after the prune.
-- Write the `phase='peer'` receipt row inside the phase's own transaction (pruned/archived/remaining/elapsed_ms), trimmed to the shared limit by the same writer.
+- Write the `phase='peer'` receipt row inside the phase's own transaction, carrying the shared table's **seven real columns** — `pruned`, `oldest_ref`, `newest_ref`, `remaining`, `elapsed_ms` (plus `sequence`/`at_ms` auto) — trimmed to the shared limit by the same writer; there is **no `archived` column** and this slice adds none (phase 1's receipt table is not altered, and no migration but 027 is licensed).
 - Give the phase its own batch slot in the per-phase state — its own hypothesis, halved on its own breach, floor 1, the split at batch 1 a named visible residue — never the messages scalar.
 - Assert no-consumer-observes over the consumer queries (`peers.rs:115/:277`, `execution.rs:743`, `task_intents.rs:366`, `graphs.rs:356`) with a non-empty precondition.
 
 ### Must Not
 - Do not modify the corpus schemas (`007`, `010` — no column, no view body; the new migration adds indexes only) or any shared view body.
 - Do not archive content — the identity store carries `sequence,digest`, never config or message bytes.
+- Do not re-create phase 1's `retention_prune_receipts` in migration 027: the receipt table is 026's object (created `IF NOT EXISTS` there), and 027 only adds `retained_peer_index` plus the pin-probe indexes — re-creating the receipt table would silently collide with phase 1's DDL and is explicitly forbidden.
 - Do not release `outcome_unknown` rows via `unresolved_dispatches` (D-1: reporting never gates retention), and do not pin on `wake`.
 - Do not touch the `admitted_messages` corpus and its children (phase 1's objects), `ceiling_alerts.rs`, the close path, `busy_timeout`/WAL/`foreign_keys`, or the messages phase's own selectors.
 - Do not share batch state with the messages phase; do not write the receipt outside the phase transaction.
@@ -53,7 +55,7 @@ slot. Mirrors the messages-phase set scenario-for-scenario.
 
 ### Forbidden
 - Live services, credentials, deployed state.
-- native/hagency-store/src/domain/ceiling_alerts.rs; migrations other than 027 (026 phase 1's, 028 MA-S1's, 030 MA-S2's, 031 PC-C1's); the schema-head pin move **to 27** is licensed here and nowhere else.
+- native/hagency-store/src/domain/ceiling_alerts.rs; migrations other than 027 (026 phase 1's, 028 MA-S1's, 029 MA-S4's, 030 MA-S2's, 031 PC-C1's); the schema-head pin move **to 27** is licensed here and nowhere else.
 
 ## Acceptance Criteria
 
@@ -116,7 +118,7 @@ Scenario: The schema head advances to 27 and replays after rewind
   Given a populated store rewound beneath the new head
   When the repository reopens
   Then the head is 27, the identity table exists, and the second open replays nothing
-  And every rewind fixture still lands at the head
+  And every rewind fixture still lands at the head — **six files** (the design's F2 set), each asserting the head is 27 and the identity table exists
 
 Scenario: The phase receipt is written inside the phase transaction
   Test: native_retained_peer_corpus_receipt_row_is_written_inside_the_transaction
@@ -124,7 +126,7 @@ Scenario: The phase receipt is written inside the phase transaction
   Test Double: a pruning tick observed before and after commit
   Given a peer phase tick that prunes
   When the transaction commits
-  Then a phase=peer row exists in retention_prune_receipts with pruned archived remaining and elapsed_ms
+  Then a phase=peer row exists in retention_prune_receipts carrying pruned, oldest_ref, newest_ref, remaining and elapsed_ms — and no archived column exists to assert
   And the table is trimmed to the shared limit by the same writer
   And no receipt row is observable before the phase's commit
 
