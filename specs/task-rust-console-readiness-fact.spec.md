@@ -86,14 +86,6 @@ Scenario: No credential byte reaches any wire or fixture
   When the receipt, the store and the CLI output are inspected
   Then no token byte and no /credential/-matching key appears in any of them
 
-Scenario: Dispatch requires an observed, unexpired account
-  Test: native_dispatch_requires_ready_account
-  Level: integration
-  Test Double: actual isolated files and SQLite
-  Given an owned scope bound to an account whose readiness is unknown or expired
-  When the queue is drained and the Host is asked to admit
-  Then nothing is selected and no child starts
-
 Scenario: Native readiness agrees with the retained verdict
   Test: native_account_readiness_matches_retained_detect
   Level: integration

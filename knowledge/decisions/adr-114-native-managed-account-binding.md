@@ -122,3 +122,10 @@ dispatch **parks** with the named reason `account_readiness_unknown`.
 **The console DTO is not this amendment's.** `AccountRow` stays five keys;
 the readiness field is MA-S3b's, landing in its own commit when the fact
 exists to serve.
+
+**Cross-reference (MA-S2).** The consumption half of this amendment is
+ADR-053's: a dispatch over a bound account requires the fact recorded here to
+be observed and unexpired, else it parks with the named reason
+`account_readiness_unknown` and is re-evaluated at read time when a new fact
+settles — never retried in a loop. See ADR-053's "Account readiness gate
+amendment" and `specs/task-rust-dispatch-readiness-gate.spec.md`.
