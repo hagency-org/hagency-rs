@@ -1,5 +1,5 @@
 spec: task
-name: "Serve the console approval observation with seven keys and no owner detail"
+name: "Serve the console approval observation with eight keys and no owner detail"
 inherits: project
 satisfies: [REQ-RUST-MIGRATION-EXECUTION]
 tags: [active, rust, console, approvals, read-only]
@@ -10,7 +10,7 @@ tags: [active, rust, console, approvals, read-only]
 Bind PC-C2a and PC-C2b of the private-card plan v5: first a bounded, `SELECT`-named
 approval **list read** on the store with its `DomainStore` wrapper and a store test
 (C2a, the A5 addition that lands first); then two observation routes and a page
-section serving `ApprovalRow` with exactly seven named keys and the withheld sets
+section serving `ApprovalRow` with eight named keys (seven plus PC-C1's `denial_reason`) and the withheld sets
 stated (C2b) — read-only behind the existing `authenticate` hoop, no new `Scope`.
 The delivery route is **not** this spec's to bind early: per the v5 check's V2 its
 selector belongs with the route's own commit behind PC-C0, and a test asserting a
@@ -20,8 +20,8 @@ refusal for a nonexistent route asserts nothing.
 
 ### Must
 - Add the C2a list read first: a `SELECT` naming its columns with `after`/`limit` and a hard cap, mirroring `engagements` (`domain.rs:607-615`, 1..=100), its wrapper beside `approval_summary` (`domain_worker.rs:1570`), and a store test.
-- Serve `ApprovalRow` — exactly seven keys, `camelCase`, `deny_unknown_fields`: `id`, `state` (one of the seven CHECK words, `013:34`), `choice` (`once|task|always|deny` or null), `reusable_scope` (`scope_key IS NOT NULL`), `expires_at`, `engagement_id` (one join to `approval_contexts`), `project_room_id` (via the engagement join, nullable).
-- Withhold, and state in the row's absence: the retained-only set (`owner_mxid`, `owner_dm_room_id`, `tool_name`, `description`, `input_preview`, the card bytes), the native columns deliberately withheld (`description`, the `config`/`application`/`observation` JSON), and the no-native-source fields (`decided_at`, `created_at`, `consumed_at`, `decision_event_id`, the agent name). `denial_reason` is **native-sourced as of PC-C1's migration 031** (`approval_verdict_receipts.denial_reason`, nullable): the observation reads it from that column when the row is a send-failure denial, and serves absence otherwise.
+- Serve `ApprovalRow` — eight keys as of PC-C1 (`denial_reason` the eighth, from the kind-deny receipt row), `camelCase`, `deny_unknown_fields`: `id`, `state` (one of the seven CHECK words, `013:34`), `choice` (`once|task|always|deny` or null), `reusable_scope` (`scope_key IS NOT NULL`), `expires_at`, `engagement_id` (one join to `approval_contexts`), `project_room_id` (via the engagement join, nullable), `denial_reason` (from the kind-deny receipt row, nullable — PC-C1's).
+- Withhold, and state in the row's absence: the retained-only set (`owner_mxid`, `owner_dm_room_id`, `tool_name`, `description`, `input_preview`, the card bytes), the native columns deliberately withheld (`description`, the `config`/`application`/`observation` JSON), and the no-native-source fields (`decided_at`, `created_at`, `consumed_at`, `decision_event_id`, the agent name). `denial_reason` is **native-sourced as of PC-C1's migration 031** and is served as the row's **eighth key**: the observation reads it from the **kind-deny receipt row** PC-C1's `deny_for_failed_delivery` mints (`approval_verdict_receipts.denial_reason`), joined by the denial's `request_id`, when the row is a send-failure denial — absence otherwise, never a guess.
 - Mount `console/approvals.rs` beside the four existing sub-routers under the API hoop; reads carry no scope — a read-only ticket can reach no mutation.
 - Render the page section from `state`/`choice` words and a status word for an undelivered card — never a card, never a preview; the five-document exception stays five and `/console/approvals` is a non-document.
 - Assert the negative over the serialized response, not only the key set, with the two value classes stated: the escaped-prone pair (input preview text, card document text) over the **decoded** string values, and the metacharacter-free pair (owner mxid, owner room id, tool name) over the **raw** bytes — a raw search for the escaped pair is unsound and must not be used.
@@ -76,7 +76,7 @@ Scenario: The observation projection omits owner identity and tool detail
   Test Double: the console fixture with seeded approvals through the new read
   Given a valid console session and approvals whose withheld fields exist in the store
   When the list and single observation routes are served
-  Then every row carries exactly the seven declared keys with no nested object
+  Then every row carries exactly the eight declared keys with no nested object
   And the decoded string values of every response contain no input preview text and no card document text, while the raw body contains no owner mxid, owner room id or tool name byte
   And the absent never-invented fields appear as absent rather than null-derived guesses
 

@@ -10,7 +10,7 @@ tags: [active, rust, mcp, approvals, runner]
 Bind PC-C3 of the private-card plan v6: a runner-facing pair of catalog tools —
 `get_approval` (a read keyed by the assigned task, not an approval id) and
 `consume_approval` (a mutation with `call_id`, at-most-once through the receipt
-and the state machine) — over a four-key `ApprovalView` projection that omits
+and the state machine) — over a five-key `ApprovalView` projection (PC-C1 adds `denial_reason`, read from the kind-deny receipt row) that omits
 the owner room, the DM room id and the tool detail. Every MCP call stays bound
 to the session's task (`mcp.rs:291-293`). This is a **native decision, not a
 port**: the retained intake is an HTTP pair (`GET/POST /api/approvals/:id`,
@@ -22,8 +22,8 @@ here as the divergence so no reader looks for a retained tool to match.
 ### Must
 - Derive `get_approval`'s subject by the by-task lookup — task → session → live dispatch → `approval_contexts(dispatch_id, fence)` → `owner_approvals(context_id)` — pinned deterministically (the live dispatch's current fence; the newest approval at that fence), because `approval_context_dispatch` is non-unique (`013:30`) and `owner_approvals` has no unique `context_id` (`:32`).
 - Catalog the tools within the existing bounds: `get_approval` takes `id` only (the task id, 1..=128, no `call_id`); `consume_approval` takes `id` + `call_id` (1..=512); `additionalProperties:false`; the annotation sets per the design (read: readOnly/idempotent; mutation: destructive/idempotent).
-- Enforce at-most-once through BOTH gates: the `call_id` receipt (same `call_id` + identical content returns the stored response; a differing digest is `Error::Conflict`, `execution.rs:447-461`) and the approval state machine with the plan's named refusal words — `already_consumed` for `applying`/`applied`, `not_consumable` for the other settled states — replacing the generic `Error::RunnerAuthority` at `approvals.rs:880-882`.
-- Serve `ApprovalView` — exactly four keys, `id, state, reusable_scope, choice`, from `ApprovalSummary` (`hagency-core/src/approvals.rs:97-102`) — and nothing else.
+- Enforce at-most-once through BOTH gates: the `call_id` receipt (same `call_id` + identical content returns the stored response; a differing digest is `Error::Conflict`, `native/hagency-store/src/domain/execution.rs:447-461`) and the approval state machine with the plan's named refusal words — `already_consumed` for `applying`/`applied`, `not_consumable` for the other settled states — replacing the generic `Error::RunnerAuthority` at `approvals.rs:880-882`.
+- Serve `ApprovalView` — exactly five keys: `id, state, reusable_scope, choice` from `ApprovalSummary` (`hagency-core/src/approvals.rs:97-102`), plus `denial_reason` from PC-C1's kind-deny receipt row (`approval_verdict_receipts.denial_reason`, joined by request_id; null when no denial) — and nothing else.
 - Bind every call to the session's task (`mcp.rs:291-293`); a task that is not the session's own refuses.
 - Assert the byte-level negative over the serialized tool response, with the two value classes stated: the escaped-prone values over the decoded strings, the metacharacter-free withheld names over the raw bytes.
 
@@ -81,7 +81,7 @@ Scenario: The approval projection omits the owner room and the tool detail
   Test Double: a fixture approval whose withheld fields exist in the store
   Given an approval served through get_approval
   When the tool response is serialized
-  Then it carries exactly the four ApprovalView keys
+  Then it carries exactly the five ApprovalView keys
   And the decoded string values contain no owner mxid, owner room id, tool name or input preview text and the raw bytes contain no withheld field name
 
 Scenario: An approval cannot be read or consumed for another task
@@ -112,5 +112,6 @@ lookup; the new refusal words) are C3's own new store work and land with it.
 ## Out of Scope
 
 The console approval observation (PC-C2, its own spec), the delivery status
-route (behind PC-C0), the fail-closed denial policy itself (D-PC-FC, C1's to
-decide), and any retained HTTP intake port.
+route (behind PC-C0), the fail-closed denial policy's enforcement (D-PC-FC
+is decided — deny; C1 implements it, this slice only consumes the result),
+and any retained HTTP intake port.
