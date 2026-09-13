@@ -139,7 +139,6 @@ pre-correction `data-native-state` does not exist on this component, and any
 builder asserting it builds a test that can never pass. The existing
 `native_console_resource_observations` selector carries this assertion in its
 extension.
-silent widening.
 
 ---
 
