@@ -45,6 +45,10 @@ is bound there, executed only in the enabled lane.
 - native/hagency/tests/console/agents.rs
 - native/hagency/tests/console.rs
 - native/hagency/tests/console/browser.rs
+- native/hagency/tests/bootstrap/approval.rs
+- native/hagency/tests/support/approval_enrollment.rs
+- native/hagency/tests/two_agent_handoff.rs
+- native/hagency/tests/qualification.rs
 - native/hagency/Cargo.toml
 - mockup/app/agents/page.jsx
 - mockup/components/NativeAgents.jsx
@@ -86,8 +90,8 @@ Scenario: The agent roster page renders under the native browser boundary
 Scenario: The browser proves a real newly provisioned agent through the live server
   Owed Selector: native_console_browser_proves_a_real_agent (parked — the name is owed by the implementing slice and binds only when it lands; no Test: line here yet)
   Level: integration
-  Test Double: a live native Salvo server with an agent provisioned through the real provisioning route, and the browser lane's real Chromium pointed at that server
-  Given a live native server with a freshly provisioned agent registered through the real provisioning route — not a fixture name, not the static export's pre-generated list
+  Test Double: a live native Salvo server whose agent was admitted through the Matrix intake chain, and the browser lane's real Chromium pointed at that server
+  Given a live native server whose agent was provisioned through the production Matrix intake admission chain — owner message → intake admit → approval → effect observed — with the roster row created by the store's own admission path, not a directly seeded fixture row
   When the browser lane loads the console against that live server
   Then the provisioned agent appears in the roster with its real id
   And the lifecycle controls act on that agent through the live server's own routes
@@ -101,10 +105,16 @@ the assets come from `build-native-console.mjs`), and the roster itself is
 a live store read — what is pre-generated is the per-agent *detail page*
 (`generateStaticParams`), not the roster data, and the lane's engagement is
 seeded by the test fixture (`db.register` + `admit`), not provisioned. The
-gap this scenario closes is therefore **the real provisioning route**: the
-lane must provision one agent through the production bootstrap registration
-path — with the workflow's browser job and the bootstrap path licensed
-below — instead of seeding a fixture row. The existing
+gap this scenario closes is therefore the **production provisioning chain**:
+there is no console create-agent HTTP route (`native/hagency/src/console/agents.rs`
+is the GET list plus `{id}/start|stop|preset`), so the agent must be
+provisioned the way the product provisions one — the Matrix intake admission
+chain (owner message → intake admit → approval → effect observed), whose
+admission writes the roster row through the store's own path. The builder
+reuses the PC-C0b bootstrap/approval fixture and the two-agent pair fixtures
+to drive that chain; **seeding the roster row directly is forbidden** — the
+scenario proves the chain, not a prepared row. The workflow's browser job
+and the bootstrap path are licensed below. The existing
 `native_console_agent_roster_browser` scenario keeps asserting today's
 fixture-seeded lane; this one proves the newly-provisioned-agent path the
 plan's definition of done names.
