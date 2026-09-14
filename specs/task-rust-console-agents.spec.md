@@ -84,7 +84,7 @@ Scenario: The agent roster page renders under the native browser boundary
   Then the roster reaches data-native-state ready with no external request and no credential value on screen
 
 Scenario: The browser proves a real newly provisioned agent through the live server
-  Owed Selector: native_console_browser_proves_a_real_agent (parked — the name is owed by the implementing slice and binds only when it lands; no Test: line here yet)
+  Test: native_console_browser_proves_a_real_agent
   Level: integration
   Test Double: a live native Salvo server with an agent provisioned through the real provisioning route, and the browser lane's real Chromium pointed at that server
   Given a live native server with a freshly provisioned agent registered through the real provisioning route — not a fixture name, not the static export's pre-generated list
