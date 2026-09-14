@@ -19,10 +19,10 @@ effect observed) to `verify_request` and `admit`, exactly as ADR-095's
 ## Constraints
 
 ### Must
-- Observe the provisioning request through the production Matrix ingress: the `com.hagency.engagement.request.v1` event carried by the fake peer as the retained product sends it (the bridge passes the Matrix event id as the request id).
+- Observe the provisioning request through the production Matrix ingress: the `com.hagency.engagement.request.v1` event carried by the fake peer, whose body carries a **native-valid `request_id`** (the idempotency key) and the Matrix event id as the **`source_event_id`**.
 - Verify it with the same `verify_request` (`hagency-core/src/authority.rs:196`) — the event-type, source-event, room and sender checks already there — so an unverified request is refused **before** `admit`.
 - Call `DomainRepository::admit` exactly once for a verified request — the single minting write — and observe the provider approval as the separate `approve` verdict, never folded into the mint.
-- Refuse a duplicate request (same `source_event_id`) by the same id before any second INSERT.
+- Key idempotency on `request_id`: an identical duplicate (same `request_id` + same digest) replays the prior admission; a same-`request_id` different-content request is refused as a conflict — never a second INSERT.
 
 ### Must Not
 - Do not mint an engagement outside `admit` — no second INSERT, no direct roster write, no fixture-style seeding in the production path.
@@ -40,6 +40,7 @@ effect observed) to `verify_request` and `admit`, exactly as ADR-095's
 - native/hagency-matrix/src/lib.rs
 - native/hagency-core/src/replies.rs
 - native/hagency/src/bootstrap.rs
+- native/hagency/src/bootstrap/config.rs
 - native/hagency/src/lib.rs
 - native/hagency-store/src/domain/verified_ingress.rs
 - native/hagency-store/src/domain_worker.rs
@@ -64,13 +65,21 @@ Scenario: A provider-approved request provisions an engagement through the produ
   When the intake hook assembles the ProjectRequest and the three RoomObservations from the collector's SDK facts and calls verify_request then DomainStore::admit
   Then admit runs exactly once and the engagement exists with its minted en_ id — the provider verdict is observed afterwards as the separate approve step, never folded into the mint
 
-Scenario: A duplicate provisioning request is refused by the same id
+Scenario: An identical duplicate provisioning request replays the prior admission
   Owed Selector: native_provisioning_ingress_refuses_a_duplicate_by_the_same_id (parked — binds with this slice; no Test: line here yet)
   Level: integration
-  Test Double: the same event delivered twice with the same request_id (distinct from the carried source_event_id)
+  Test Double: the same event delivered twice with the same request_id and the same content digest
   Given a request already admitted for a request_id (the requester's native-valid idempotency key)
-  When the same event is delivered again
-  Then the ingress refuses it on the same request_id idempotency key and no second engagement row is minted
+  When the identical event is delivered again
+  Then the prior admission is returned and counted replayed — no second engagement row is minted
+
+Scenario: A same-key different-content request is refused as a conflict and quarantined
+  Owed Selector: native_provisioning_ingress_refuses_a_conflicting_request_by_the_same_key (parked — binds with this slice; no Test: line here yet)
+  Level: integration
+  Test Double: the same request_id delivered with a different content digest
+  Given a request already admitted for a request_id whose content digest differs
+  When the conflicting event is delivered
+  Then the ingress refuses it as a conflict on the same request_id key and quarantines it — no second engagement row is minted
 
 Scenario: An unverified provisioning request is refused before admit
   Owed Selector: native_provisioning_ingress_refuses_unverified_before_admit (parked — binds with this slice; no Test: line here yet)
