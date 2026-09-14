@@ -912,7 +912,7 @@ async fn native_file_service_media_startup_observation() {
     assert_eq!(snapshot["child"]["state"], "running");
     assert_eq!(snapshot["stderr_truncated"], false);
     assert!(serde_json::to_vec(&snapshot).unwrap().len() <= 1024);
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
     child.stop_and_reap();
     f.fake.close().await;
 }
@@ -1006,7 +1006,7 @@ async fn native_file_service_original_observation() {
         panic.downcast_ref::<&'static str>(),
         Some(&"fixture original failure retained")
     );
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
     f.fake.close().await;
 }
 

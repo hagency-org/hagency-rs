@@ -3,7 +3,16 @@ use hagency_core::replies::*;
 use hagency_matrix::{CancellationToken, HostConfig, HostIdentity, HostRoom, Limits};
 use hagency_store::{DomainRepository, DomainStore, EffectOutcome, EffectState};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fmt::Debug, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -275,6 +284,7 @@ pub fn response(status: u16, body: &[u8]) -> Vec<u8> {
 pub struct Fake {
     pub endpoint: String,
     requests: mpsc::Receiver<Request>,
+    count: Arc<AtomicU64>,
     stop: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -306,6 +316,8 @@ impl Fake {
         let (tx, requests) = mpsc::channel(32);
         let stop = CancellationToken::new();
         let token = stop.clone();
+        let count = Arc::new(AtomicU64::new(0));
+        let seen = count.clone();
         let task = tokio::spawn(async move {
             let mut jobs = JoinSet::new();
             loop {
@@ -315,10 +327,11 @@ impl Fake {
                     result = listener.accept(), if jobs.len() < 16 => {
                         let (stream,_) = result.unwrap();
                         let tx = tx.clone(); let acceptor = acceptor.clone();
+                        let seen = seen.clone();
                         jobs.spawn(async move {
                             if let Some(acceptor) = acceptor {
-                                if let Ok(Ok(stream)) = timeout(Duration::from_secs(5), acceptor.accept(stream)).await { serve(stream, tx).await; }
-                            } else { serve(stream, tx).await; }
+                                if let Ok(Ok(stream)) = timeout(Duration::from_secs(5), acceptor.accept(stream)).await { serve(stream, tx, &seen).await; }
+                            } else { serve(stream, tx, &seen).await; }
                         });
                     }
                 }
@@ -329,6 +342,7 @@ impl Fake {
         Self {
             endpoint,
             requests,
+            count,
             stop,
             task,
         }
@@ -353,19 +367,65 @@ impl Fake {
             .expect("scripted HTTP request missing after SDK plus HTTP budget")
             .expect("scripted HTTP peer closed")
     }
-    pub async fn no_request(&mut self) {
-        assert!(
-            timeout(Duration::from_millis(80), self.requests.recv())
-                .await
-                .is_err()
-        );
+    /// Total admitted requests, counted once per request when the fixture
+    /// accepts it — before any response is written — from every connection.
+    pub fn requests(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
+    /// Observe that the transport stays quiet AFTER a sequencing point the
+    /// test drove to completion itself. The drain window is derived from the
+    /// fixture transport's own admission horizon (connect + headers): a send
+    /// decided before the sequencing point finishes admitting inside that
+    /// horizon, so the counter moving inside the window fails the sequenced
+    /// assert, while the no-resend claim itself is carried by the sequenced
+    /// observation the caller already made, never by this quietness check.
+    pub async fn quiesced(&mut self, since: u64) {
+        let deadline = tokio::time::Instant::now() + limits().connect + limits().headers;
+        if let Ok(Some(request)) = tokio::time::timeout_at(deadline, self.requests.recv()).await {
+            panic!(
+                "transport was expected to be quiescent but admitted {} {}",
+                request.method, request.target
+            );
+        }
+        assert_eq!(self.requests(), since);
+    }
+    /// Absorb requests whose bytes were admitted during an earlier phase —
+    /// e.g. a sync long-poll racing the custody step that terminated the
+    /// production loop. Bounded by the same derived window as `quiesced`,
+    /// never a literal: such requests are answered benignly so nothing
+    /// hangs, while a write (any non-GET send) arriving here is a genuine
+    /// re-send and fails the test.
+    pub async fn absorb_earlier(&mut self) {
+        let deadline = tokio::time::Instant::now() + limits().connect + limits().headers;
+        while let Ok(Some(request)) = tokio::time::timeout_at(deadline, self.requests.recv()).await
+        {
+            assert!(
+                request.method == "GET",
+                "write re-sent after the production step completed: {} {}",
+                request.method,
+                request.target
+            );
+            if request.target.starts_with("/_matrix/client/v3/sync?") {
+                request.json(200, sync(""));
+            } else if request.target == "/_matrix/client/v3/account/whoami" {
+                request.json(200, who());
+            } else if request.target.ends_with("/state") {
+                request.json(200, state());
+            } else {
+                request.json(200, json!({}));
+            }
+        }
     }
     pub async fn close(self) {
         self.stop.cancel();
         self.task.await.unwrap();
     }
 }
-async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, tx: mpsc::Sender<Request>) {
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    tx: mpsc::Sender<Request>,
+    seen: &Arc<AtomicU64>,
+) {
     let mut bytes = Vec::new();
     let headers_end = loop {
         if let Some(n) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
@@ -417,6 +477,11 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, tx: mpsc::Sende
         body: bytes[headers_end..headers_end + length].to_vec(),
         response,
     };
+    // Admission: the request bytes were received and parsed. Counting here —
+    // before any response — makes the counter insensitive to how the client
+    // reacts to the response, so a late admitted request can never slip past
+    // a later quiescence check.
+    seen.fetch_add(1, Ordering::SeqCst);
     if tx.send(request).await.is_err() {
         return;
     }

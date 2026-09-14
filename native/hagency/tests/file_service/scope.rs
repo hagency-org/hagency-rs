@@ -5,7 +5,7 @@ use hagency_core::{file_delivery::*, replies::MatrixRoomInvalidation, uploads::*
 async fn native_file_service_authority_queue_retirement_and_lower_limit() {
     let mut h = Harness::new(8).await;
     if !h.initialize().await {
-        h.fake.no_request().await;
+        h.fake.quiesced(h.fake.requests()).await;
         h.close().await;
         return;
     }
@@ -89,7 +89,7 @@ async fn native_file_service_authority_queue_retirement_and_lower_limit() {
     );
     h.empty().await;
     assert_eq!(h.count(), 2);
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     h.close().await;
 }
 
@@ -97,7 +97,7 @@ async fn native_file_service_authority_queue_retirement_and_lower_limit() {
 async fn native_file_service_authority_expired_attempt() {
     let mut h = Harness::new(128).await;
     if !h.initialize().await {
-        h.fake.no_request().await;
+        h.fake.quiesced(h.fake.requests()).await;
         h.close().await;
         return;
     }
@@ -142,7 +142,7 @@ async fn native_file_service_authority_expired_attempt() {
         Err(FileError::Unauthorized)
     );
     h.empty().await;
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     h.close().await;
 }
 
@@ -345,6 +345,6 @@ async fn native_file_service_protocol_delivered_after_cancellation() {
     assert!(retained.cancel_requested);
     assert_eq!(retained.error_code, Some(FileDeliveryFailure::Cancelled));
     assert_eq!(h.count(), 1);
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     h.close().await;
 }

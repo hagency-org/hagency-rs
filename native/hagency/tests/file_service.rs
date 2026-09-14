@@ -65,7 +65,7 @@ async fn native_file_service_executable() {
         let capabilities = f.capabilities().await;
         assert_eq!(capabilities["agent_execution"], false);
         assert_eq!(capabilities["production_api_parity"], false);
-        f.fake.no_request().await;
+        f.fake.quiesced(f.fake.requests()).await;
         // Explicit process teardown: this assertion does not claim qualified
         // shutdown on platforms whose process-tree census is still unknown.
         child.stop_and_reap();
@@ -169,7 +169,7 @@ async fn native_file_service_uncertainty() {
             )
             .unwrap();
         assert_eq!(task, "in_progress");
-        f.fake.no_request().await;
+        f.fake.quiesced(f.fake.requests()).await;
         child.stop_and_reap();
         f.fake.close().await;
     }
@@ -233,7 +233,7 @@ async fn native_file_service_uncertainty() {
     assert_eq!(f.event_puts, 0);
     assert_eq!(f.delivered_count(), 0);
     assert!(f.peer.writes.is_empty() && f.peer.events.is_empty());
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
     child.stop_and_reap();
     f.fake.close().await;
 }

@@ -312,7 +312,7 @@ pub(super) fn input(id: &str) -> SendFile {
 async fn native_file_service_admission_blocked_worker_caller_loss() {
     let mut h = Harness::new(128).await;
     if !h.initialize().await {
-        h.fake.no_request().await;
+        h.fake.quiesced(h.fake.requests()).await;
         h.close().await;
         return;
     }
@@ -372,7 +372,7 @@ async fn native_file_service_admission_blocked_worker_caller_loss() {
         );
         assert!(receipt.captured.is_none());
     }
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     h.close().await;
 }
 
@@ -380,7 +380,7 @@ async fn native_file_service_admission_blocked_worker_caller_loss() {
 async fn native_file_service_replay_bounds_changed_source_after_release() {
     let mut h = Harness::new(128).await;
     if !h.initialize().await {
-        h.fake.no_request().await;
+        h.fake.quiesced(h.fake.requests()).await;
         h.close().await;
         return;
     }
@@ -428,7 +428,7 @@ async fn native_file_service_replay_bounds_changed_source_after_release() {
             && !json.contains("mxc:")
             && !json.contains("work/")
     );
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     h.close().await;
 }
 
@@ -497,7 +497,7 @@ async fn native_file_service_admission_network_wait_process() {
     use sha2::{Digest, Sha256};
     let mut h = Harness::new(128).await;
     if !h.initialize().await {
-        h.fake.no_request().await;
+        h.fake.quiesced(h.fake.requests()).await;
         h.close().await;
         println!("{REFUSED}");
         return;
@@ -634,7 +634,7 @@ async fn native_file_service_admission_network_wait_process() {
         }),
         Err(FileError::Unknown)
     ));
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     println!("{MARKER}");
     // Deliberately retain exact source/SDK/media/process wrappers until the
     // enclosing test child exits. No fabricated release or status is written.
@@ -708,7 +708,7 @@ async fn native_file_service_shutdown_original_job_unwind() {
 
     let mut h = Harness::new(128).await;
     if !h.initialize().await {
-        h.fake.no_request().await;
+        h.fake.quiesced(h.fake.requests()).await;
         h.close().await;
         println!("{REFUSED}");
         return;
@@ -832,7 +832,7 @@ async fn native_file_service_shutdown_original_job_unwind() {
         }),
         Err(FileError::Unknown)
     ));
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     println!("{MARKER}");
     // Only the enclosing, reaped process ends physical custody. No test setter
     // releases the original job, lock, preparation or execution Report.

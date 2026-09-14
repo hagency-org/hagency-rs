@@ -283,5 +283,5 @@ async fn native_private_approval_delivery_wiring_refuses_without_enrollment() {
         stderr.contains("approval enrollment refused"),
         "refusal was not the named enrollment failure: {stderr}"
     );
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
 }

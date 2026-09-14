@@ -26,7 +26,7 @@ async fn native_file_service_shutdown_actual_worker_receipt_loss_and_unwind() {
 async fn native_file_service_shutdown_blocked_original_job() {
     let mut h = Harness::new(128).await;
     if !h.initialize().await {
-        h.fake.no_request().await;
+        h.fake.quiesced(h.fake.requests()).await;
         h.close().await;
         return;
     }
@@ -64,7 +64,7 @@ async fn native_file_service_shutdown_blocked_original_job() {
         receipt.error_code,
         Some(hagency_core::file_delivery::FileDeliveryFailure::Cancelled)
     );
-    h.fake.no_request().await;
+    h.fake.quiesced(h.fake.requests()).await;
     h.close().await;
 }
 

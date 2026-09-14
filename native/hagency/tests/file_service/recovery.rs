@@ -210,6 +210,6 @@ async fn native_file_service_restart() {
     assert_eq!(f.peer.shares, 1);
     assert_eq!(f.peer.events.len(), 1);
     child.stop_and_reap();
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
     f.fake.close().await;
 }

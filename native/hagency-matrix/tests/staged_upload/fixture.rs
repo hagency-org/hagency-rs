@@ -185,7 +185,7 @@ impl Fixture {
                     eprintln!(
                         "ADR089 qualification: FileSyncedDirectoryUnconfirmed; exact encrypted custody returned, POST unavailable"
                     );
-                    self.fake.no_request().await;
+                    self.fake.quiesced(self.fake.requests()).await;
                     return None;
                 }
             }
@@ -307,7 +307,7 @@ impl Fixture {
                     eprintln!(
                         "ADR089 qualification: FileSyncedDirectoryUnconfirmed; exact encrypted custody returned, POST unavailable"
                     );
-                    self.fake.no_request().await;
+                    self.fake.quiesced(self.fake.requests()).await;
                     return None;
                 }
             }
@@ -591,7 +591,7 @@ impl Fixture {
                 .unwrap()
                 .contains("1 passed")
         );
-        fake.no_request().await;
+        fake.quiesced(fake.requests()).await;
         fake.close().await;
     }
 }

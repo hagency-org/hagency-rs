@@ -73,7 +73,7 @@ async fn native_receive_executable() {
         );
         assert_eq!(status["agent_execution"], false);
         assert_eq!(status["production_api_parity"], false);
-        f.fake.no_request().await;
+        f.fake.quiesced(f.fake.requests()).await;
         child.stop_and_reap();
         f.fake.close().await;
     }
@@ -110,7 +110,7 @@ async fn native_receive_replay_bounds() {
         .query_row("SELECT state FROM received_files", [], |r| r.get(0))
         .unwrap();
     assert_eq!(state, "ready");
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
     child.stop_and_reap();
     f.fake.close().await;
 }
@@ -137,7 +137,7 @@ async fn native_receive_uncertainty() {
             .starts_with(".hagency-received-")
     }));
     assert!(f.receipt("bytes").is_none());
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
     child.stop_and_reap();
     f.fake.close().await;
 }

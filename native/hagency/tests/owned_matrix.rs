@@ -44,7 +44,7 @@ async fn native_matrix_owned_complete_workflow() {
             .unwrap()
             .replayed
     );
-    fake.no_request().await;
+    fake.quiesced(fake.requests()).await;
 
     let active =
         w.f.store
@@ -166,7 +166,7 @@ async fn native_matrix_owned_complete_workflow() {
         assert_eq!(report.failure, Some(Failure::CleanupUnknown));
         assert_eq!(w.count("SELECT COUNT(*) FROM resource_leases"), 1);
         assert!(w.f.store.claim_final_reply(60_000).await.unwrap().is_none());
-        fake.no_request().await;
+        fake.quiesced(fake.requests()).await;
     } else {
         assert!(cleanup.scope.whole_tree_stopped && cleanup.scope.signals_accepted);
         assert_eq!(report.failure, None);
@@ -208,7 +208,7 @@ async fn native_matrix_owned_complete_workflow() {
                 .unwrap()
                 .replayed
         );
-        fake.no_request().await;
+        fake.quiesced(fake.requests()).await;
     }
     drop(report);
     drop(operation);
@@ -244,7 +244,7 @@ async fn native_matrix_owned_notice_failure() {
         );
         w.assert_inactive(&intent, seq).await;
         assert!(w.collector.send_notice(notice, &cancel).await.is_err());
-        fake.no_request().await;
+        fake.quiesced(fake.requests()).await;
         w.close().await;
         fake.close().await;
     }
@@ -276,7 +276,7 @@ async fn native_matrix_owned_private_plaintext_refused() {
     assert_eq!(w.count("SELECT COUNT(*) FROM admitted_messages"), 0);
     assert_eq!(w.count("SELECT COUNT(*) FROM canonical_tasks"), 0);
     w.assert_no_execution();
-    fake.no_request().await;
+    fake.quiesced(fake.requests()).await;
     w.close().await;
     fake.close().await;
 }

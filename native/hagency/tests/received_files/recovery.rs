@@ -87,7 +87,7 @@ async fn native_receive_restart() {
     assert_eq!(std::fs::read(f.work.join(path)).unwrap(), before);
     assert_eq!(f.count("received_files"), 1);
     assert_eq!(f.gets, 1);
-    f.fake.no_request().await;
+    f.fake.quiesced(f.fake.requests()).await;
     restarted.stop_and_reap();
     drop(held);
     f.fake.close().await;
