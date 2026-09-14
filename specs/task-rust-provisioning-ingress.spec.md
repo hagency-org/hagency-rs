@@ -38,6 +38,7 @@ effect observed) to `verify_request` and `admit`, exactly as ADR-095's
 - native/hagency-matrix/src/collector/observation.rs
 - native/hagency-matrix/src/event_batch.rs
 - native/hagency-matrix/src/lib.rs
+- native/hagency-matrix/src/config.rs
 - native/hagency-core/src/replies.rs
 - native/hagency/src/bootstrap.rs
 - native/hagency/src/bootstrap/config.rs
@@ -55,6 +56,12 @@ effect observed) to `verify_request` and `admit`, exactly as ADR-095's
 ### Forbidden
 - Live services, live homeservers, credentials, deployed state.
 - native/hagency-store/src/domain.rs (admit is unchanged); native/hagency-core/src/authority.rs (verify_request is unchanged); native/hagency/src/console/**.
+
+## Decisions (2026-09-14, integration fix-up after the builder's blocker report)
+
+- The reception room is **pre-project**. A `com.hagency.engagement.request.v1` event observed there never carries a `ReplyRoute` (that shape binds a project, an owner and a fleet, none of which exist before admission) and is never resolved through `targets()`; the intake routes it by discriminator to `provision()` **before** target resolution, so `event_batch`'s `NotTarget` drop never sees it. Session routes keep refusing the reception room (`matrix_routes.rs` stays outside this slice).
+- The reception room enters the observed set through a dedicated `HostConfig` field (hence `config.rs` in Allowed Changes) filled at bootstrap from the store's recorded registration that `registration_fingerprint` names — store-driven and fail-closed (ADR-095 amendment 2026-09-14): a registration without a reception room is a named startup refusal, never a silent skip and never a new operator-supplied config field.
+- The provisioning facts (`RoomObservation` ×3, binding, name, powers) come from the collector's own room-state snapshots of the reception, project and owner rooms, as already committed on the builder's branch.
 
 ## Acceptance Criteria
 
