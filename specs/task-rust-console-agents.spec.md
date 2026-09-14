@@ -81,6 +81,26 @@ Scenario: The agent roster page renders under the native browser boundary
   When real Chromium opens /console/agents without any operator token
   Then the roster reaches data-native-state ready with no external request and no credential value on screen
 
+Scenario: The browser proves a real newly provisioned agent through the live server
+  Owed Selector: native_console_browser_proves_a_real_agent (parked — the name is owed by the implementing slice and binds only when it lands; no Test: line here yet)
+  Level: integration
+  Test Double: a live native Salvo server with an agent provisioned through the real provisioning route, and the browser lane's real Chromium pointed at that server
+  Given a live native server with a freshly provisioned agent registered through the real provisioning route — not a fixture name, not the static export's pre-generated list
+  When the browser lane loads the console against that live server
+  Then the provisioned agent appears in the roster with its real id
+  And the lifecycle controls act on that agent through the live server's own routes
+
+## Decisions
+
+**What the hosted browser job must change.** Today's browser lane serves the
+static export, whose roster pre-generates fixture agent names — the plan's
+own M7 warning. This scenario requires the lane to start the live native
+server (Salvo), provision one agent through the real bootstrap registration
+path, and point Chromium at the server's served console instead of the
+static export. The static-export walk stays as the existing
+`native_console_agent_roster_browser` scenario; this one proves the
+newly-provisioned-agent path the plan's definition of done names.
+
 ## Out of Scope
 
 The agent lifecycle (start/stop/preset behind a finite scope), a CLI read via an
