@@ -57,25 +57,25 @@ effect observed) to `verify_request` and `admit`, exactly as ADR-095's
 Scenario: A provider-approved request provisions an engagement through the production ingress
   Owed Selector: native_provisioning_ingress_admits_a_provider_approved_request (parked — the name is owed by the implementing slice and binds only when it lands; no Test: line here yet)
   Level: integration
-  Test Double: the shared fake peer delivering the com.hagency.engagement.request.v1 event as the retained product sends it
-  Given a fake peer delivering the request event through the Matrix intake chain
-  When the collector verifies the event and the provider approval is observed
-  Then admit runs exactly once and the engagement exists with its minted id
+  Test Double: the shared fake peer delivering a com.hagency.engagement.request.v1 event, plus the collector's own room-state snapshots for the reception, project and owner rooms
+  Given an intake event with kind com.hagency.engagement.request.v1 whose body carries the retained request fields (requestId = event id, project, projectRoomId, role, requester, requestedTokens, ratePerDay, agent, context)
+  When the intake hook assembles the ProjectRequest and the three RoomObservations from the collector's SDK facts and calls verify_request then DomainStore::admit
+  Then admit runs exactly once and the engagement exists with its minted en_ id — the provider verdict is observed afterwards as the separate approve step, never folded into the mint
 
 Scenario: A duplicate provisioning request is refused by the same id
   Owed Selector: native_provisioning_ingress_refuses_a_duplicate_by_the_same_id (parked — binds with this slice; no Test: line here yet)
   Level: integration
   Test Double: the same event delivered twice with the same source_event_id
-  Given a request already admitted for a source_event_id
+  Given a request already admitted for a request_id (= the carried event id)
   When the same event is delivered again
-  Then the ingress refuses it by the same id and no second engagement row is minted
+  Then the ingress refuses it on the same request_id idempotency key and no second engagement row is minted
 
 Scenario: An unverified provisioning request is refused before admit
   Owed Selector: native_provisioning_ingress_refuses_unverified_before_admit (parked — binds with this slice; no Test: line here yet)
   Level: integration
-  Test Double: a request event whose observation fails the verify_request checks
-  Given a request whose event, room or sender does not satisfy verify_request
-  When the ingress observes it
+  Test Double: a request event whose assembled RequestObservation fails the verify_request checks (a missing/expired room snapshot or a mismatched binding)
+  Given a request whose room snapshots, powers, binding or sender do not satisfy verify_request
+  When the intake hook assembles the observation
   Then it is refused before admit runs and no engagement row exists
 
 ## Decisions
