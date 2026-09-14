@@ -36,7 +36,9 @@ effect observed) to `verify_request` and `admit`, exactly as ADR-095's
 - native/hagency-matrix/src/intake.rs
 - native/hagency-matrix/src/collector.rs
 - native/hagency-matrix/src/collector/observation.rs
+- native/hagency-matrix/src/event_batch.rs
 - native/hagency-matrix/src/lib.rs
+- native/hagency-core/src/replies.rs
 - native/hagency/src/bootstrap.rs
 - native/hagency/src/lib.rs
 - native/hagency-store/src/domain/verified_ingress.rs
