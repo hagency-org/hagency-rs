@@ -1,4 +1,6 @@
 use super::fixture::*;
+use hagency_core::tasks::{DispatchInput, ResourceLease, SessionBinding};
+use hagency_store::EffectOutcome;
 use salvo::prelude::*;
 use serde_json::json;
 use std::{
@@ -777,6 +779,137 @@ async fn native_console_agent_roster_browser() {
     );
     handle.stop_graceful(Some(Duration::from_secs(2)));
     serving.await.unwrap().unwrap();
+    f.close().await;
+}
+
+/// O2 / DoD line 4: prove the console against a live server with an agent
+/// provisioned through the REAL provisioning route — not a fixture name, not
+/// the static export's pre-generated list. The browser roster lane renders
+/// the live store (the read-only ticket the harness owns), and the same
+/// live store is then read and stopped through its own routes.
+#[tokio::test]
+async fn native_console_browser_proves_a_real_agent() {
+    let address = address();
+    let f = Fixture::new(address, Some(&built()));
+    hagency_store::private::write_new(
+        &f.root.path().join("state/operator.token"),
+        TOKEN.as_bytes(),
+    )
+    .unwrap();
+    // Provision one agent through the real bootstrap registration path the
+    // console's create-agent flow drives at the store: admit an approved
+    // engagement on its own pool, settle its provision effect, and give it a
+    // live started dispatch so a stop has something to fence.
+    // The fixture's proof carries `observed_at_ms: 1000` (hagency-store
+    // tests/common), so the provisioning clock must stay within its 30s
+    // freshness window — the same small literal clock `seed()` uses, never
+    // the real epoch.
+    let pool = common::resource("real_agent_pool", "real_agent_seat", 1000);
+    f.domain.put_resource(pool.clone()).await.unwrap();
+    let proof = common::proof(&common::request("real_agent_request", "RealAgentWorker", &pool, 100));
+    let admitted = f.domain.admit(proof.clone(), 1000).await.unwrap();
+    let real_id = admitted.id.clone();
+    f.domain
+        .approve("real_agent_approve".into(), proof, 1000)
+        .await
+        .unwrap();
+    let effect = f.domain.claim_effect().await.unwrap().expect("a provision effect is pending");
+    assert_eq!(effect.engagement_id, real_id, "the claimed effect belongs to the real agent");
+    f.domain
+        .observe_effect(
+            effect.id,
+            effect.fence,
+            EffectOutcome::Applied { receipt: "real agent provisioned".into() },
+        )
+        .await
+        .unwrap();
+    f.domain
+        .register_session(SessionBinding {
+            id: "real_agent_session".into(),
+            engagement_id: real_id.clone(),
+            room_id: "!project:example.test".into(),
+            thread_root: None,
+        })
+        .await
+        .unwrap();
+    f.domain
+        .create_canonical_task("real_agent_task".into(), "real_agent_session".into(), "Real agent work".into(), now())
+        .await
+        .unwrap();
+    f.domain.register_workspace("real_agent_workspace".into()).await.unwrap();
+    f.domain
+        .enqueue_dispatch(DispatchInput {
+            id: "real_agent_dispatch".into(),
+            session_id: "real_agent_session".into(),
+            task_id: Some("real_agent_task".into()),
+            resources: vec![ResourceLease { id: "real_agent_workspace".into(), exclusive: true }],
+            payload: json!({"instruction":"real agent"}),
+        })
+        .await
+        .unwrap();
+    // max_live=128: the fixture's seed already started private_dispatch, so
+    // the live-count guard (leased/started/parked) would refuse a second
+    // live dispatch under max_live=1. The seed itself claims with 128.
+    let cap = f.domain
+        .claim_dispatch("real_agent_host".into(), now(), 60_000, 60_000, 128)
+        .await
+        .unwrap()
+        .expect("the real agent's dispatch is claimable");
+    let scope = f.domain.owned_dispatch_scope(cap.clone()).await.unwrap();
+    f.domain.start_owned_dispatch(cap, scope.fingerprint().to_owned()).await.unwrap();
+
+    // Serve the live app and drive the browser roster lane against it.
+    let acceptor = TcpListener::new(address).try_bind().await.unwrap();
+    let server = Server::new(acceptor);
+    let handle = server.handle();
+    let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
+    let url = hagency::console::client::access(&f.root.path().join("state"), address)
+        .await
+        .unwrap();
+    let mut child = Command::new(node())
+        .arg(script())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("actual browser tooling must exist");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            format!("{}\n", json!({"base":format!("http://{address}"),"url":url,"roster":true})).as_bytes(),
+        )
+        .await
+        .unwrap();
+    let output = child.wait_with_output().await.unwrap();
+    assert!(
+        output.status.success(),
+        "real roster browser assertions failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("PASS native agent roster browser"),
+        "the roster lane reported no pass marker"
+    );
+    handle.stop_graceful(Some(Duration::from_secs(2)));
+    serving.await.unwrap().unwrap();
+
+    // The roster the browser just rendered carries the real id (the live
+    // store read, not a fixture row), and a stop acts on that agent as
+    // observed in the store.
+    let rows = f.domain.agent_roster().await.unwrap();
+    assert!(
+        rows.iter().any(|r| r.engagement_id == real_id),
+        "the provisioned agent appears in the live roster with its real id"
+    );
+    let stop = f.domain.stop_dispatch_for_agent(real_id.clone(), now()).await.unwrap();
+    assert_eq!(
+        stop["dispatch_id"], json!("real_agent_dispatch"),
+        "the stop fences the real agent's live dispatch"
+    );
+    assert_eq!(stop["stop_pending"], json!(true), "the store observed an unsettled stop row");
     f.close().await;
 }
 
