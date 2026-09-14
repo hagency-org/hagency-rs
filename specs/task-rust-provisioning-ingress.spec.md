@@ -60,15 +60,15 @@ Scenario: A provider-approved request provisions an engagement through the produ
   Owed Selector: native_provisioning_ingress_admits_a_provider_approved_request (parked — the name is owed by the implementing slice and binds only when it lands; no Test: line here yet)
   Level: integration
   Test Double: the shared fake peer delivering a com.hagency.engagement.request.v1 event, plus the collector's own room-state snapshots for the reception, project and owner rooms
-  Given an intake event with kind com.hagency.engagement.request.v1 whose body carries the retained request fields (requestId = event id, project, projectRoomId, role, requester, requestedTokens, ratePerDay, agent, context)
+  Given an intake event with kind com.hagency.engagement.request.v1 whose body carries the retained request fields (requestId = a native-valid request_id distinct from the event id, source_event_id = the event id, project, projectRoomId, role, requester, requestedTokens, ratePerDay, agent, context)
   When the intake hook assembles the ProjectRequest and the three RoomObservations from the collector's SDK facts and calls verify_request then DomainStore::admit
   Then admit runs exactly once and the engagement exists with its minted en_ id — the provider verdict is observed afterwards as the separate approve step, never folded into the mint
 
 Scenario: A duplicate provisioning request is refused by the same id
   Owed Selector: native_provisioning_ingress_refuses_a_duplicate_by_the_same_id (parked — binds with this slice; no Test: line here yet)
   Level: integration
-  Test Double: the same event delivered twice with the same source_event_id
-  Given a request already admitted for a request_id (= the carried event id)
+  Test Double: the same event delivered twice with the same request_id (distinct from the carried source_event_id)
+  Given a request already admitted for a request_id (the requester's native-valid idempotency key)
   When the same event is delivered again
   Then the ingress refuses it on the same request_id idempotency key and no second engagement row is minted
 
