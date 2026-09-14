@@ -43,6 +43,7 @@ effect observed) to `verify_request` and `admit`, exactly as ADR-095's
 - native/hagency/src/bootstrap/config.rs
 - native/hagency/src/lib.rs
 - native/hagency-store/src/domain/verified_ingress.rs
+- native/hagency-store/src/domain/approvals.rs
 - native/hagency-store/src/domain_worker.rs
 - native/hagency-matrix/tests/
 - native/hagency/tests/
@@ -81,13 +82,13 @@ Scenario: A same-key different-content request is refused as a conflict and quar
   When the conflicting event is delivered
   Then the ingress refuses it as a conflict on the same request_id key and quarantines it — no second engagement row is minted
 
-Scenario: An unverified provisioning request is refused before admit
+Scenario: An unverified or unenrolled provisioning request is refused before admit
   Owed Selector: native_provisioning_ingress_refuses_unverified_before_admit (parked — binds with this slice; no Test: line here yet)
   Level: integration
-  Test Double: a request event whose assembled RequestObservation fails the verify_request checks (a missing/expired room snapshot or a mismatched binding)
-  Given a request whose room snapshots, powers, binding or sender do not satisfy verify_request
+  Test Double: a request event whose assembled RequestObservation fails the verify_request checks (a missing/expired room snapshot or a mismatched binding), or whose owner has no enrolled owner room
+  Given a request whose room snapshots, powers, binding or sender do not satisfy verify_request, or whose owner has no enrolled owner room in the store
   When the intake hook assembles the observation
-  Then it is refused before admit runs and no engagement row exists
+  Then it is refused before admit runs with a named reason — an unverified request and an unenrolled owner both fail closed — and no engagement row exists
 
 ## Decisions
 
