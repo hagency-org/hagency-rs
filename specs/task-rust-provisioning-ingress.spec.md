@@ -66,7 +66,7 @@ Scenario: A provider-approved request provisions an engagement through the produ
   Then admit runs exactly once and the engagement exists with its minted en_ id — the provider verdict is observed afterwards as the separate approve step, never folded into the mint
 
 Scenario: An identical duplicate provisioning request replays the prior admission
-  Owed Selector: native_provisioning_ingress_refuses_a_duplicate_by_the_same_id (parked — binds with this slice; no Test: line here yet)
+  Owed Selector: native_provisioning_ingress_replays_an_identical_duplicate (parked — binds with this slice; no Test: line here yet)
   Level: integration
   Test Double: the same event delivered twice with the same request_id and the same content digest
   Given a request already admitted for a request_id (the requester's native-valid idempotency key)
