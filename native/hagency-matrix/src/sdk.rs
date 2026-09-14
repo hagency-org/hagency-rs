@@ -214,7 +214,7 @@ impl Owner {
                     Ok(v) => v,
                     Err(e) => {
                         #[cfg(test)]
-                        if let Some(trace) = &thread_observation { trace.record(ObservationPhase::PrepareFailed, Some(e)); }
+                        if let Some(trace) = &thread_observation { trace.record(ObservationPhase::PrepareFailed, Some(e.clone())); }
                         let _ = ready.send(Err(e));
                         return;
                     }
@@ -251,7 +251,7 @@ impl Owner {
                         Ok(v) => v,
                         Err(e) => {
                             #[cfg(test)]
-                            if let Some(trace) = &thread_observation { trace.record(ObservationPhase::SdkOpenReturned, Some(e)); }
+                            if let Some(trace) = &thread_observation { trace.record(ObservationPhase::SdkOpenReturned, Some(e.clone())); }
                             init_error = Some(e);
                             return None;
                         }
@@ -394,7 +394,7 @@ impl Owner {
                                 let settle = matches!(&command, crate::outgoing::state::Command::Settle);
                                 let result = sdk.outgoing(command).await;
                                 #[cfg(test)]
-                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().copied());
+                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().cloned());
                                 #[cfg(test)]
                                 if accept
                                     && result.is_ok()
@@ -477,25 +477,25 @@ impl Owner {
                                     &command_observation,
                                 ).await;
                                 #[cfg(test)]
-                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().copied());
+                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().cloned());
                                 let _ = reply.send(result);
                             }
                             Command::IntakeAck(digest, index, ack, reply) => {
                                 let result = sdk.intake_ack(&digest, index, ack).await;
                                 #[cfg(test)]
-                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().copied());
+                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().cloned());
                                 let _ = reply.send(result);
                             }
                             Command::IntakeFinish(digest, reply) => {
                                 let result = sdk.intake_finish(&digest).await;
                                 #[cfg(test)]
-                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().copied());
+                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().cloned());
                                 let _ = reply.send(result);
                             }
                             Command::IntakeQuarantine(reason, reply) => {
                                 let result = sdk.intake_quarantine(reason).await;
                                 #[cfg(test)]
-                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().copied());
+                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().cloned());
                                 let _ = reply.send(result);
                             }
                             Command::Cursor(reply) => {
@@ -507,7 +507,7 @@ impl Owner {
                             Command::Sync(value, reply) => {
                                 let result = sdk.sync(value).await;
                                 #[cfg(test)]
-                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().copied());
+                                observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().cloned());
                                 let _ = reply.send(result);
                             }
                             Command::Close(reply) => {
@@ -516,8 +516,8 @@ impl Owner {
                                 let result = sdk.close().await;
                                 #[cfg(test)]
                                 {
-                                    observation::command(&command_observation, ObservationPhase::CloseStoresReturned, result.as_ref().err().copied());
-                                    observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().copied());
+                                    observation::command(&command_observation, ObservationPhase::CloseStoresReturned, result.as_ref().err().cloned());
+                                    observation::command(&command_observation, ObservationPhase::Returned, result.as_ref().err().cloned());
                                     close_observation = command_observation;
                                 }
                                 return Some((reply, result));
@@ -561,7 +561,7 @@ impl Owner {
         if let Some(trace) = &opening_observation {
             trace.record(
                 ObservationPhase::OpenCallerReturned,
-                opened.as_ref().err().copied(),
+                opened.as_ref().err().cloned(),
             );
         }
         let upload_context = opened?;
@@ -648,7 +648,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -666,7 +666,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -686,7 +686,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -704,7 +704,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -722,7 +722,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -744,7 +744,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -767,7 +767,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -785,7 +785,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -803,7 +803,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
@@ -822,7 +822,7 @@ impl Owner {
         observation::command(
             &_observation,
             ObservationPhase::CallerReturned,
-            result.as_ref().err().copied(),
+            result.as_ref().err().cloned(),
         );
         result
     }
