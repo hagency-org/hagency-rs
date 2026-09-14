@@ -51,6 +51,8 @@ is bound there, executed only in the enabled lane.
 - mockup/lib/native-api.js
 - mockup/scripts/build-native-console.mjs
 - specs/task-rust-console-agents.spec.md
+- .github/workflows/rust.yml
+- native/hagency/src/bootstrap.rs
 - knowledge/decisions/adr-126-native-agent-roster.md
 - native/README.md
 - docs/progress.md
@@ -92,14 +94,20 @@ Scenario: The browser proves a real newly provisioned agent through the live ser
 
 ## Decisions
 
-**What the hosted browser job must change.** Today's browser lane serves the
-static export, whose roster pre-generates fixture agent names — the plan's
-own M7 warning. This scenario requires the lane to start the live native
-server (Salvo), provision one agent through the real bootstrap registration
-path, and point Chromium at the server's served console instead of the
-static export. The static-export walk stays as the existing
-`native_console_agent_roster_browser` scenario; this one proves the
-newly-provisioned-agent path the plan's definition of done names.
+**What the hosted browser job must change.** Today's browser lane already
+runs a live Salvo server and serves the built console assets through it
+(`tests/console/browser.rs` binds a listener and serves the app's router;
+the assets come from `build-native-console.mjs`), and the roster itself is
+a live store read — what is pre-generated is the per-agent *detail page*
+(`generateStaticParams`), not the roster data, and the lane's engagement is
+seeded by the test fixture (`db.register` + `admit`), not provisioned. The
+gap this scenario closes is therefore **the real provisioning route**: the
+lane must provision one agent through the production bootstrap registration
+path — with the workflow's browser job and the bootstrap path licensed
+below — instead of seeding a fixture row. The existing
+`native_console_agent_roster_browser` scenario keeps asserting today's
+fixture-seeded lane; this one proves the newly-provisioned-agent path the
+plan's definition of done names.
 
 ## Out of Scope
 
