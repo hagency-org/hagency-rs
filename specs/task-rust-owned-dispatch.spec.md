@@ -126,7 +126,7 @@ Scenario: Absolute operation deadline stops silent work
   Then retained process stop precedes negative fencing and no clean completion is inferred
 
 Scenario: A spawn that outlives the operation budget is abandoned, fenced and never orphaned
-  Owed Selector: native_owned_dispatch_spawn_outliving_budget_is_fenced (parked — the name is owed by glm5's implementation and binds only when it lands; no Test: line here yet)
+  Test: native_owned_dispatch_spawn_outliving_budget_is_fenced
   Level: integration
   Test Double: a #[cfg(test)] Host mode whose child stalls before exec, its budget derived from HAGENCY_OPERATION_BUDGET_MS — no product sleep
   Given a finite absolute host deadline and a spawn handshake that does not complete within it
