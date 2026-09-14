@@ -418,3 +418,56 @@ reporting surface). Wired as a step of the tick's loop, shaped on
 `notice_send_inspections` (`notice_id`) key on a reply/notice rather than a dispatch;
 their release rule is **not** verified here and they are excluded from this
 amendment. A later slice must state their pin.
+
+---
+
+## Amendment: the operation budget bounds the owned spawn
+
+**The gap (a proven product finding).** `OwnedSession::spawn` is called
+synchronously with the last deadline checkpoint just before it and nothing
+bounding the blocking fork/exec handshake beneath it — on Unix the parent
+blocks reading the CLOEXEC exec-error pipe until the child is scheduled and
+execs. Under host load the handshake can stall multiples of the operation
+budget past it (observed 6.6 s past a 2 s budget), and the io error then
+maps to `StartError::Uncertain` → `Failure::SpawnFailed` with no child ever
+having run. The store fenced both observed occurrences correctly
+(`Negative(Fenced)`, `outcome_unknown`) — the defect is that the operation's
+own budget was not enforced across the spawn, not that the fencing failed.
+
+**The rule.** The operation budget bounds the spawn too, through the
+operation's **existing** `bounded()` await — no new bound, no new literal:
+the spawn runs on a blocking thread (`spawn_blocking`) and its result is
+awaited under the same `bounded()` that races `sleep_until(until)`, so the
+operation returns within its budget plus the checkpoint cadence even when
+the launch stalls. **A spawn abandoned at the deadline is an uncertain
+start** — the child may or may not have exec'd, and an abandoned handshake
+satisfies the `StartError::Uncertain` contract verbatim — so the expiry
+drops the `JoinHandle` (the blocking thread detaches by design) and is
+fenced **exactly as today's `Uncertain` path**: `Negative(Fenced)`, dispatch
+and attempt `outcome_unknown`, session quarantined, workspace dirty; only
+the *detection* changes, not the store outcome. **A late child is never
+orphaned — two layers.** Primary: a `SpawnCustody` handoff carries any
+`OwnedSession` the abandoned thread eventually produces to the operation's
+existing stop/reap teardown; **the send is try-send, never blocking** — a
+gone receiver is the backstop's trigger, so the handoff can never block the
+store writer queue during finalization. Backstop: `SupervisedProcess`'s own
+`Drop` stops the process group (2 s bound), and the `process_group(0)`
+anchor reaches any grandchild. **The failure word in that case is
+`Failure::SpawnFailed` (the uncertain-start word), not a plain `Deadline`
+verdict**: the deadline fired, but the *outcome* is uncertain, and not-started
+is **unprovable** through a timed-out handshake — the only provably-not-started
+signals are the pre-fork `Settings` validation and the platform's explicit
+`Unsupported`, both already classified. **The evidence vocabulary's cleanup
+kind for this path is named `Cleanup::Unknown { kind: io::ErrorKind::TimedOut }`**
+— a synthesized kind, so the fenced receipt's evidence set stays closed. The
+existing `Deadline` verdict for a launched-in-time child is unchanged.
+
+**The test double is deterministic, not timed:** a `#[cfg(test)]` Host mode
+whose child stalls before exec, with the stall's budget derived from
+`HAGENCY_OPERATION_BUDGET_MS` — no product sleep, no new literal.
+
+Cross-references: ADR-060 (owned completion) and ADR-113 (idle-event budget)
+consume the same operation budget and change nothing here. Aligned with
+glm5's implementation design (`design-bounded-spawn-from-glm5.md`); no
+disagreements — it refines this record's mechanism without departing from
+any decision in it.
