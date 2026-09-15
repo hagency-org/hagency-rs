@@ -14,10 +14,7 @@ use super::*;
 
 /// Drive one console mutation: POST with the lifecycle (or read-only) session.
 async fn retire_post(service: &Service, path: &str, cookie: &str, body: &Value) -> Response {
-    post(path, cookie)
-        .json(body)
-        .send(service)
-        .await
+    post(path, cookie).json(body).send(service).await
 }
 
 /// Read the seeded state's effect rows directly.
