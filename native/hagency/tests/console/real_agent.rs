@@ -10,11 +10,11 @@ use super::*;
 #[path = "../../../hagency-matrix/tests/common/mod.rs"]
 pub mod matrix_common;
 
+use hagency::{App, console::Console};
 use hagency_core::replies::RoomPrivacy;
 use hagency_matrix::{CancellationToken, Collector, HostConfig, HostIntakePlan, HostRoom};
 use serde_json::json;
 use sha2::Digest;
-use std::net::SocketAddr;
 
 const SESSION_ROOM: &str = "!project:example.test";
 const PROJECT: &str = "!project_provision:example.test";
@@ -210,4 +210,141 @@ async fn ready() -> (matrix_common::Fixture, matrix_common::Fake, Collector) {
     (f, fake, c)
 }
 
-fn placeholder() {}
+async fn prime(c: &Collector, f: &matrix_common::Fixture, fake: &mut matrix_common::Fake) {
+    let cancel = CancellationToken::new();
+    let (result, _) = matrix_common::scripted(c.collect(&cancel), async {
+        fake.next().await.json(200, matrix_common::who());
+        fake.next().await.json(200, matrix_common::sync("bootstrap"));
+        fake.next().await.json(200, session_state());
+        fake.next().await.json(200, reception_state());
+    })
+    .await;
+    result.unwrap();
+    f.store
+        .resolve_verified_matrix_session(hagency_core::tasks::SessionBinding {
+            id: "root".into(),
+            engagement_id: f.identity.transport.engagement_id.clone(),
+            room_id: SESSION_ROOM.into(),
+            thread_root: None,
+        })
+        .await
+        .unwrap();
+}
+
+async fn run_provisioning(
+    c: &Collector,
+    fake: &mut matrix_common::Fake,
+    value: Value,
+) -> hagency_matrix::IntakeSummary {
+    let cancel = CancellationToken::new();
+    let intake = c.intake(HostIntakePlan::new(vec!["root".into()]).unwrap(), &cancel);
+    let (result, ()) = matrix_common::scripted(intake, async {
+        fake.next().await.json(200, matrix_common::who());
+        let request = fake.next().await;
+        assert!(request.target.contains("sync?"));
+        request.json(200, value);
+        fake.next().await.json(200, session_state());
+        fake.next().await.json(200, reception_state());
+        fake.next().await.json(200, project_state());
+    })
+    .await;
+    result.unwrap()
+}
+
+/// The minted engagement id for request_one, read from the store the intake
+/// admitted it into — never re-derived in the test.
+fn minted_engagement_id(f: &matrix_common::Fixture) -> String {
+    rusqlite::Connection::open(f.root.path().join("domain/domain.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT id FROM engagements WHERE request_id='request_one'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn effect_row(f: &matrix_common::Fixture) -> Option<(String, String)> {
+    rusqlite::Connection::open(f.root.path().join("domain/domain.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT f.kind,f.state FROM effects f JOIN engagements e ON e.id=f.engagement_id WHERE e.request_id='request_one'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()
+}
+
+fn route_rows(f: &matrix_common::Fixture) -> u64 {
+    rusqlite::Connection::open(f.root.path().join("domain/domain.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM matrix_session_routes r JOIN runner_sessions s ON s.id=r.session_id JOIN engagements e ON e.id=s.engagement_id WHERE e.request_id='request_one'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn native_console_roster_shows_an_ingress_provisioned_agent() {
+    let (f, mut fake, c) = ready().await;
+    // The console-bearing app reads the SAME store the intake writes — the
+    // owned_matrix precedent (Collector + served App on one store) plus the
+    // console mount, served in-process through the console fixture's
+    // Service + TestClient pattern (no TCP listener, no reqwest).
+    let custody = hagency_store::Store::start(
+        hagency_store::Repository::open(&f.root.path().join("custody")).unwrap(),
+        16,
+    )
+    .unwrap();
+    let asset_dir = f.root.path().join("assets");
+    assets(&asset_dir);
+    let console = Console::load(&asset_dir.canonicalize().unwrap()).unwrap();
+    let address: std::net::SocketAddr = "127.0.0.1:13300".parse().unwrap();
+    let app = App::new(custody.clone(), TOKEN.as_bytes(), address)
+        .unwrap()
+        .with_domain(f.store.clone())
+        .with_console(console);
+    let service = Service::new(app.router());
+
+    // The fake peer delivers the request into the reception room; the intake
+    // admits it; the representative's verdict makes it effective and routable.
+    prime(&c, &f, &mut fake).await;
+    let summary = run_provisioning(
+        &c,
+        &mut fake,
+        provisioning_sync(
+            "provision",
+            vec![
+                request_event("$request_one", request_body("request_one", 250)),
+                approval_event("$approval_one", "request_one"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(summary.admitted, 2);
+    let engagement = minted_engagement_id(&f);
+    assert!(engagement.starts_with("en_"));
+    assert_eq!(effect_row(&f), Some(("provision".into(), "complete".into())));
+    assert_eq!(route_rows(&f), 1);
+
+    // The console roster, through its real HTTP route, names the minted id.
+    let cookie = session(&service).await;
+    let mut response = get("/console/api/agents", &cookie).send(&service).await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let roster: Value = response.take_json().await.unwrap();
+    let ids: Vec<&str> = roster["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["engagement_id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&engagement.as_str()),
+        "roster lacks the minted engagement {engagement}: {ids:?}"
+    );
+
+    c.close().await.unwrap();
+    custody.shutdown().await.unwrap();
+}
