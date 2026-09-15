@@ -1,16 +1,16 @@
 use super::*;
 
-/// The engagement retire slice (ADR-150, spec `task-rust-engagement-retire`):
-/// the operator's retirement decision and cleanup retry through the console
-/// routes, asserting the store's own guarantees — the state guard, the
-/// decision digest replay, the same-transaction provision-cancel and
-/// retire-schedule, the `engagement_ends` stamp, the failed-only reset — plus
-/// the console's scope gate. No sweeper, timer or startup pass appears
-/// anywhere; the failed-waits scenario asserts that absence over elapsed time.
-///
-/// The fixture seeds an `active` engagement (`private_usage_pool`) whose
-/// provision effect is already `complete`, the exact Given of the first
-/// scenario.
+// The engagement retire slice (ADR-150, spec `task-rust-engagement-retire`):
+// the operator's retirement decision and cleanup retry through the console
+// routes, asserting the store's own guarantees — the state guard, the
+// decision digest replay, the same-transaction provision-cancel and
+// retire-schedule, the `engagement_ends` stamp, the failed-only reset — plus
+// the console's scope gate. No sweeper, timer or startup pass appears
+// anywhere; the failed-waits scenario asserts that absence over elapsed time.
+//
+// The fixture seeds an `active` engagement (`private_usage_pool`) whose
+// provision effect is already `complete`, the exact Given of the first
+// scenario.
 
 /// Drive one console mutation: POST with the lifecycle (or read-only) session.
 async fn retire_post(service: &Service, path: &str, cookie: &str, body: &Value) -> Response {
