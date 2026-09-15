@@ -224,7 +224,7 @@ reasoning stands.
 | Method | Defined | Finding | Class |
 |---|---|---|---|
 | `create_coordinator_task` | domain/execution.rs:693 | facade domain_worker.rs:2206 has no production caller; no coordinator-task creation path is wired | **new gap** (owner unassigned) |
-| `record_late_output` | domain/execution.rs:982 | facade domain_worker.rs:2308 has no production caller; no late-output recording path is wired | **new gap** (owner unassigned) |
+| `record_late_output` | domain/execution.rs:982 | facade domain_worker.rs:2308 has no production caller; no late-output recording path is wired | gap G10 (owner unassigned) |
 | `enqueue_inbox_dispatch` | domain/messages.rs:283 | **superseded-by** `select_receive_inbox` → `select_receive` (messages.rs:647, which performs the `enqueue_inbox` write at :703/:741) ← `hagency/src/bootstrap/inbox.rs:31`; the direct facade is a stale variant | superseded |
 
 Not findings: `mutate_task` is wired through `RunnerCommand::Mutate`
@@ -235,8 +235,10 @@ Not findings: `mutate_task` is wired through `RunnerCommand::Mutate`
 `pub(super)` `enqueue_inbox`), or rows already classified above.
 
 **Checker reconciliation**: `check-production-callers.mjs` on this head reads
-exit 0, count 14, wired 11, owed G2/G2/G3 — no discrepancy. The checker only
+exit 0, count 19, wired 17, owed `G10` (×2) — no discrepancy. The checker only
 sees spec-named `Production caller:` lines, and no spec line names the G5a
-recovery-artifact writes or the two new gaps, so neither tool contradicts the
-other; the asymmetry (audit covers the whole store surface, checker covers
-spec-named writes) is the intended division of labour.
+recovery-artifact writes; of the two new rows, only `record_late_output` is
+spec-named (`G10`, owed by `specs/task-rust-late-output.spec.md`) while
+`create_coordinator_task` remains unnamed by any spec, so neither tool
+contradicts the other; the asymmetry (audit covers the whole store surface,
+checker covers spec-named writes) is the intended division of labour.
