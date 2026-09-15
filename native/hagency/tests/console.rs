@@ -17,10 +17,10 @@ mod engagements;
 mod fixture;
 #[path = "console/origin.rs"]
 mod origin;
-#[path = "console/real_agent.rs"]
-mod real_agent;
 #[path = "console/project_sides.rs"]
 mod project_sides;
+#[path = "console/real_agent.rs"]
+mod real_agent;
 #[path = "console/resources.rs"]
 mod resources;
 #[path = "console/status_strip.rs"]

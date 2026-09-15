@@ -164,7 +164,9 @@ fn provisioning_config(f: &matrix_common::Fixture, endpoint: &str) -> HostConfig
         matrix_common::limits(),
     )
     .unwrap()
-    .with_root_pem(include_bytes!("../../../hagency-matrix/tests/fixtures/ca.pem"))
+    .with_root_pem(include_bytes!(
+        "../../../hagency-matrix/tests/fixtures/ca.pem"
+    ))
     .unwrap();
     config
         .with_reception_room(HostRoom {
@@ -214,7 +216,9 @@ async fn prime(c: &Collector, f: &matrix_common::Fixture, fake: &mut matrix_comm
     let cancel = CancellationToken::new();
     let (result, _) = matrix_common::scripted(c.collect(&cancel), async {
         fake.next().await.json(200, matrix_common::who());
-        fake.next().await.json(200, matrix_common::sync("bootstrap"));
+        fake.next()
+            .await
+            .json(200, matrix_common::sync("bootstrap"));
         fake.next().await.json(200, session_state());
         fake.next().await.json(200, reception_state());
     })
@@ -326,7 +330,10 @@ async fn native_console_roster_shows_an_ingress_provisioned_agent() {
     assert_eq!(summary.admitted, 2);
     let engagement = minted_engagement_id(&f);
     assert!(engagement.starts_with("en_"));
-    assert_eq!(effect_row(&f), Some(("provision".into(), "complete".into())));
+    assert_eq!(
+        effect_row(&f),
+        Some(("provision".into(), "complete".into()))
+    );
     assert_eq!(route_rows(&f), 1);
 
     // The console roster, through its real HTTP route, names the minted id.
