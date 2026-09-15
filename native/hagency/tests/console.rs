@@ -17,6 +17,8 @@ mod engagements;
 mod fixture;
 #[path = "console/origin.rs"]
 mod origin;
+#[path = "console/real_agent.rs"]
+mod real_agent;
 #[path = "console/project_sides.rs"]
 mod project_sides;
 #[path = "console/resources.rs"]
