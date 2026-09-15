@@ -425,3 +425,16 @@ reads, quoted: *"Log and retry next tick; the store's caps (`100 000`, `10 000`,
 `30 000`) refuse at a bound, and retention must not repeat that shape."* A deferred
 engagement reports `remaining > 0`; it never refuses admission or an operator
 command.
+
+## Amendment 2026-09-14 — the engagement session-key derivation (ADR-147)
+
+The native store keys a session to its engagement: `SessionBinding`
+(`hagency-core/src/tasks.rs:54`) carries an `engagement_id`, and the engagement's
+session row is minted under that binding. The provisioning intake derives the new
+engagement's session id deterministically as **`session_{engagement_id}`**, minted
+by the intake itself for the engagement it just made effective. Deterministic
+derivation keeps the key idempotent across replay and restart: re-observing the
+same admission derives the same session id rather than minting a second row. The
+retained product has no engagement-derived session id (its sessions are
+room/thread-scoped), so this is a native decision; the rationale and evidence are
+recorded in ADR-147 (c).
