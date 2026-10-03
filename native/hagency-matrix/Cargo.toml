@@ -36,7 +36,7 @@ cap-std = "=4.0.3"
 base64 = "=0.22.1"
 tempfile.workspace = true
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true
