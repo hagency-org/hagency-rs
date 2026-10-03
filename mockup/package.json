@@ -14,12 +14,12 @@
     "verify": "npm run check && npm run check:switches"
   },
   "dependencies": {
-    "next": "16.3.0",
-    "playwright-core": "^1.62.1",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "next": "16.3.7",
+    "playwright-core": "^1.63.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "puppeteer-core": "^25.4.0"
+    "puppeteer-core": "^25.12.0"
   }
 }
