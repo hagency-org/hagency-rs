@@ -1095,7 +1095,7 @@ name = "hagency-core"
 version = "0.1.0"
 dependencies = [
  "regex",
- "ruma-common",
+ "ruma-common 0.20.0",
  "ryu-js",
  "serde",
  "serde_json",
@@ -2826,7 +2826,7 @@ dependencies = [
  "js_int",
  "js_option",
  "ruma-client-api",
- "ruma-common",
+ "ruma-common 0.19.0",
  "ruma-events",
  "ruma-html",
  "web-time",
@@ -2845,7 +2845,7 @@ dependencies = [
  "js_int",
  "js_option",
  "maplit",
- "ruma-common",
+ "ruma-common 0.19.0",
  "ruma-events",
  "serde",
  "serde_html_form",
@@ -2875,7 +2875,7 @@ dependencies = [
  "rand 0.10.2",
  "regex",
  "ruma-identifiers-validation",
- "ruma-macros",
+ "ruma-macros 0.19.0",
  "serde",
  "serde_html_form",
  "serde_json",
@@ -2884,6 +2884,34 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "web-time",
+ "wildmatch",
+ "zeroize",
+]
+
+[[package]]
+name = "ruma-common"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfbfb1235d65ebd89e169c67cc120a6608530b3445babb8689baba7ef2e72a12"
+dependencies = [
+ "as_variant",
+ "base64 0.23.1",
+ "bytes",
+ "form_urlencoded",
+ "indexmap",
+ "js_int",
+ "percent-encoding",
+ "regex",
+ "ruma-identifiers-validation",
+ "ruma-macros 0.20.0",
+ "serde",
+ "serde_html_form",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tracing",
+ "url",
  "web-time",
  "wildmatch",
  "zeroize",
@@ -2899,8 +2927,8 @@ dependencies = [
  "indexmap",
  "js_int",
  "js_option",
- "ruma-common",
- "ruma-macros",
+ "ruma-common 0.19.0",
+ "ruma-macros 0.19.0",
  "serde",
  "serde_json",
  "thiserror",
@@ -2946,6 +2974,23 @@ dependencies = [
  "ruma-identifiers-validation",
  "serde",
  "syn 2.0.119",
+ "toml",
+]
+
+[[package]]
+name = "ruma-macros"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8571408bf1aefd0f06ea49e9d19551bcf4ba7388e19848adcd9291547c6cb"
+dependencies = [
+ "as_variant",
+ "cfg-if",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "ruma-identifiers-validation",
+ "serde",
+ "syn 3.0.5",
  "toml",
 ]
 
