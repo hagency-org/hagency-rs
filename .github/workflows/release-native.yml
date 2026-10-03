@@ -132,7 +132,7 @@ jobs:
             echo "::error::a shipped wrapper references node"; exit 1
           fi
       - name: Upload the per-target artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hagency-nv${{ needs.resolve.outputs.version }}-${{ matrix.target }}
           path: stage/
@@ -153,7 +153,7 @@ jobs:
           find . -type f -name hagency | sort | xargs sha256sum > SHA256SUMS
           [ -s SHA256SUMS ] || { echo "::error::no release binaries found to checksum"; exit 1; }
           cat SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hagency-nv${{ needs.resolve.outputs.version }}-SHA256SUMS
           path: dist/SHA256SUMS
