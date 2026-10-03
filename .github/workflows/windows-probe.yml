@@ -64,7 +64,7 @@ jobs:
           Get-Content probe-logs/summary.txt
           Write-Host "failed iterations: $failures of $repeat"
           # Evidence only: every iteration ran; the summary records the verdicts.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-probe-logs
@@ -103,7 +103,7 @@ jobs:
           done
           cat probe-logs/summary.txt
           echo "failed iterations: $failures of 5"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ubuntu-probe-logs
