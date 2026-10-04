@@ -1333,7 +1333,7 @@ pub struct Bootstrap {
     app: crate::App,
     listen: SocketAddr,
     prepared: Option<config::Prepared>,
-    palpo_prepared: Option<palpo::Prepared>,
+    palpo_prepared: Vec<palpo::Prepared>,
     palpo: palpo::Live,
     driver: Option<driver::Driver>,
     fleet: Option<fleet::Service>,
@@ -1429,9 +1429,9 @@ impl Bootstrap {
         // import instead of refusing to start.
         let palpo_imported = options.palpo_transport && palpo::imported(&state)?;
         let palpo_prepared = if palpo_imported {
-            Some(palpo::Prepared::load(&state)?)
+            palpo::Prepared::load_all(&state)?
         } else {
-            None
+            Vec::new()
         };
         let palpo_status = if options.palpo_transport && !palpo_imported {
             palpo::StatusHandle::awaiting()
@@ -1831,7 +1831,7 @@ impl Bootstrap {
         // or helper can try to connect; no fixture-only readiness setter.
         tokio::select! { biased; result=&mut serving=>{result.map_err(|_|Failure::Server)?;return Err(Failure::Server);}, _=tokio::task::yield_now()=>{} }
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: driver_entered");
-        if let Some(prepared) = self.palpo_prepared.take() {
+        for prepared in std::mem::take(&mut self.palpo_prepared) {
             self.palpo.start(prepared).await?;
         }
         if let Some(pump) = self.approval.as_ref() {

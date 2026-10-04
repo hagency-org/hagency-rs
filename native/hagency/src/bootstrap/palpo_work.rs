@@ -9,8 +9,9 @@
 //!   transaction. It is then re-read as the representative, the room must be
 //!   invite-only, unencrypted and joined by the representative, and the room is
 //!   bound as the fleet's reception. The receipt rides the next `/updates`.
-//! - Work lane, `request`: not processed here yet; it stays in custody, never
-//!   dropped.
+//! - Work lane, `request`: fresh Matrix evidence precedes admission. Delegated
+//!   coordinator decisions reserve capacity and queue normal provisioning;
+//!   legacy requests retain their explicitly configured console workflow.
 //!
 //! A failure is retried later, never turned into a terminal refusal: the bridge
 //! does not decide the connection is dead.
@@ -56,6 +57,7 @@ pub(super) struct Probes {
     requests: PathBuf,
     lock: Mutex<()>,
     statuses: Mutex<Vec<Value>>,
+    status_cursor: Mutex<String>,
 }
 impl Probes {
     pub(super) fn new(state: &Path) -> Arc<Self> {
@@ -65,6 +67,7 @@ impl Probes {
             requests: state.join("palpo-requests.json"),
             lock: Mutex::new(()),
             statuses: Mutex::new(Vec::new()),
+            status_cursor: Mutex::new(String::new()),
         })
     }
     fn read(path: &Path) -> Vec<Value> {
@@ -126,6 +129,12 @@ impl ProbeReceipts for Probes {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+    fn statuses_published(&self, statuses: &[Value]) {
+        let mut pending = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.as_slice() == statuses {
+            pending.clear();
+        }
     }
     fn published(&self, receipts: &[Value]) {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -332,13 +341,14 @@ impl Reader {
 /// Admit one Palpo agent request (TS `POST /api/fleet/v1/requests`): the source
 /// event is re-read, the reception, target project and private approval room
 /// are observed fresh, and the port's own `verify_request` decides. An admitted
-/// request becomes a pending engagement for the operator's console verdict.
-async fn admit_request(
+/// request becomes a pending engagement. A scoped coordinator decision reserves
+/// capacity and queues provisioning here; only legacy requests await the console.
+async fn verify_project_request(
     reader: &Reader,
     domain: &DomainStore,
     fleet: &str,
     payload: &Value,
-) -> Result<String, String> {
+) -> Result<hagency_core::authority::VerifiedRequest, String> {
     use hagency_core::authority::{
         ProjectRequest, RequestObservation, SourceObservation, verify_request,
     };
@@ -413,12 +423,42 @@ async fn admit_request(
         project,
         owner_room,
     };
-    let verified = verify_request(&registration, request, observation)
-        .map_err(|e| format!("verification: {}", e.0))?;
+    verify_request(&registration, request, observation)
+        .map_err(|e| format!("verification: {}", e.0))
+}
+
+async fn admit_request(
+    reader: &Reader,
+    domain: &DomainStore,
+    fleet: &str,
+    payload: &Value,
+) -> Result<String, String> {
+    let verified = verify_project_request(reader, domain, fleet, payload).await?;
+    if payload.get("coordinatorApproval").is_some() {
+        domain
+            .verify_coordinator_project(verified.clone())
+            .await
+            .map_err(|_| "approved project binding is not current".to_owned())?;
+    }
     let engagement = domain
-        .admit(verified, now)
+        .admit(
+            verified.clone(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or_default(),
+        )
         .await
         .map_err(|e| format!("admission: {e:?}"))?;
+    if let Some(command) = payload.get("coordinatorApproval") {
+        let command: hagency_store::coordinator::AgentApproval =
+            serde_json::from_value(command.clone())
+                .map_err(|_| "invalid coordinator decision".to_owned())?;
+        domain
+            .approve_coordinated_agent(command, verified)
+            .await
+            .map_err(|e| format!("coordinator decision refused: {e}"))?;
+    }
     Ok(engagement.id)
 }
 
@@ -544,12 +584,151 @@ async fn work_once(
         }
     };
     if work.kind == Kind::Request {
+        if work.payload["operation"] == "coordinator_token_top_up" {
+            let result = async {
+                let command: hagency_store::coordinator::TokenTopUpApproval =
+                    serde_json::from_value(work.payload["command"].clone())
+                        .map_err(|_| "invalid token decision".to_owned())?;
+                if command.context.server_engagement_id.as_str() != fleet {
+                    return Err("token decision targets another engagement".into());
+                }
+                let agent = domain
+                    .engagement(command.request.agent_allocation_id.as_str().into())
+                    .await
+                    .map_err(|_| "agent unavailable".to_owned())?;
+                let (context, _, _) = domain
+                    .provisioning_request_evidence(fleet.into(), agent.request_id)
+                    .await
+                    .map_err(|_| "agent evidence unavailable".to_owned())?
+                    .ok_or_else(|| "agent evidence missing".to_owned())?;
+                let request: Value = serde_json::from_str(&context)
+                    .map_err(|_| "agent evidence invalid".to_owned())?;
+                let proof = verify_project_request(reader, domain, fleet, &request).await?;
+                domain
+                    .approve_coordinator_top_up(command, proof)
+                    .await
+                    .map_err(|e| format!("token decision refused: {e}"))
+            }
+            .await;
+            return match result {
+                Ok(agent) => match adapter
+                    .complete(
+                        work.ticket,
+                        json!({"engagementId":agent.id,"allocatedTokens":agent.allocation()}),
+                    )
+                    .await
+                {
+                    Ok(()) => Outcome::Done,
+                    Err(_) => Outcome::Later,
+                },
+                Err(reason) => {
+                    eprintln!("palpo coordinator top-up: {reason}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    Outcome::Later
+                }
+            };
+        }
+        if work.payload.get("operation").and_then(Value::as_str)
+            == Some("coordinator_project_approval")
+        {
+            let result = async {
+                let command: hagency_store::coordinator::ProjectApproval =
+                    serde_json::from_value(work.payload["command"].clone())
+                        .map_err(|_| "invalid project decision")?;
+                if command.context.server_engagement_id.as_str() != fleet {
+                    return Err("project decision targets another engagement");
+                }
+                let definition: hagency_store::coordinator::ProjectDefinition =
+                    serde_json::from_value(work.payload["definition"].clone())
+                        .map_err(|_| "invalid project definition")?;
+                let grant = domain
+                    .approve_coordinator_project(command, work.payload["definition"].clone())
+                    .await
+                    .map_err(|_| "project decision refused")?;
+                let registration = domain
+                    .provisioning_registration(fleet.to_owned())
+                    .await
+                    .map_err(|_| "registration unavailable")?;
+                for (user, room) in [
+                    (&registration.representative_mxid, &definition.room_id),
+                    (
+                        &registration.approval_bot_mxid,
+                        &definition.owner_dm_room_id,
+                    ),
+                ] {
+                    reader
+                        .call_as(
+                            user,
+                            reqwest::Method::POST,
+                            &["_matrix", "client", "v3", "join", room],
+                            &[],
+                            Some(json!({})),
+                        )
+                        .await
+                        .map_err(|_| "project membership pending")?;
+                }
+                let project = reader
+                    .observe(
+                        &registration.representative_mxid,
+                        &definition.room_id,
+                        Some(fleet),
+                    )
+                    .await
+                    .map_err(|_| "project room unreadable")?;
+                let owner_room = reader
+                    .observe(
+                        &registration.approval_bot_mxid,
+                        &definition.owner_dm_room_id,
+                        None,
+                    )
+                    .await
+                    .map_err(|_| "private room unreadable")?;
+                let observed_at_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| "clock unavailable")?
+                    .as_millis() as u64;
+                let result = domain
+                    .coordinator_project_ready(hagency_store::coordinator::ProjectReadiness {
+                        registration,
+                        project_id: grant.project_id.as_str().into(),
+                        observed_at_ms,
+                        project,
+                        owner_room,
+                    })
+                    .await
+                    .map_err(|_| "project room authority refused")?;
+                Ok::<_, &str>(result)
+            }
+            .await;
+            return match result {
+                Ok(grant) => match adapter
+                    .complete(work.ticket, json!({"coordinatorProject":grant}))
+                    .await
+                {
+                    Ok(()) => Outcome::Done,
+                    Err(_) => Outcome::Later,
+                },
+                Err(reason) => {
+                    eprintln!("palpo coordinator project: {reason}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    Outcome::Later
+                }
+            };
+        }
         if let Some(id) = work.payload.get("requestId").and_then(Value::as_str) {
             probes.remember_request(id);
         }
         return match admit_request(reader, domain, fleet, &work.payload).await {
             Ok(engagement) => {
-                eprintln!("palpo request admitted as {engagement} (pending the console verdict)");
+                if work.payload.get("coordinatorApproval").is_some() {
+                    eprintln!(
+                        "palpo request {engagement}: coordinator decision applied; provisioning queued"
+                    );
+                } else {
+                    eprintln!(
+                        "palpo request admitted as {engagement} (legacy console verdict pending)"
+                    );
+                }
                 match adapter
                     .complete(work.ticket, json!({"engagementId": engagement}))
                     .await
@@ -720,9 +899,29 @@ async fn approval_invites_once(reader: &Reader, bot: &str, fleet: &str, server: 
 /// bound), which the provisioning slice establishes.
 async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, reader: &Reader) {
     use hagency_core::project::EngagementState as S;
-    let Ok(engagements) = domain.engagements(String::new(), 100).await else {
+    // Retain one bounded page until publication acknowledges it, then advance.
+    // A large first fleet must not hide later fleets or its own 101st agent.
+    if !probes
+        .statuses
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+    {
+        return;
+    }
+    let cursor = probes
+        .status_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Ok(engagements) = domain.fleet_engagements(fleet.to_owned(), cursor, 20).await else {
         return;
     };
+    *probes
+        .status_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) =
+        engagements.last().map(|e| e.id.clone()).unwrap_or_default();
     let observed = now_iso();
     let mut out = Vec::new();
     for e in engagements {
@@ -752,6 +951,10 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         // ADR-186 §A4/§C4: the granted amount, raised by any top-up; the
         // request when the operator granted it unchanged.
         let allocated = matches!(e.state, S::Reserved | S::Active).then(|| json!(e.allocation()));
+        let usage = domain
+            .coordinator_agent_usage(e.id.clone())
+            .await
+            .unwrap_or(Value::Null);
         // The serving identity is the fleet-namespaced account the App Service
         // factory created for this engagement; `ready` is TS's rule (active and
         // bound) plus the observed fact the agent is joined in the target room.
@@ -792,6 +995,8 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
                 "reasoning": r.reasoning})),
             "fulfillment": phase.map(|p| json!({"phase": p, "incomplete": false})),
             "ready": joined, "decidedAt": null, "endedAt": null, "observedAt": observed,
+            "consumedTokens":usage["consumedTokens"],"usageObservedAtMs":usage["usageObservedAtMs"],
+            "usageEvidence":usage["usageEvidence"],"usageComplete":usage["usageComplete"],"quotaPaused":usage["quotaPaused"],
         }));
     }
     *probes.statuses.lock().unwrap_or_else(|e| e.into_inner()) = out;
@@ -850,5 +1055,27 @@ pub(super) async fn run(
             _ = cancel.cancelled() => break,
             _ = tokio::time::sleep(pause) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_palpo_status_pages_wait_for_their_exact_publication_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let probes = Probes::new(root.path());
+        let pending =
+            json!({"requestId":"one","state":"active","observedAt":"2026-10-04T01:02:03.000Z"});
+        *probes.statuses.lock().unwrap() = vec![pending.clone()];
+        *probes.status_cursor.lock().unwrap() = "after_one".into();
+        let old =
+            json!({"requestId":"one","state":"pending","observedAt":"2026-10-04T01:01:00.000Z"});
+        probes.statuses_published(&[old]);
+        assert_eq!(probes.statuses(), vec![pending.clone()]);
+        probes.statuses_published(&[pending]);
+        assert!(probes.statuses().is_empty());
+        assert_eq!(*probes.status_cursor.lock().unwrap(), "after_one");
     }
 }

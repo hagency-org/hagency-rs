@@ -3254,6 +3254,69 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn coordinator_updates(
+        &self,
+        identity: crate::outbound::RegistrationIdentity,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&identity)?, move |db| {
+            db.coordinator_updates(&identity)
+        })
+        .await
+    }
+    pub async fn coordinator_agent_usage(&self, id: String) -> Result<serde_json::Value, Error> {
+        self.call(weight(&id)?, move |db| db.coordinator_agent_usage(&id))
+            .await
+    }
+    pub async fn acknowledge_coordinator_updates(
+        &self,
+        identity: crate::outbound::RegistrationIdentity,
+        updates: Vec<serde_json::Value>,
+    ) -> Result<(), Error> {
+        self.call(weight(&updates)?, move |db| {
+            db.acknowledge_coordinator_updates(&identity, &updates)
+        })
+        .await
+    }
+    pub async fn server_engagements(
+        &self,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&after)?, move |db| {
+            db.server_engagements(&after, limit)
+        })
+        .await
+    }
+    pub async fn server_engagement_resources(
+        &self,
+        fleet: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&(&fleet, &after))?, move |db| {
+            db.server_engagement_resources(&fleet, &after, limit)
+        })
+        .await
+    }
+    pub async fn contribute_resource(
+        &self,
+        command: crate::coordinator::ResourceContributionCommand,
+    ) -> Result<(), Error> {
+        self.call(command.weight()?, move |db| {
+            db.contribute_resource(command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn import_coordinator_registration(
+        &self,
+        registration: Registration,
+        policy: Option<crate::coordinator::ServerEngagement>,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&registration, &policy))?, move |db| {
+            db.import_coordinator_registration(&registration, policy.as_ref())
+        })
+        .await
+    }
     pub async fn edit_resource(
         &self,
         resource: Resource,
@@ -3289,6 +3352,17 @@ impl DomainStore {
     pub async fn engagements(&self, after: String, limit: usize) -> Result<Vec<Engagement>, Error> {
         self.call(weight(&after)?, move |db| db.engagements(&after, limit))
             .await
+    }
+    pub async fn fleet_engagements(
+        &self,
+        fleet: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<Engagement>, Error> {
+        self.call(weight(&(&fleet, &after))?, move |db| {
+            db.fleet_engagements(&fleet, &after, limit)
+        })
+        .await
     }
     /// The console engagements list with its server-side `state` filter
     /// (board #60 item 3): one writer job, one bounded read — the projection
@@ -4266,6 +4340,82 @@ impl DomainStore {
                 proof.audit(),
             ))?,
             move |db| db.approve(&command, &proof, now),
+        )
+        .await
+    }
+    pub async fn configure_coordinator(
+        &self,
+        authority: crate::coordinator::ServerEngagement,
+    ) -> Result<(), Error> {
+        self.call(weight(&authority)?, move |db| {
+            db.configure_coordinator(&authority)
+        })
+        .await
+    }
+    pub async fn put_coordinator_resource(
+        &self,
+        grant: crate::coordinator::ResourceGrant,
+    ) -> Result<(), Error> {
+        self.call(weight(&grant)?, move |db| {
+            db.put_coordinator_resource(&grant, writer_time()?)
+        })
+        .await
+    }
+    pub async fn approve_coordinator_project(
+        &self,
+        command: crate::coordinator::ProjectApproval,
+        definition: serde_json::Value,
+    ) -> Result<crate::coordinator::ProjectGrant, Error> {
+        self.call(weight(&(&command, &definition))?, move |db| {
+            db.approve_coordinator_project(&command, &definition, writer_time()?)
+        })
+        .await
+    }
+    pub async fn verify_coordinator_project(&self, proof: VerifiedRequest) -> Result<(), Error> {
+        self.call(
+            weight(&(proof.request(), proof.registration(), proof.audit()))?,
+            move |db| db.verify_coordinator_project(&proof, writer_time()?),
+        )
+        .await
+    }
+    pub async fn coordinator_project_ready(
+        &self,
+        observed: crate::coordinator::ProjectReadiness,
+    ) -> Result<crate::coordinator::ProjectGrant, Error> {
+        self.call(weight(&observed)?, move |db| {
+            db.coordinator_project_ready(&observed, writer_time()?)
+        })
+        .await
+    }
+    pub async fn approve_coordinated_agent(
+        &self,
+        command: crate::coordinator::AgentApproval,
+        proof: VerifiedRequest,
+    ) -> Result<Engagement, Error> {
+        self.call(
+            weight(&(
+                &command,
+                proof.request(),
+                proof.registration(),
+                proof.audit(),
+            ))?,
+            move |db| db.approve_coordinated_agent(&command, &proof, writer_time()?),
+        )
+        .await
+    }
+    pub async fn approve_coordinator_top_up(
+        &self,
+        command: crate::coordinator::TokenTopUpApproval,
+        proof: VerifiedRequest,
+    ) -> Result<Engagement, Error> {
+        self.call(
+            weight(&(
+                &command,
+                proof.request(),
+                proof.registration(),
+                proof.audit(),
+            ))?,
+            move |db| db.approve_coordinator_top_up(&command, &proof, writer_time()?),
         )
         .await
     }

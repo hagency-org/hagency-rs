@@ -59,11 +59,13 @@ impl Stage {
 /// The running fleet service; cancelled and joined by `palpo::Live`.
 pub(crate) struct FleetService {
     cancel: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    joined: Option<Result<(), Failure>>,
 }
 impl FleetService {
-    pub(crate) fn start(
+    pub(crate) fn start_scoped(
         state: PathBuf,
+        runtime_state: PathBuf,
         address: SocketAddr,
         domain: DomainStore,
         fleet_id: String,
@@ -73,6 +75,7 @@ impl FleetService {
         let stage = Stage(Arc::new(Mutex::new("starting")));
         let task = tokio::spawn(supervise(
             state,
+            runtime_state,
             address,
             domain,
             fleet_id,
@@ -80,15 +83,28 @@ impl FleetService {
             stage,
             cancel.clone(),
         ));
-        Self { cancel, task }
+        Self {
+            cancel,
+            task: Some(task),
+            joined: None,
+        }
     }
     pub(crate) fn cancel(&self) {
         self.cancel.cancel();
     }
-    pub(crate) async fn close(self) {
+    pub(crate) async fn close(&mut self) -> Result<(), Failure> {
         self.cancel.cancel();
-        // The supervisor drains its agents on cancel; a hang is bounded.
-        let _ = tokio::time::timeout(Duration::from_secs(10), self.task).await;
+        if let Some(result) = self.joined {
+            return result;
+        }
+        let task = self.task.as_mut().ok_or(Failure::OutcomeUnknown)?;
+        let joined = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .map_err(|_| Failure::OutcomeUnknown)?;
+        let result = joined.map_err(|_| Failure::OutcomeUnknown);
+        self.task = None;
+        self.joined = Some(result);
+        result
     }
 }
 
@@ -118,6 +134,7 @@ fn secret(state: &Path, name: &str) -> Result<String, Failure> {
 #[allow(clippy::too_many_arguments)]
 async fn supervise(
     state: PathBuf,
+    runtime_state: PathBuf,
     address: SocketAddr,
     domain: DomainStore,
     fleet_id: String,
@@ -127,7 +144,7 @@ async fn supervise(
 ) {
     let mut backoff = BACKOFF_MIN;
     // 1. The operator's local runtime settings.
-    while !config::fleet_runtime_configured(&state) {
+    while !config::fleet_runtime_configured(&runtime_state) {
         stage.set("awaiting_runtime_config");
         if !pause(&cancel, &mut Duration::from_secs(5)).await {
             return;
@@ -157,7 +174,7 @@ async fn supervise(
     backoff = BACKOFF_MIN;
     // 4. The provisioning host and the agent service.
     let running = loop {
-        match build(&state, address, &domain, &registration) {
+        match build(&state, &runtime_state, address, &domain, &registration) {
             Ok(running) => break running,
             Err(error) => {
                 stage.set("refused_config");
@@ -183,6 +200,7 @@ struct Running {
 
 fn build(
     state: &Path,
+    runtime_state: &Path,
     address: SocketAddr,
     domain: &DomainStore,
     registration: &hagency_core::authority::Registration,
@@ -195,7 +213,7 @@ fn build(
             .ok_or(Failure::OutcomeUnknown)?
             .trim_end_matches('/')
     );
-    let runtime = config::load_fleet_runtime(state, address, &homeserver)?;
+    let runtime = config::load_fleet_runtime(runtime_state, address, &homeserver)?;
     let key: [u8; 32] = private::read_secret(&state.join("matrix.provisioning_key"))
         .map_err(|_| Failure::OutcomeUnknown)?
         .try_into()
@@ -304,7 +322,9 @@ async fn run(
         stage.set("running");
     }
     service_cancel.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), service_task).await;
+    // The enclosing FleetService owns the bounded close and original join.
+    // Never detach running agents and then start a replacement generation.
+    let _ = service_task.await;
     for pump in pumps {
         pump.abort();
     }

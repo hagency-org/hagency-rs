@@ -23,6 +23,7 @@ mod agent_fences;
 mod agent_lifecycle;
 mod agent_message_leftovers;
 mod console_feed;
+pub mod coordinator;
 pub use agent_fences::{AgentFence, FenceReason};
 pub use agent_message_leftovers::{
     DeliveryEventRow, NewOperatorMessage, OperatorMessage, SuppressOutcome, Suppression, Tombstone,
@@ -133,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 60;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 61;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -713,6 +714,15 @@ fn budget(
     exclude_engagement_id: Option<&str>,
     for_auto_join: bool,
 ) -> Result<Budget, Error> {
+    budget_with_grant(db, resource, exclude_engagement_id, for_auto_join, None)
+}
+fn budget_with_grant(
+    db: &Connection,
+    resource: &Resource,
+    exclude_engagement_id: Option<&str>,
+    for_auto_join: bool,
+    within_grant: Option<&str>,
+) -> Result<Budget, Error> {
     let declaration: Option<String> = db
         .query_row(
             "SELECT config FROM seats WHERE id=?1",
@@ -747,6 +757,11 @@ fn budget(
             fulfillment: None,
         });
     }
+    commitments.extend(coordinator::additional_commitments(
+        db,
+        resource,
+        within_grant,
+    )?);
     Ok(allocation::resource_budget(&allocation::Input {
         preset: allocation::Preset {
             id: resource.preset_id.clone(),
@@ -774,14 +789,30 @@ struct Headroom {
     period_mismatch: bool,
 }
 fn headroom(db: &Connection, resource: &Resource, at: u64) -> Result<Headroom, Error> {
+    headroom_with_grant(db, resource, at, None)
+}
+fn headroom_with_grant(
+    db: &Connection,
+    resource: &Resource,
+    at: u64,
+    within_grant: Option<&str>,
+) -> Result<Headroom, Error> {
     let report = usage::ceiling_report(db, &resource.id(), at)?;
-    let spent_budget = budget(db, resource, None, false)?;
+    let spent_budget = budget_with_grant(db, resource, None, false, within_grant)?;
     // backend-v2.js:14057: a seat declaration whose period mismatches the
     // pool's nulls the whole figure rather than falling back to the pool.
     let period_mismatch = spent_budget.seat.status == allocation::SeatStatus::PeriodMismatch;
+    let credit = within_grant
+        .map(|id| coordinator::unused_grant(db, id, resource))
+        .transpose()?
+        .unwrap_or(0);
+    let effective_draw = report
+        .reserved
+        .saturating_sub(credit)
+        .max(report.spent.unwrap_or(0));
     let by_ceiling = report
         .ceiling_tokens
-        .map(|c| c.saturating_sub(report.drawn));
+        .map(|c| c.saturating_sub(effective_draw));
     let remaining = [
         by_ceiling,
         spent_budget.seat.remaining.map(u64::from),
@@ -809,6 +840,17 @@ fn check_grant(
     granted: u64,
     now: u64,
 ) -> Result<(), Error> {
+    check_grant_within(tx, resource, agent, granted, now, None)
+}
+
+fn check_grant_within(
+    tx: &Connection,
+    resource: &Resource,
+    agent: &str,
+    granted: u64,
+    now: u64,
+    within_grant: Option<&str>,
+) -> Result<(), Error> {
     // Admission uses the drawn ceiling (backend-v2.js:14036-14060), and
     // approve is the operator verdict path, so `for_auto_join` is false —
     // auto-join is the other remainingFor caller, not this one.
@@ -817,7 +859,7 @@ fn check_grant(
         by_ceiling,
         remaining,
         period_mismatch,
-    } = headroom(tx, resource, now)?;
+    } = headroom_with_grant(tx, resource, now, within_grant)?;
     if period_mismatch {
         return Err(Error::NoCeiling);
     }
@@ -1066,6 +1108,10 @@ impl DomainRepository {
                     (59, include_str!("migrations/059-owner-anchors.sql")),
                     // ADR-188: rooms an agent joined by invitation.
                     (60, include_str!("migrations/074-joined-rooms.sql")),
+                    (
+                        61,
+                        include_str!("migrations/075-coordinator-engagements.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
@@ -1176,12 +1222,20 @@ impl DomainRepository {
         })
     }
     pub fn register(&mut self, registration: &Registration) -> Result<(), Error> {
-        registration.validate()?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::register_transaction(&tx, registration)?;
+        tx.commit()?;
+        Ok(())
+    }
+    fn register_transaction(
+        tx: &Transaction<'_>,
+        registration: &Registration,
+    ) -> Result<(), Error> {
+        registration.validate()?;
         bounded_row(
-            &tx,
+            tx,
             "registrations",
             "fleet_id",
             &registration.fleet_id,
@@ -1207,9 +1261,8 @@ impl DomainRepository {
         }
         tx.execute("INSERT INTO registrations(fleet_id,generation,config) VALUES(?1,?2,?3) ON CONFLICT(fleet_id) DO UPDATE SET generation=excluded.generation,config=excluded.config",
             params![registration.fleet_id,registration.generation,serialize(registration)?])?;
-        graphs::reconcile(&tx, graphs::now_ms()?)?;
-        matrix_routes::reconcile(&tx, graphs::now_ms()?)?;
-        tx.commit()?;
+        graphs::reconcile(tx, graphs::now_ms()?)?;
+        matrix_routes::reconcile(tx, graphs::now_ms()?)?;
         Ok(())
     }
     /// Bind the fleet's reception room after a verified connection probe (TS
@@ -1238,6 +1291,8 @@ impl DomainRepository {
             return Err(Error::Generation);
         }
         if registration.reception_room_id == room {
+            coordinator::verified_after_probe(&tx, fleet_id, generation)?;
+            tx.commit()?;
             return Ok(());
         }
         if !registration.reception_room_id.is_empty() {
@@ -1249,6 +1304,7 @@ impl DomainRepository {
             "UPDATE registrations SET config=?2 WHERE fleet_id=?1",
             params![fleet_id, serialize(&registration)?],
         )?;
+        coordinator::verified_after_probe(&tx, fleet_id, generation)?;
         matrix_routes::reconcile(&tx, graphs::now_ms()?)?;
         tx.commit()?;
         Ok(())
@@ -1373,6 +1429,24 @@ impl DomainRepository {
         query
             .query_map(params![after, limit as i64], |r| r.get::<_, String>(0))?
             .map(|s| Ok(serde_json::from_str(&s?)?))
+            .collect()
+    }
+    /// Transport pages are scoped by registration, never by server hostname.
+    pub fn fleet_engagements(
+        &self,
+        fleet: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<Engagement>, Error> {
+        if limit == 0 || limit > 100 {
+            return Err(InvalidInput("page limit must be 1..100").into());
+        }
+        let mut query = self.db.prepare(
+            "SELECT projection FROM engagements WHERE fleet_id=?1 AND id>?2 ORDER BY id LIMIT ?3",
+        )?;
+        query
+            .query_map(params![fleet, after, limit], |r| r.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?))
             .collect()
     }
     /// The console engagements list (board #60 item 3): the label the triage
@@ -2127,6 +2201,16 @@ impl DomainRepository {
         now: u64,
         allocated: Option<u64>,
     ) -> Result<Engagement, Error> {
+        self.approve_allocating_inner(command_id, proof, now, allocated, None)
+    }
+    fn approve_allocating_inner(
+        &mut self,
+        command_id: &str,
+        proof: &VerifiedRequest,
+        now: u64,
+        allocated: Option<u64>,
+        coordinator: Option<&coordinator::AgentApproval>,
+    ) -> Result<Engagement, Error> {
         let allocated = allocated
             .map(|value| {
                 if value == 0 {
@@ -2143,6 +2227,18 @@ impl DomainRepository {
         authority(&tx, proof, now)?;
         project_authority(&tx, proof)?;
         let request = proof.request();
+        if let Some(command) = coordinator {
+            coordinator::check_agent(&tx, command, proof, now)?;
+            if let Some(value) =
+                coordinator::replay(&tx, command_id, &coordinator::command_digest(command)?)?
+            {
+                return Ok(value);
+            }
+        } else if coordinator::binding(&tx, &request.fleet_id)?.is_some() {
+            // An old console endpoint cannot add a second verdict or bypass the
+            // explicit coordinator once this engagement has migrated.
+            return Err(Error::LocalAuthority);
+        }
         let id = request.engagement_id()?;
         let (stored_digest, generation): (String, u64) = tx
             .query_row(
@@ -2158,9 +2254,13 @@ impl DomainRepository {
         if generation != proof.registration().generation {
             return Err(Error::Generation);
         }
-        let digest = match allocated {
-            None => decision_digest("approve", &id)?,
-            Some(amount) => canonical::digest(&json!(["approve", id, u64::from(amount)]))?,
+        let digest = if let Some(command) = coordinator {
+            coordinator::command_digest(command)?
+        } else {
+            match allocated {
+                None => decision_digest("approve", &id)?,
+                Some(amount) => canonical::digest(&json!(["approve", id, u64::from(amount)]))?,
+            }
         };
         if let Some(value) = replay_decision(&tx, command_id, &digest)? {
             return Ok(value);
@@ -2180,7 +2280,14 @@ impl DomainRepository {
         // The engagement being decided is still pending, so it holds nothing
         // yet and the headroom is exactly the retained decide() figure with
         // `excludeEngagementId: id`.
-        check_grant(&tx, &resource, value.agent_name.as_str(), granted, now)?;
+        check_grant_within(
+            &tx,
+            &resource,
+            value.agent_name.as_str(),
+            granted,
+            now,
+            coordinator.map(|c| c.request.resource_allocation_id.as_str()),
+        )?;
         value.state = EngagementState::Reserved;
         value.project_name = proof.project_name().map(str::to_owned);
         value.allocated_tokens = allocated;
@@ -2198,6 +2305,9 @@ impl DomainRepository {
             &value,
             Some("engagement.approved"),
         )?;
+        if let Some(command) = coordinator {
+            coordinator::commit_agent(&tx, command, &value)?;
+        }
         tx.commit()?;
         Ok(value)
     }
@@ -2240,6 +2350,13 @@ impl DomainRepository {
             return Ok(value);
         }
         let mut value = read_engagement(&tx, id)?;
+        let fleet: String =
+            tx.query_row("SELECT fleet_id FROM engagements WHERE id=?1", [id], |r| {
+                r.get(0)
+            })?;
+        if coordinator::binding(&tx, &fleet)?.is_some() {
+            return Err(Error::LocalAuthority);
+        }
         if !matches!(
             value.state,
             EngagementState::Reserved | EngagementState::Active

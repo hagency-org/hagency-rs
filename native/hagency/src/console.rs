@@ -19,6 +19,7 @@ pub mod palpo_import;
 mod project_sides;
 mod resource_configuration;
 mod resources;
+mod server_engagements;
 mod setup;
 mod side_budget;
 mod side_lifecycle;
@@ -130,6 +131,7 @@ pub(crate) fn router() -> Router {
                 .push(project_sides::router())
                 .push(side_registration::router())
                 .push(palpo_import::router())
+                .push(server_engagements::router())
                 .push(side_budget::router())
                 .push(side_lifecycle::router())
                 .push(approvals::router())

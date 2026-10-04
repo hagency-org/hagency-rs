@@ -13,6 +13,7 @@ hmac = "=0.12.1"
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
 hagency-core = { path = "../hagency-core" }
+palpo-hagency-contract = { git = "https://github.com/palpo-im/palpo.git", rev = "d1cea837b0e559f7a26091874ec52687d279dbe3", version = "0.4.0" }
 hagency-metering = { path = "../hagency-metering" }
 time = { version = "=0.3.55", default-features = false }
 serde.workspace = true

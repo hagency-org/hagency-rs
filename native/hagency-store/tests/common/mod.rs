@@ -184,6 +184,7 @@ pub fn remove_usage_schema(db: &rusqlite::Connection) {
 
 /// Remove delivery and upload additions before constructing an older database.
 pub fn remove_upload_schema(db: &rusqlite::Connection) {
+    remove_coordinator_schema(db);
     // Migration 025 adds columns to `ceiling_alerts`, and an ADD COLUMN replay
     // over an already-upgraded table fails on the duplicate column (no ADD
     // COLUMN migration in this store supports that replay). Every chained
@@ -195,6 +196,11 @@ pub fn remove_upload_schema(db: &rusqlite::Connection) {
         .unwrap();
     db.execute_batch("DROP TABLE IF EXISTS approval_responses; DROP TABLE IF EXISTS received_files; DROP TABLE IF EXISTS file_deliveries; DROP TABLE IF EXISTS file_uploads; DROP TABLE IF EXISTS room_trust;")
         .unwrap();
+}
+
+/// Remove ADR 0011 additions when a migration fixture reconstructs an older DB.
+pub fn remove_coordinator_schema(db: &rusqlite::Connection) {
+    db.execute_batch("DROP TABLE IF EXISTS coordinator_publications; DROP TABLE IF EXISTS coordinator_commands; DROP TABLE IF EXISTS coordinator_agents; DROP TABLE IF EXISTS coordinator_projects; DROP TABLE IF EXISTS coordinator_resources; DROP TABLE IF EXISTS coordinator_engagements;").unwrap();
 }
 
 pub fn remove_attachment_schema(db: &rusqlite::Connection) {

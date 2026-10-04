@@ -35,6 +35,18 @@ pub enum CeilingChange {
 /// The inner access supplies the original finite gate, not publication authority.
 pub struct ResourceConfigurationAccess(ResourcePublicationAccess);
 impl ResourceConfigurationAccess {
+    /// The same finite, revocable console authority also governs contributions.
+    pub fn prepare_contribution(
+        &self,
+        grant: super::coordinator::ResourceGrant,
+        deadline: Instant,
+    ) -> Result<super::coordinator::ResourceContributionCommand, Error> {
+        let digest = hagency_core::canonical::digest(&serde_json::to_value(&grant)?)?;
+        let gate = self
+            .0
+            .prepare(grant.resource_id.clone(), digest, false, deadline)?;
+        Ok(super::coordinator::ResourceContributionCommand { grant, gate })
+    }
     pub fn new(expires: Instant, retirement: ResourcePublicationRetirement) -> Self {
         Self(ResourcePublicationAccess::new(expires, retirement))
     }

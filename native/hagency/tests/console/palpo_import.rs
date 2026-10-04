@@ -117,17 +117,42 @@ async fn native_palpo_import_route_saves_the_owner_download() {
         "the side view never carries a token"
     );
 
-    // A re-import of the same fleet is accepted; another fleet is refused.
+    // A second engagement on the same server keeps separate credentials.
     let again = post("/console/api/palpo/import", &cookie)
         .json(&body(&download(&fleet)))
         .send(&service)
         .await;
     assert_eq!(again.status_code, Some(StatusCode::OK));
+    let second = format!("hf_{}", "d".repeat(32));
+    let mut second_download = download(&second);
+    second_download["registration"]["as_token"] = json!("second-as-secret");
+    second_download["transport"]["token"] = json!("second-machine-secret-0123456789");
     let other = post("/console/api/palpo/import", &cookie)
-        .json(&body(&download(&format!("hf_{}", "d".repeat(32)))))
+        .json(&body(&second_download))
         .send(&service)
         .await;
-    assert_eq!(other.status_code, Some(StatusCode::CONFLICT));
+    assert_eq!(other.status_code, Some(StatusCode::OK));
+    let secondary = state.join("palpo-engagements").join(&second);
+    assert_eq!(
+        std::fs::read_to_string(secondary.join("palpo.machine_token")).unwrap(),
+        "second-machine-secret-0123456789"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("palpo.machine_token")).unwrap(),
+        "machine-token-secret-0123456789"
+    );
+    let first: Value =
+        serde_json::from_slice(&std::fs::read(state.join("palpo-appservice.json")).unwrap())
+            .unwrap();
+    assert_eq!(first["as_token"], "as-token-value-secret");
+    let rows: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM registrations WHERE fleet_id IN (?1,?2)",
+            [&fleet, &second],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2);
     f.close().await;
 }
 

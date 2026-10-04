@@ -834,6 +834,7 @@ fn native_retained_peer_corpus_migration_replays_after_rewind() {
     drop(f.db);
     {
         let sql = Connection::open(state.join("domain.sqlite3")).unwrap();
+        common::remove_coordinator_schema(&sql);
         // 032's ADD COLUMN is not replay-idempotent: the rewind replays it
         // over a receipts table that already carries the column, so strip it
         // first (the 025 replay posture; cf. updated_at in file_delivery.rs).
@@ -919,6 +920,7 @@ fn native_retained_peer_corpus_migration_head_is_current() {
             .unwrap();
         sql.execute_batch(include_str!("../src/migrations/024-ceiling-alerts.sql"))
             .unwrap();
+        common::remove_coordinator_schema(&sql);
         // 032's ADD COLUMN is not replay-idempotent: the rewind replays it
         // over a receipts table that already carries the column, so strip it
         // first (the 025 replay posture; cf. updated_at in file_delivery.rs).
