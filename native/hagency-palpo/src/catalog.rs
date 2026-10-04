@@ -8,7 +8,7 @@ impl Adapter {
         domain: &DomainStore,
         cancel: &CancellationToken,
     ) -> Result<Step, Error> {
-        let _guard = self.publication.try_lock().map_err(|_| Error::Busy)?;
+        let mut cursor = self.publication.try_lock().map_err(|_| Error::Busy)?;
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -38,6 +38,13 @@ impl Adapter {
         };
         let mut included = values("probeReceipts");
         let mut included_statuses = values("statuses");
+        let mut contribution_page: Option<hagency_store::ContributionPage> = pending_body
+            .as_ref()
+            .and_then(|b| b.get("contributionPage"))
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| Error::Custody)?;
         let registration = domain
             .provisioning_registration(self.registration.fleet_id.clone())
             .await?;
@@ -58,6 +65,11 @@ impl Adapter {
                 return Err(Error::Cancelled);
             }
             let mut body = snapshot.into_update();
+            let page = domain
+                .contribution_page(self.registration.clone(), cursor.clone())
+                .await?;
+            body["contributionPage"] = serde_json::to_value(&page).map_err(|_| Error::Custody)?;
+            contribution_page = Some(page);
             command_receipts = domain
                 .pending_project_receipts(registration.clone())
                 .await?;
@@ -101,6 +113,13 @@ impl Adapter {
             domain
                 .mark_project_receipts_published(registration, command_receipts)
                 .await?;
+        }
+        if step == Step::Published
+            && let Some(page) = contribution_page
+        {
+            // Advance only from the acknowledged frozen bytes. A restart can
+            // resend that original page and then continue beyond its last ID.
+            *cursor = page.next_after.unwrap_or_default();
         }
         Ok(step)
     }

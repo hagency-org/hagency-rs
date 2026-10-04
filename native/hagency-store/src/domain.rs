@@ -106,6 +106,7 @@ mod peers;
 pub(crate) mod received_files;
 mod replies;
 pub(crate) mod resource_configuration;
+pub(crate) mod resource_contributions;
 pub(crate) mod resource_publication;
 mod side_budget;
 pub use side_budget::{SideBudget, SideCommitment, UsageTotals};

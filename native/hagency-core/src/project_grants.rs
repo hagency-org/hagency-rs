@@ -74,7 +74,7 @@ pub struct ResourceDelegation {
 impl ResourceDelegation {
     pub fn validate(&self, registration: &Registration, now: u64) -> Result<(), InvalidInput> {
         registration.validate()?;
-        id(&self.id)?;
+        crate::project::identifier(&self.id, 128)?;
         id(&self.resource_id)?;
         positive(self.revision)?;
         self.limits.validate()?;

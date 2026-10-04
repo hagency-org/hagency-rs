@@ -4084,6 +4084,46 @@ impl DomainStore {
         self.call(command.weight(), move |db| db.configure_resource(command))
             .await
     }
+    pub async fn resource_contributions(
+        &self,
+        resource: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<crate::ContributionStatus>, Error> {
+        self.call(weight(&(&resource, &after))?, move |db| {
+            db.resource_contributions(&resource, &after, limit, writer_time()?)
+        })
+        .await
+    }
+    pub async fn contribution_targets(
+        &self,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<crate::ContributionTarget>, Error> {
+        self.call(weight(&after)?, move |db| {
+            db.contribution_targets(&after, limit)
+        })
+        .await
+    }
+    pub async fn contribution_page(
+        &self,
+        identity: crate::outbound::RegistrationIdentity,
+        after: String,
+    ) -> Result<crate::ContributionPage, Error> {
+        self.call(weight(&(&identity, &after))?, move |db| {
+            db.contribution_page(&identity, &after, writer_time()?)
+        })
+        .await
+    }
+    pub async fn contribute_resource(
+        &self,
+        command: crate::ResourceContributionCommand,
+    ) -> Result<crate::ContributionStatus, Error> {
+        self.call(command.weight(), move |db| {
+            db.contribute_resource_clock(command, writer_time, std::time::Instant::now)
+        })
+        .await
+    }
     pub async fn publish_resource(
         &self,
         command: crate::ResourcePublicationCommand,

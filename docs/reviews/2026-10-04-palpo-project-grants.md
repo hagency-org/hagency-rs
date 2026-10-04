@@ -102,3 +102,41 @@ Follow-up validation:
 - Shared corpus SHA-256:
   `98b4796dfd9322300b0106d0b0114fa2cca7477414b638c8e112dea504dee84d`.
 - `git diff --check`: passed. No deployment or Makepad claim for this slice.
+
+## Operator contribution UI and publication follow-up
+
+Added authenticated create/list/revoke routes and the actual native console
+resource-page form. Queued mutations retain their original finite session gate,
+resource revision and registration generation. Creation/revocation reuse the
+accounting/retirement kernels. Exact pending requests are saved before POST and
+recover after reload. Revocation explicitly keeps capacity held. A bounded target
+endpoint supplies actual fleet IDs; the older project-side ID is a server name.
+
+Contribution pages carry at most 16 rows in frozen publications. Their cursor
+advances from acknowledged bytes; restart and lost ACKs cannot skip later rows.
+Current registration scoping excludes old grants and foreign fleets. Palpo
+validates immutable grant data, finite limits and monotonic held reservations,
+committing observations with the sequence. Accepted project records retain their
+originating registration generation so rotation fences old authority.
+
+Validation:
+
+- Store selectors `resource_contributions`, `project_grants`, `project_commands`:
+  **26 passed**, no failures. Original-session retirement, changed registration,
+  publication scope and preserved historical reservations are covered.
+- `hagency-palpo --test catalog`: **8 passed**, including 18 contributions over
+  two pages, exact frozen replay after restart, then cursor wrap.
+- Native HTTP/browser contribution selector: **4 passed**. Chrome uses the
+  production built assets and real isolated SQLite. It drops the first committed
+  POST response, reloads, retries identical bytes, verifies one reservation,
+  revokes and verifies persistence. A final browser run passed after capture
+  adjustment. Desktop and 430px captures were inspected; narrow capture uses a
+  tall viewport to avoid stitching the fixed console shell. This is responsive
+  browser evidence, not device acceptance.
+- Production console asset build passed. Palpo companion full backend suite:
+  **98 passed**, zero failures. `git diff --check` passed in both repositories.
+
+No production activation, visible client restart, live Matrix mutation or new
+Makepad/mobile acceptance is part of this follow-up. Hagency-originated
+association and Palpo/Rinx project-budget forms, assigned-admin Inbox decisions
+and their result projection remain before capability advertisement.

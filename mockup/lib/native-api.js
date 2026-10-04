@@ -73,7 +73,7 @@ export function validateEngagements(v) {
       || typeof e.quotaPaused !== 'boolean')) throw new Error('invalid_native_response');
   return v;
 }
-const RECOVERY_ERRORS = { agent_lifecycle_scope_required: 403, resolution_conflict: 409, dispatch_not_resolvable: 409, invalid_console_request: 400 };
+const RECOVERY_ERRORS = { contribution_expired: 409, contribution_revoked: 409, connection_verification_required: 409, resource_unavailable: 409, agent_lifecycle_scope_required: 403, resolution_conflict: 409, dispatch_not_resolvable: 409, invalid_console_request: 400 };
 /* End access revokes the credential this page holds. From the moment it
  * starts until a new ticket is exchanged, no console read or write leaves the
  * page: a multi-step load already in flight (the fleet panel's per-side budget
@@ -1186,4 +1186,55 @@ export async function offerResource(model, reasoning, tokens) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+
+const contributionLimits = (v, positive) => object(v, ['tokens', 'maxAgents', 'maxRatePerDay'])
+  && Object.values(v).every(n => number(n) && (!positive || n > 0)) && v.maxAgents <= 10000;
+export function validateResourceContribution(value, resource) {
+  const g = value?.grant;
+  if (!object(value, ['grant', 'state', 'reserved'])
+    || !['active', 'expired', 'revoked', 'registration_changed'].includes(value.state)
+    || !object(g, ['v', 'id', 'revision', 'fleetId', 'registrationGeneration', 'issuer', 'resourceId', 'limits', 'expiresAtMs'])
+    || g.v !== 1 || !id(g.id) || !number(g.revision) || g.revision < 1 || !/^hf_[a-f0-9]{32}$/.test(g.fleetId)
+    || !number(g.registrationGeneration) || g.registrationGeneration < 1 || !text(g.issuer, 255) || g.resourceId !== resource
+    || !contributionLimits(g.limits, true) || !number(g.expiresAtMs) || g.expiresAtMs < 1 || !contributionLimits(value.reserved, false)
+    || Object.keys(value.reserved).some(k => value.reserved[k] > g.limits[k])) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchResourceContributions(resource, after = '') {
+  if (!/^resource_[a-f0-9]{24}$/.test(resource) || (after && !id(after))) throw new Error('invalid_selection');
+  const value = await request(`/api/resources/${resource}/contributions${after ? `?after=${encodeURIComponent(after)}` : ''}`);
+  if (!object(value, ['resourceId', 'contributions', 'nextAfter']) || value.resourceId !== resource || !Array.isArray(value.contributions)
+    || value.contributions.length > 16 || !(value.nextAfter === null || id(value.nextAfter))) throw new Error('invalid_native_response');
+  value.contributions.forEach(row => validateResourceContribution(row, resource));
+  return value;
+}
+export async function contributeResource(resource, input) {
+  const value = await request(`/api/resources/${resource}/contributions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  try {
+    validateResourceContribution(value, resource);
+    if (value.grant.id !== `contribution_${input.requestId}` || value.grant.fleetId !== input.fleetId
+      || value.grant.registrationGeneration !== input.registrationGeneration || value.grant.expiresAtMs !== input.expiresAtMs
+      || Object.keys(input.limits).some(k => value.grant.limits[k] !== input.limits[k])) throw new Error();
+    return value;
+  } catch { throw new Error('outcome_unknown'); }
+}
+export async function revokeResourceContribution(resource, row) {
+  const value = await request(`/api/resources/${resource.id}/contributions/${row.grant.id}/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expectedResourceRevision: resource.revision, expectedRevision: row.grant.revision }) });
+  try {
+    validateResourceContribution(value, resource.id);
+    if (value.grant.id !== row.grant.id || value.state !== 'revoked') throw new Error();
+    return value;
+  } catch { throw new Error('outcome_unknown'); }
+}
+
+export async function fetchContributionTargets(after = '') {
+  if (after && !id(after)) throw new Error('invalid_selection');
+  const v = await request(`/api/palpo/contribution-targets${after ? `?after=${encodeURIComponent(after)}` : ''}`);
+  if (!object(v, ['targets', 'nextAfter']) || !Array.isArray(v.targets) || v.targets.length > 16 || !(v.nextAfter === null || id(v.nextAfter))
+    || v.targets.some(r => !object(r, ['fleetId', 'registrationGeneration', 'issuer', 'receptionBound']) || !/^hf_[a-f0-9]{32}$/.test(r.fleetId)
+      || !number(r.registrationGeneration) || r.registrationGeneration < 1 || !text(r.issuer, 255) || typeof r.receptionBound !== 'boolean')) throw new Error('invalid_native_response');
+  return v;
 }

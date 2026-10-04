@@ -1682,6 +1682,11 @@ p.notice { margin: 0; }
 .form-foot { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .main section form > .form-foot { justify-self: stretch; }
 .main fieldset { grid-column: 1 / -1; grid-template-columns: 1fr 1fr 2fr 1fr; background: var(--panel-2); }
+.main fieldset.contribution-fields { width: 100%; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.contribution-limits { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 760px) {
+  .main fieldset.contribution-fields, .contribution-limits { grid-template-columns: 1fr; }
+}
 .main fieldset legend { font-weight: 600; color: var(--ink-2); }
 @media (max-width: 760px) { .main fieldset { grid-template-columns: 1fr; } }
 .fleet-row svg.ico { width: 16px; height: 16px; flex: none; opacity: .75; }

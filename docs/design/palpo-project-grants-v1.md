@@ -2,8 +2,8 @@
 
 Status: local grant/accounting and authenticated command/receipt implementation
 for Rinx ADR 0010. This is not an advertised workflow capability or a deployed
-workflow. The operator contribution UI, contribution snapshots, Palpo Inbox
-commands and Rinx forms still need integration before enabling the capability.
+workflow. The operator contribution UI and bounded snapshots are implemented;
+Palpo Inbox commands and Rinx forms still need integration before enabling the capability.
 
 ## Authority
 
@@ -125,10 +125,34 @@ including agents known through durable workflow receipts. A producer advances
 after its exact frozen page is acknowledged; agents beyond the first 100 are
 not permanently omitted. Matrix room membership is still observed before Ready.
 
+## Operator contributions and publication
+
+Hagency's My resources page offers contribution creation and revocation for an
+existing, reception-bound Palpo registration. The original authenticated console
+session gates each queued mutation. The writer checks resource revision,
+registration and provider account before committing through the existing
+reservation kernel. The UI collects finite tokens, agent count, aggregate daily
+rate and expiry. It saves the exact request before sending; response loss and
+reload retry the same ID and body. Revocation leaves its budget held.
+
+`contributionPage` on authenticated outbound updates contains at most 16 rows,
+registration generation, observation time and a cursor. Each row includes its
+immutable grant, state and aggregate lifetime project reservations. Pages exclude
+other fleets and prior registrations. Frozen updates retain their original page
+and advance only after acknowledgement, including restart. An empty page is not
+deletion. Publication does not advertise the complete project workflow capability.
+
+Palpo commits validated pages with the transport sequence. It refuses changed
+grant identities/budgets, decreasing reservations, restoration after retirement,
+foreign fleets and old registration generations. Accepted project receipts now
+retain their registration generation so a new registration cannot authorize work
+against an old grant. UI availability still needs to check freshness, current
+generation and remaining limits; a cached observation is not an allocation.
+
 ## Integration still required
 
-Hagency's authenticated operator contribution controls and bounded publication
-snapshots must precede the capability advertisement. Palpo's project review UI
+Hagency-originated association still needs its complete review/handoff flow.
+Palpo's project review UI
 must collect finite budgets and explicit administrators, create the actual owner
 room, enqueue reservation and show Awaiting reservation until its applied
 receipt. Assigned-admin Inbox decisions then enqueue agent/top-up/revoke work.

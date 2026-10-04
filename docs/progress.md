@@ -13363,3 +13363,19 @@ Live, working-tree binary: kill -9 mid-round, restart ready in two seconds, both
 - Contribution UI/snapshots, Palpo Inbox command/result integration and Rinx
   forms remain. Capability is not advertised; production and visible clients
   were not restarted. Full ADR and live/device acceptance remain active.
+
+### 2026-10-04 — Operator contribution controls and bounded publication
+
+- Hagency resource page creates/revokes finite contributions through original-
+  session, resource-revision and registration checks. Exact saved requests
+  recover from response loss/reload without double reservation; revocation
+  keeps held capacity. English/Chinese controls share the native console theme.
+- Fleet-scoped 16-row pages use frozen outbound publication and acknowledged
+  cursors. Restart retries exact bytes before advancing. Palpo commits validated
+  observations with the sequence and rejects changed budgets, restored retired
+  authority, decreasing reservations and old registrations.
+- Validation: 26 focused store tests, 8 TLS catalog tests, 4 native HTTP/browser
+  contribution tests and 98 Palpo backend tests passed. Production console
+  build passed; desktop/430px captures inspected. No Makepad/device claim.
+- Still active: association, project-budget/admin forms, Inbox command/result
+  integration and full live lifecycle. No production or signed-in session changes.

@@ -87,6 +87,97 @@ impl Context {
 fn offers(v: &Value) -> &[Value] {
     v["capabilities"]["offers"].as_array().unwrap()
 }
+
+#[tokio::test]
+async fn contribution_pages_resume_after_lost_ack_and_restart_without_skipping_rows() {
+    use hagency_core::project_grants::{GrantLimits, ResourceDelegation};
+    let mut fake = Fake::start(true).await;
+    let ctx = Context::new(&fake.endpoint).await;
+    ctx.domain.put_resource(resource()).await.unwrap();
+    let registration = domain_registration();
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 86400000;
+    for i in 0..18 {
+        ctx.domain
+            .delegate_resource(ResourceDelegation {
+                v: 1,
+                id: format!("contribution_{i:02}"),
+                revision: 1,
+                fleet_id: registration.fleet_id.clone(),
+                registration_generation: registration.generation,
+                issuer: registration.server_name.clone(),
+                resource_id: resource().id(),
+                limits: GrantLimits {
+                    tokens: 10,
+                    max_agents: 1,
+                    max_rate_per_day: 10,
+                },
+                expires_at_ms: expires,
+            })
+            .await
+            .unwrap();
+    }
+    let cancel = CancellationToken::new();
+    let mut original = Vec::new();
+    let (first, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            let value = check(&request, 1);
+            let page = &value["contributionPage"];
+            assert_eq!(page["registrationGeneration"], 7);
+            assert_eq!(page["contributions"].as_array().unwrap().len(), 16);
+            assert_eq!(page["nextAfter"], "contribution_15");
+            assert!(value["capabilities"].get("projectWorkflow").is_none());
+            original = request.body.clone();
+            drop(request);
+        }
+    );
+    assert_eq!(first, Err(Error::Transport));
+    let ctx = ctx.restart(&fake.endpoint).await;
+    let (retry, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            assert_eq!(request.body, original);
+            request.json(200, json!({"ok":true}));
+        }
+    );
+    assert_eq!(retry, Ok(Step::Published));
+    let (next, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            let value = check(&request, 2);
+            let page = &value["contributionPage"];
+            assert_eq!(page["after"], "contribution_15");
+            assert_eq!(page["contributions"].as_array().unwrap().len(), 2);
+            assert_eq!(page["contributions"][0]["grant"]["id"], "contribution_16");
+            assert_eq!(page["nextAfter"], Value::Null);
+            request.json(200, json!({"ok":true}));
+        }
+    );
+    assert_eq!(next, Ok(Step::Published));
+    let (again, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            let value = check(&request, 3);
+            assert_eq!(value["contributionPage"]["after"], "");
+            assert_eq!(
+                value["contributionPage"]["contributions"][0]["grant"]["id"],
+                "contribution_00"
+            );
+            request.json(200, json!({"ok":true}));
+        }
+    );
+    assert_eq!(again, Ok(Step::Published));
+    ctx.close().await;
+    fake.close().await;
+}
 fn check(request: &Request, sequence: u64) -> Value {
     assert!(request.target.ends_with("/updates"));
     assert_eq!(request.method, "POST");

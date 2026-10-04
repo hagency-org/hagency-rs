@@ -47,7 +47,8 @@ pub struct Adapter {
     limits: Limits,
     matrix: Mutex<()>,
     work: Mutex<()>,
-    publication: Mutex<()>,
+    // Guard the publication lane and its acknowledged contribution-page cursor.
+    publication: Mutex<String>,
     receipts: Option<std::sync::Arc<dyn ProbeReceipts>>,
 }
 impl Adapter {
@@ -173,7 +174,7 @@ impl Adapter {
             limits: config.limits,
             matrix: Mutex::new(()),
             work: Mutex::new(()),
-            publication: Mutex::new(()),
+            publication: Mutex::new(String::new()),
             receipts: None,
         })
     }

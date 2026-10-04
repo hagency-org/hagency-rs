@@ -3,6 +3,10 @@ pub use domain::resource_configuration::{
     CeilingChange, ProfileChange, ResourceConfigurationAccess, ResourceConfigurationCommand,
     ResourceConfigurationResult,
 };
+pub use domain::resource_contributions::{
+    ContributionMutation, ContributionPage, ContributionState, ContributionStatus,
+    ContributionTarget, ResourceContributionAccess, ResourceContributionCommand,
+};
 pub mod agent_home;
 pub mod backup;
 mod database;

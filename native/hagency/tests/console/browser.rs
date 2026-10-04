@@ -1364,3 +1364,58 @@ async fn native_console_regression_browser() {
     serving.await.unwrap().unwrap();
     f.close().await;
 }
+
+#[tokio::test]
+async fn native_console_contributions_browser() {
+    let address = address();
+    let f = Fixture::new(address, Some(&built()));
+    let resource = native_resource("contribution_browser");
+    f.domain.put_resource(resource.clone()).await.unwrap();
+    hagency_store::private::write_new(
+        &f.root.path().join("state/operator.token"),
+        TOKEN.as_bytes(),
+    )
+    .unwrap();
+    let server = Server::new(TcpListener::new(address).try_bind().await.unwrap());
+    let handle = server.handle();
+    let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
+    let url = hagency::console::client::access(&f.root.path().join("state"), address)
+        .await
+        .unwrap();
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../mockup/scripts/native-console-contributions-browser.mjs");
+    let mut browser = Command::new(node())
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    browser.stdin.take().unwrap().write_all(format!("{}\n",json!({"base":format!("http://{address}"),"url":url,"resource":resource.id(),"fleet":common::registration().fleet_id})).as_bytes()).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(120), browser.wait()).await;
+    if result.is_err() {
+        let _ = browser.kill().await;
+    }
+    handle.stop_graceful(Some(Duration::from_secs(2)));
+    serving.await.unwrap().unwrap();
+    assert!(
+        result.unwrap().unwrap().success(),
+        "actual contribution browser walk failed"
+    );
+    let rows = f
+        .domain
+        .resource_contributions(resource.id(), String::new(), 16)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, hagency_store::ContributionState::Revoked);
+    assert_eq!(rows[0].grant.limits.tokens, 400);
+    let (budget, _) = f
+        .domain
+        .resource_headroom(resource.id(), super::fixture::now())
+        .await
+        .unwrap();
+    assert_eq!(u64::from(budget.pool.committed), 400);
+    f.close().await;
+}

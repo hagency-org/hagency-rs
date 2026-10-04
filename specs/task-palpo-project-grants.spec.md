@@ -33,7 +33,9 @@ Grant types, migrations 61/62, transaction/accounting primitives, administrator
 reassignment, grant retirement, writer clocks, authenticated Palpo commands,
 short execution leases, atomic business receipts and frozen-publication recovery. Relevant boundaries are
 hagency-core, hagency-store, its historical migration fixtures, fixed Matrix
-error categories, and the native fleet reconciliation loop.
+error categories, and the native fleet reconciliation loop. The follow-up also
+includes authenticated console contribution routes, resource-page controls and
+bounded contribution pages through the existing frozen publication lane.
 
 ## Acceptance
 
@@ -42,12 +44,16 @@ error categories, and the native fleet reconciliation loop.
   changes, explicit self-approval, expiry after lock, late provisioning completion
   and revoked runner capabilities.
 - The store regression suite and native Hagency executable compile/check pass.
+- An actual served-console browser walk exercises loss of a committed response,
+  reload, exact retry, single reservation and revocation. Desktop and 430px
+  layouts are inspected; transport tests cover page retry/restart and cursor
+  advancement; store tests cover fleet scope and registration rotation.
 - The remaining full-ADR integration is explicit in the design checkpoint.
 
 ## Remaining full workflow
 
-Authenticated operator contribution UI and publication, Palpo Inbox/Rinx command
-integration, richer status/usage publication, explicit legacy migration and
+Hagency-originated association, Palpo Inbox/Rinx command integration, richer
+status/usage publication, explicit legacy migration and
 inspected capacity release, and live
 Rinx approval-to-Matrix readiness/cleanup validation. See
 `docs/design/palpo-project-grants-v1.md` and Rinx ADR 0010.

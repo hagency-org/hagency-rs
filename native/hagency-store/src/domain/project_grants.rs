@@ -331,36 +331,9 @@ impl DomainRepository {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = clock()?;
-        if grant.expires_at_ms <= now {
-            return Err(Error::GrantExpired);
-        }
-        grant.validate(&registration(&tx, &grant.fleet_id)?, now)?;
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT config FROM resource_delegations WHERE id=?1",
-                [&grant.id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old {
-            if serde_json::from_str::<ResourceDelegation>(&old)? != *grant {
-                return Err(Error::Conflict);
-            }
-            return delegation(&tx, &grant.id, now);
-        }
-        bounded_row(&tx, "resource_delegations", "id", &grant.id, 10_000)?;
-        let resource = read_resource(&tx, &grant.resource_id)?;
-        self.accounts.check_resource(&tx, &resource)?;
-        check_grant(
-            &tx,
-            &resource,
-            "Project delegation",
-            grant.limits.tokens,
-            now,
-        )?;
-        tx.execute("INSERT INTO resource_delegations(id,fleet_id,resource_id,config,created_at) VALUES(?1,?2,?3,?4,?5)", params![grant.id, grant.fleet_id, grant.resource_id, serialize(grant)?, now])?;
+        let result = delegate(&tx, &self.accounts, grant, now)?;
         tx.commit()?;
-        Ok(grant.clone())
+        Ok(result)
     }
 
     /// The transport supplies its authenticated current registration. Palpo
@@ -464,23 +437,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let raw: String = tx
-            .query_row(
-                "SELECT config FROM resource_delegations WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .ok_or(Error::NotFound)?;
-        let grant: ResourceDelegation = serde_json::from_str(&raw)?;
-        if grant.revision != expected_revision {
-            return Err(Error::Conflict);
-        }
-        tx.execute(
-            "UPDATE resource_delegations SET revoked_at=COALESCE(revoked_at,?2) WHERE id=?1",
-            params![id, now],
-        )?;
-        reconcile(&tx, now)?;
+        revoke_delegation(&tx, id, expected_revision, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -492,6 +449,43 @@ impl DomainRepository {
         tx.commit()?;
         Ok(())
     }
+}
+
+pub(super) fn delegate(
+    tx: &rusqlite::Transaction<'_>,
+    accounts: &super::accounts::Registry,
+    grant: &ResourceDelegation,
+    now: u64,
+) -> Result<ResourceDelegation, Error> {
+    if grant.expires_at_ms <= now {
+        return Err(Error::GrantExpired);
+    }
+    grant.validate(&registration(tx, &grant.fleet_id)?, now)?;
+    let old: Option<String> = tx
+        .query_row(
+            "SELECT config FROM resource_delegations WHERE id=?1",
+            [&grant.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(old) = old {
+        if serde_json::from_str::<ResourceDelegation>(&old)? != *grant {
+            return Err(Error::Conflict);
+        }
+        return delegation(tx, &grant.id, now);
+    }
+    bounded_row(tx, "resource_delegations", "id", &grant.id, 10_000)?;
+    let resource = read_resource(tx, &grant.resource_id)?;
+    accounts.check_resource(tx, &resource)?;
+    check_grant(
+        tx,
+        &resource,
+        "Project delegation",
+        grant.limits.tokens,
+        now,
+    )?;
+    tx.execute("INSERT INTO resource_delegations(id,fleet_id,resource_id,config,created_at) VALUES(?1,?2,?3,?4,?5)", params![grant.id, grant.fleet_id, grant.resource_id, serialize(grant)?, now])?;
+    Ok(grant.clone())
 }
 
 pub(super) fn reserve(
@@ -604,6 +598,32 @@ pub(super) fn revoke_project(
     }
     tx.execute(
         "UPDATE project_grants SET revoked_at=COALESCE(revoked_at,?2) WHERE id=?1",
+        params![id, now],
+    )?;
+    reconcile(tx, now)?;
+    Ok(())
+}
+
+pub(super) fn revoke_delegation(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    expected_revision: u64,
+    now: u64,
+) -> Result<(), Error> {
+    let raw: String = tx
+        .query_row(
+            "SELECT config FROM resource_delegations WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    let grant: ResourceDelegation = serde_json::from_str(&raw)?;
+    if grant.revision != expected_revision {
+        return Err(Error::Conflict);
+    }
+    tx.execute(
+        "UPDATE resource_delegations SET revoked_at=COALESCE(revoked_at,?2) WHERE id=?1",
         params![id, now],
     )?;
     reconcile(tx, now)?;
