@@ -59,7 +59,7 @@ impl Stage {
 /// The running fleet service; cancelled and joined by `palpo::Live`.
 pub(crate) struct FleetService {
     cancel: CancellationToken,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
     joined: Option<Result<(), Failure>>,
 }
 impl FleetService {
@@ -101,10 +101,40 @@ impl FleetService {
         let joined = tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .map_err(|_| Failure::OutcomeUnknown)?;
-        let result = joined.map_err(|_| Failure::OutcomeUnknown);
+        let result = joined
+            .map_err(|_| Failure::OutcomeUnknown)
+            .and_then(|result| result);
         self.task = None;
         self.joined = Some(result);
         result
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_palpo_fleet_close_retains_cancelled_wait_and_propagates_drain_failure() {
+        let (release, waiting) = tokio::sync::oneshot::channel::<()>();
+        let mut service = FleetService {
+            cancel: CancellationToken::new(),
+            task: Some(tokio::spawn(async move {
+                waiting.await.map_err(|_| Failure::OutcomeUnknown)?;
+                Err(Failure::OutcomeUnknown)
+            })),
+            joined: None,
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), service.close())
+                .await
+                .is_err()
+        );
+        assert!(service.task.is_some());
+        release.send(()).unwrap();
+        assert_eq!(service.close().await, Err(Failure::OutcomeUnknown));
+        assert_eq!(service.close().await, Err(Failure::OutcomeUnknown));
+        assert!(service.task.is_none());
     }
 }
 
@@ -141,13 +171,13 @@ async fn supervise(
     server_name: String,
     stage: Stage,
     cancel: CancellationToken,
-) {
+) -> Result<(), Failure> {
     let mut backoff = BACKOFF_MIN;
     // 1. The operator's local runtime settings.
     while !config::fleet_runtime_configured(&runtime_state) {
         stage.set("awaiting_runtime_config");
         if !pause(&cancel, &mut Duration::from_secs(5)).await {
-            return;
+            return Ok(());
         }
     }
     // 2. The reception Palpo's Verify connection binds.
@@ -157,7 +187,7 @@ async fn supervise(
             _ => stage.set("awaiting_reception"),
         }
         if !pause(&cancel, &mut Duration::from_secs(5)).await {
-            return;
+            return Ok(());
         }
     };
     // 3. The fleet's own identities and keys.
@@ -168,7 +198,7 @@ async fn supervise(
             Err(error) => tracing::warn!(%error, "fleet identities not ready; retrying"),
         }
         if !pause(&cancel, &mut backoff).await {
-            return;
+            return Ok(());
         }
     }
     backoff = BACKOFF_MIN;
@@ -182,11 +212,11 @@ async fn supervise(
             }
         }
         if !pause(&cancel, &mut backoff).await {
-            return;
+            return Ok(());
         }
     };
     stage.set("running");
-    run(running, &state, &domain, &registration, &stage, &cancel).await;
+    run(running, &state, &domain, &registration, &stage, &cancel).await
 }
 
 struct Running {
@@ -273,7 +303,7 @@ async fn run(
     registration: &hagency_core::authority::Registration,
     stage: &Stage,
     cancel: &CancellationToken,
-) {
+) -> Result<(), Failure> {
     let mut pumps: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // Coordinator-only notices never arrive here: each agent is admitted with
     // its owner's pump (fleet::Service::admit). This channel only satisfies
@@ -288,7 +318,7 @@ async fn run(
     }
     let service_cancel = cancel.child_token();
     let Some(mut service) = running.service.take() else {
-        return;
+        return Err(Failure::OutcomeUnknown);
     };
     let service_task = {
         let cancel = service_cancel.clone();
@@ -296,7 +326,7 @@ async fn run(
             if let Err(error) = service.run(unused, &cancel).await {
                 tracing::error!(?error, "fleet agent service stopped");
             }
-            let _ = service.close().await;
+            service.close().await
         })
     };
     let mut tick = tokio::time::interval(PASS_PERIOD);
@@ -305,6 +335,9 @@ async fn run(
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = tick.tick() => {}
+        }
+        if service_task.is_finished() {
+            break;
         }
         if let Err(error) =
             prepare_owners(&running, state, domain, registration, &mut pumps, cancel).await
@@ -324,10 +357,18 @@ async fn run(
     service_cancel.cancel();
     // The enclosing FleetService owns the bounded close and original join.
     // Never detach running agents and then start a replacement generation.
-    let _ = service_task.await;
+    let result = service_task
+        .await
+        .map_err(|_| Failure::OutcomeUnknown)
+        .and_then(|result| result);
     for pump in pumps {
         pump.abort();
     }
+    result?;
+    if !cancel.is_cancelled() {
+        return Err(Failure::OutcomeUnknown);
+    }
+    Ok(())
 }
 
 /// Before a pass: for each engagement waiting to be provisioned, pin its
