@@ -110,34 +110,6 @@ impl FleetService {
     }
 }
 
-#[cfg(test)]
-mod close_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn native_palpo_fleet_close_retains_cancelled_wait_and_propagates_drain_failure() {
-        let (release, waiting) = tokio::sync::oneshot::channel::<()>();
-        let mut service = FleetService {
-            cancel: CancellationToken::new(),
-            task: Some(tokio::spawn(async move {
-                waiting.await.map_err(|_| Failure::OutcomeUnknown)?;
-                Err(Failure::OutcomeUnknown)
-            })),
-            joined: None,
-        };
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), service.close())
-                .await
-                .is_err()
-        );
-        assert!(service.task.is_some());
-        release.send(()).unwrap();
-        assert_eq!(service.close().await, Err(Failure::OutcomeUnknown));
-        assert_eq!(service.close().await, Err(Failure::OutcomeUnknown));
-        assert!(service.task.is_none());
-    }
-}
-
 async fn pause(cancel: &CancellationToken, backoff: &mut Duration) -> bool {
     tokio::select! {
         _ = cancel.cancelled() => return false,
@@ -588,5 +560,33 @@ async fn supervise_pump(
             _ = tokio::time::sleep(backoff) => {}
         }
         backoff = (backoff * 2).min(BACKOFF_MAX);
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_palpo_fleet_close_retains_cancelled_wait_and_propagates_drain_failure() {
+        let (release, waiting) = tokio::sync::oneshot::channel::<()>();
+        let mut service = FleetService {
+            cancel: CancellationToken::new(),
+            task: Some(tokio::spawn(async move {
+                waiting.await.map_err(|_| Failure::OutcomeUnknown)?;
+                Err(Failure::OutcomeUnknown)
+            })),
+            joined: None,
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), service.close())
+                .await
+                .is_err()
+        );
+        assert!(service.task.is_some());
+        release.send(()).unwrap();
+        assert_eq!(service.close().await, Err(Failure::OutcomeUnknown));
+        assert_eq!(service.close().await, Err(Failure::OutcomeUnknown));
+        assert!(service.task.is_none());
     }
 }
