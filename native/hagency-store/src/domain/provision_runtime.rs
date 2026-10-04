@@ -63,6 +63,7 @@ fn current(
     if !Arc::ptr_eq(owner, &scope.owner) {
         return Err(Error::RunnerAuthority);
     }
+    super::project_grants::check_engagement(db, scope.engagement_id(), super::graphs::now_ms()?)?;
     let actual = read_effect(db, &scope.effect.id)?;
     let engagement = read_engagement(db, scope.engagement_id())?;
     if scope.effect.kind != "provision"
@@ -200,6 +201,7 @@ impl DomainRepository {
             &scope.effect.id,
             scope.effect.fence,
             &super::EffectOutcome::Applied { receipt },
+            super::graphs::now_ms()?,
         )?;
         tx.commit()?;
         Ok(value)

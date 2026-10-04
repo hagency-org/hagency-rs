@@ -321,6 +321,15 @@ async fn prepare_owners(
     pumps: &mut Vec<tokio::task::JoinHandle<()>>,
     cancel: &CancellationToken,
 ) -> Result<(), Failure> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Failure::OutcomeUnknown)?;
+    domain
+        .reconcile_project_grants(
+            u64::try_from(now.as_millis()).map_err(|_| Failure::OutcomeUnknown)?,
+        )
+        .await
+        .map_err(|_| Failure::OutcomeUnknown)?;
     let mut engagements = domain
         .pending_provisions(registration.fleet_id.clone())
         .await

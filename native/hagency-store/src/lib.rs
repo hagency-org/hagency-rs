@@ -10,6 +10,7 @@ mod domain;
 pub use domain::DOMAIN_SCHEMA_VERSION;
 pub use domain::joined_rooms::{JoinedRoom, JoinedRoomState, MAX_JOINED_ROOMS};
 pub use domain::owner_anchors::OwnerAnchor;
+pub use domain::project_grants::ProjectAgentDecision;
 mod domain_worker;
 pub mod private;
 pub mod task_context;
@@ -89,6 +90,12 @@ pub enum Error {
     Unqualified,
     #[error("selected resource or declared shared seat has insufficient capacity")]
     InsufficientCapacity,
+    #[error("project grant is expired")]
+    GrantExpired,
+    #[error("project grant or contribution has been revoked")]
+    GrantRevoked,
+    #[error("decision is outside its project grant or assigned administrator scope")]
+    GrantAuthority,
     #[error("cannot allocate against an agent with no declared ceiling")]
     NoCeiling,
     #[error("{message}")]

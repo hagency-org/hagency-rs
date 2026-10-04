@@ -13328,3 +13328,20 @@ Live, working-tree binary: kill -9 mid-round, restart ready in two seconds, both
 ### 2026-09-22/23 — evidence slice (ADR-181) built
 - Operator approved (a) reversing ADR-096's retained-owner rule, (b) the Matrix fence policy area (retry-before-fence now; post-fence choice asked when that slice comes), (c) the closing order. Evidence slice built as designed and shown: store (migration 037, runner_attempt_events, clocks, terminal_reason, lost writer), platform (StopRefusal + live rows + leader status + guardian exit, guardian stderr pipe), runtime (exit_identity, stderr_tail, tracing), execution (LostAuthority { site, cause } at every producer, phase notes, stop record), hagency (status authority_site/cause, driver claimed/failed/settled records, terminal_reason). Ten spec scenarios bound; bindings 1200 none missing; callers exit 0; inventory green. Gate chain running.
 - 2026-09-23: evidence slice committed (see git log: feat(native): every owned attempt leaves evidence…); ADR consistency review committed. Two test-pin fixes after the gate: the tracing capture must be the global default (the operation runs on its own thread) and fmt quotes str fields (phase="x"); a host-terminated runtime reads protocol:signal:15 in terminal_reason.
+
+### 2026-10-04 — Rinx ADR 0010 project-grant foundation (local)
+
+- Added explicit provider contributions, bounded project reservations and assigned
+  project-admin decisions. Agent approval/top-up debit one reservation atomically;
+  financial replay receipts survive display-history retention. No new transport
+  capability is advertised and no deployment was changed by this slice.
+- Grant expiry/revocation uses the existing effect-retirement kernel, checks
+  provisioning and runner authority, and preserves held capacity through cleanup.
+  Assignment changes increment revisions without transferring the project owner.
+- Broad store regression: 595 passed, 50 ignored, zero failures. Follow-up focused
+  run: 46 passed, including 15 grant scenarios with writer-clock and resource-
+  binding checks. See docs/reviews/2026-10-04-palpo-project-grants.md. Native
+  `cargo check -p hagency --locked` passed. This is backend evidence, not Makepad,
+  mobile or full Palpo workflow acceptance.
+- Contract and pending transport/UX work: docs/design/palpo-project-grants-v1.md.
+  Task remains active through full command/receipt and live lifecycle integration.

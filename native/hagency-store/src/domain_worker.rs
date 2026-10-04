@@ -2898,6 +2898,42 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn update_project_administrators(
+        &self,
+        id: String,
+        expected_revision: u64,
+        administrators: Vec<String>,
+        allow_self_approval: bool,
+        issuer: Registration,
+    ) -> Result<hagency_core::project_grants::ProjectGrant, Error> {
+        self.call(weight(&(&id, &administrators, &issuer))?, move |db| {
+            db.update_project_administrators_clock(
+                &id,
+                expected_revision,
+                &administrators,
+                allow_self_approval,
+                &issuer,
+                writer_time,
+            )
+        })
+        .await
+    }
+    pub async fn revoke_project_grant(
+        &self,
+        id: String,
+        expected_revision: u64,
+        issuer: Registration,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&id, &issuer))?, move |db| {
+            db.revoke_project_grant(&id, expected_revision, &issuer, now)
+        })
+        .await
+    }
+    pub async fn reconcile_project_grants(&self, now: u64) -> Result<(), Error> {
+        self.call(1, move |db| db.reconcile_project_grants(now))
+            .await
+    }
     pub async fn reconcile_dispatches(&self, now: u64) -> Result<(), Error> {
         self.call(1, move |db| db.reconcile_dispatches(now)).await
     }
@@ -4289,6 +4325,77 @@ impl DomainStore {
             ))?,
             move |db| db.approve_allocating(&command, &proof, now, allocated),
         )
+        .await
+    }
+    pub async fn delegate_resource(
+        &self,
+        grant: hagency_core::project_grants::ResourceDelegation,
+    ) -> Result<hagency_core::project_grants::ResourceDelegation, Error> {
+        self.call(weight(&grant)?, move |db| {
+            db.delegate_resource_clock(&grant, writer_time)
+        })
+        .await
+    }
+    pub async fn reserve_project_grant(
+        &self,
+        grant: hagency_core::project_grants::ProjectGrant,
+        issuer: Registration,
+    ) -> Result<hagency_core::project_grants::ProjectGrant, Error> {
+        self.call(weight(&(&grant, &issuer))?, move |db| {
+            db.reserve_project_grant_clock(&grant, &issuer, writer_time)
+        })
+        .await
+    }
+    pub async fn project_grant(
+        &self,
+        id: String,
+        now: u64,
+    ) -> Result<hagency_core::project_grants::ProjectGrant, Error> {
+        self.call(weight(&id)?, move |db| db.project_grant(&id, now))
+            .await
+    }
+    pub async fn revoke_resource_delegation(
+        &self,
+        id: String,
+        expected_revision: u64,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.call(weight(&id)?, move |db| {
+            db.revoke_resource_delegation(&id, expected_revision, now)
+        })
+        .await
+    }
+    pub async fn approve_project_agent(
+        &self,
+        command: String,
+        proof: VerifiedRequest,
+        allocated: u64,
+        scope: crate::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.call(
+            weight(&(
+                &command,
+                proof.request(),
+                proof.registration(),
+                proof.audit(),
+                &scope,
+            ))?,
+            move |db| {
+                db.approve_project_agent_clock(&command, &proof, writer_time, allocated, &scope)
+            },
+        )
+        .await
+    }
+    pub async fn raise_project_agent_allocation(
+        &self,
+        command: String,
+        id: String,
+        add: u64,
+        scope: crate::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.call(weight(&(&command, &id, &scope))?, move |db| {
+            db.raise_project_agent_allocation_clock(&command, &id, add, writer_time, &scope)
+        })
         .await
     }
     /// ADR-186 §A3: the smallest of ceiling, seat and pool headroom behind
