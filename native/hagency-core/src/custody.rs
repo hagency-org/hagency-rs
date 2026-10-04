@@ -25,6 +25,7 @@ pub enum Kind {
     Transaction,
     Probe,
     Request,
+    Workflow,
 }
 
 /// An operator-injected fixture envelope for the native development boundary.

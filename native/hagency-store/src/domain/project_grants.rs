@@ -20,7 +20,7 @@ pub struct ProjectAgentDecision {
     pub requester_mxid: String,
 }
 
-fn registration(db: &Connection, fleet: &str) -> Result<Registration, Error> {
+pub(super) fn registration(db: &Connection, fleet: &str) -> Result<Registration, Error> {
     let config: String = db
         .query_row(
             "SELECT config FROM registrations WHERE fleet_id=?1",
@@ -54,7 +54,7 @@ fn delegation(db: &Connection, id: &str, now: u64) -> Result<ResourceDelegation,
     grant.validate(&current, now)?;
     Ok(grant)
 }
-fn project(
+pub(super) fn project(
     db: &Connection,
     id: &str,
     now: u64,
@@ -383,48 +383,9 @@ impl DomainRepository {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = clock()?;
-        let parent = delegation(&tx, &grant.delegation_id, now)?;
-        if issuer != &registration(&tx, &parent.fleet_id)? {
-            return Err(Error::GrantAuthority);
-        }
-        if grant.expires_at_ms <= now {
-            return Err(Error::GrantExpired);
-        }
-        grant.validate(&parent, now)?;
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT config FROM project_grants WHERE id=?1",
-                [&grant.id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old {
-            if serde_json::from_str::<ProjectGrant>(&old)? != *grant {
-                return Err(Error::Conflict);
-            }
-            return Ok(project(&tx, &grant.id, now)?.0);
-        }
-        bounded_row(&tx, "project_grants", "id", &grant.id, 10_000)?;
-        let (tokens, agents, rate): (u64, u64, u64) = tx.query_row("SELECT COALESCE(SUM(json_extract(config,'$.limits.tokens')),0),COALESCE(SUM(json_extract(config,'$.limits.maxAgents')),0),COALESCE(SUM(json_extract(config,'$.limits.maxRatePerDay')),0) FROM project_grants WHERE delegation_id=?1", [&parent.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-        if tokens
-            .checked_add(grant.limits.tokens)
-            .is_none_or(|n| n > parent.limits.tokens)
-            || agents
-                .checked_add(grant.limits.max_agents)
-                .is_none_or(|n| n > parent.limits.max_agents)
-            || rate
-                .checked_add(grant.limits.max_rate_per_day)
-                .is_none_or(|n| n > parent.limits.max_rate_per_day)
-        {
-            return Err(Error::InsufficientCapacity);
-        }
-        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM project_grants WHERE fleet_id=?1 AND project_id=?2 AND resource_id=?3)", params![parent.fleet_id, grant.project_id, parent.resource_id], |r| r.get(0))?;
-        if existing {
-            return Err(Error::Conflict);
-        }
-        tx.execute("INSERT INTO project_grants(id,delegation_id,fleet_id,project_id,resource_id,config,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![grant.id,parent.id,parent.fleet_id,grant.project_id,parent.resource_id,serialize(grant)?,now])?;
+        let result = reserve(&tx, grant, issuer, now)?;
         tx.commit()?;
-        Ok(grant.clone())
+        Ok(result)
     }
 
     pub fn project_grant(&self, id: &str, now: u64) -> Result<ProjectGrant, Error> {
@@ -464,33 +425,17 @@ impl DomainRepository {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = clock()?;
-        let (mut grant, parent) = project(&tx, id, now)?;
-        if issuer != &registration(&tx, &parent.fleet_id)? {
-            return Err(Error::GrantAuthority);
-        }
-        let next = expected_revision
-            .checked_add(1)
-            .filter(|n| *n <= JSON_SAFE_MAX)
-            .ok_or(Error::Capacity)?;
-        if grant.revision == next
-            && grant.administrator_mxids == administrators
-            && grant.allow_self_approval == allow_self_approval
-        {
-            return Ok(grant);
-        }
-        if grant.revision != expected_revision {
-            return Err(Error::Conflict);
-        }
-        grant.revision = next;
-        grant.administrator_mxids = administrators.to_vec();
-        grant.allow_self_approval = allow_self_approval;
-        grant.validate(&parent, now)?;
-        tx.execute(
-            "UPDATE project_grants SET config=?2 WHERE id=?1",
-            params![id, serialize(&grant)?],
+        let result = assign(
+            &tx,
+            id,
+            expected_revision,
+            administrators,
+            allow_self_approval,
+            issuer,
+            now,
         )?;
         tx.commit()?;
-        Ok(grant)
+        Ok(result)
     }
 
     pub fn revoke_project_grant(
@@ -503,28 +448,9 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (raw, fleet): (String, String) = tx
-            .query_row(
-                "SELECT config,fleet_id FROM project_grants WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or(Error::NotFound)?;
-        if issuer != &registration(&tx, &fleet)? {
-            return Err(Error::GrantAuthority);
-        }
-        let grant: ProjectGrant = serde_json::from_str(&raw)?;
-        if grant.revision != expected_revision {
-            return Err(Error::Conflict);
-        }
-        tx.execute(
-            "UPDATE project_grants SET revoked_at=COALESCE(revoked_at,?2) WHERE id=?1",
-            params![id, now],
-        )?;
-        reconcile(&tx, now)?;
+        let result = revoke_project(&tx, id, expected_revision, issuer, now)?;
         tx.commit()?;
-        Ok(())
+        Ok(result)
     }
 
     /// Revocation fences new work immediately; held capacity is NOT recycled
@@ -566,4 +492,120 @@ impl DomainRepository {
         tx.commit()?;
         Ok(())
     }
+}
+
+pub(super) fn reserve(
+    tx: &rusqlite::Transaction<'_>,
+    grant: &ProjectGrant,
+    issuer: &Registration,
+    now: u64,
+) -> Result<ProjectGrant, Error> {
+    let parent = delegation(tx, &grant.delegation_id, now)?;
+    if issuer != &registration(tx, &parent.fleet_id)? {
+        return Err(Error::GrantAuthority);
+    }
+    if grant.expires_at_ms <= now {
+        return Err(Error::GrantExpired);
+    }
+    grant.validate(&parent, now)?;
+    let old: Option<String> = tx
+        .query_row(
+            "SELECT config FROM project_grants WHERE id=?1",
+            [&grant.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(old) = old {
+        if serde_json::from_str::<ProjectGrant>(&old)? != *grant {
+            return Err(Error::Conflict);
+        }
+        return Ok(project(tx, &grant.id, now)?.0);
+    }
+    bounded_row(tx, "project_grants", "id", &grant.id, 10_000)?;
+    let (tokens, agents, rate): (u64, u64, u64) = tx.query_row("SELECT COALESCE(SUM(json_extract(config,'$.limits.tokens')),0),COALESCE(SUM(json_extract(config,'$.limits.maxAgents')),0),COALESCE(SUM(json_extract(config,'$.limits.maxRatePerDay')),0) FROM project_grants WHERE delegation_id=?1", [&parent.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    if tokens
+        .checked_add(grant.limits.tokens)
+        .is_none_or(|n| n > parent.limits.tokens)
+        || agents
+            .checked_add(grant.limits.max_agents)
+            .is_none_or(|n| n > parent.limits.max_agents)
+        || rate
+            .checked_add(grant.limits.max_rate_per_day)
+            .is_none_or(|n| n > parent.limits.max_rate_per_day)
+    {
+        return Err(Error::InsufficientCapacity);
+    }
+    let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM project_grants WHERE fleet_id=?1 AND project_id=?2 AND resource_id=?3)", params![parent.fleet_id, grant.project_id, parent.resource_id], |r| r.get(0))?;
+    if existing {
+        return Err(Error::Conflict);
+    }
+    tx.execute("INSERT INTO project_grants(id,delegation_id,fleet_id,project_id,resource_id,config,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![grant.id,parent.id,parent.fleet_id,grant.project_id,parent.resource_id,serialize(grant)?,now])?;
+    Ok(grant.clone())
+}
+
+pub(super) fn assign(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    expected_revision: u64,
+    administrators: &[String],
+    allow_self_approval: bool,
+    issuer: &Registration,
+    now: u64,
+) -> Result<ProjectGrant, Error> {
+    let (mut grant, parent) = project(tx, id, now)?;
+    if issuer != &registration(tx, &parent.fleet_id)? {
+        return Err(Error::GrantAuthority);
+    }
+    let next = expected_revision
+        .checked_add(1)
+        .filter(|n| *n <= JSON_SAFE_MAX)
+        .ok_or(Error::Capacity)?;
+    if grant.revision == next
+        && grant.administrator_mxids == administrators
+        && grant.allow_self_approval == allow_self_approval
+    {
+        return Ok(grant);
+    }
+    if grant.revision != expected_revision {
+        return Err(Error::Conflict);
+    }
+    grant.revision = next;
+    grant.administrator_mxids = administrators.to_vec();
+    grant.allow_self_approval = allow_self_approval;
+    grant.validate(&parent, now)?;
+    tx.execute(
+        "UPDATE project_grants SET config=?2 WHERE id=?1",
+        params![id, serialize(&grant)?],
+    )?;
+    Ok(grant)
+}
+
+pub(super) fn revoke_project(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    expected_revision: u64,
+    issuer: &Registration,
+    now: u64,
+) -> Result<(), Error> {
+    let (raw, fleet): (String, String) = tx
+        .query_row(
+            "SELECT config,fleet_id FROM project_grants WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    if issuer != &registration(tx, &fleet)? {
+        return Err(Error::GrantAuthority);
+    }
+    let grant: ProjectGrant = serde_json::from_str(&raw)?;
+    if grant.revision != expected_revision {
+        return Err(Error::Conflict);
+    }
+    tx.execute(
+        "UPDATE project_grants SET revoked_at=COALESCE(revoked_at,?2) WHERE id=?1",
+        params![id, now],
+    )?;
+    reconcile(tx, now)?;
+    Ok(())
 }

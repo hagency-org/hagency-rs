@@ -32,6 +32,9 @@ pub trait ProbeReceipts: Send + Sync {
     fn statuses(&self) -> Vec<Value> {
         Vec::new()
     }
+    /// Acknowledge only observations in the exact frozen publication, including
+    /// retries after restart. A producer may then advance its bounded page.
+    fn statuses_published(&self, _statuses: &[Value]) {}
 }
 
 /// One host transport instance. At most one active request per Matrix/work/
@@ -48,6 +51,33 @@ pub struct Adapter {
     receipts: Option<std::sync::Arc<dyn ProbeReceipts>>,
 }
 impl Adapter {
+    /// Read fresh business authority from the configured machine endpoint.
+    /// A queued delivery alone cannot preserve a demoted administrator's rights.
+    pub async fn authorize_project_command(
+        &self,
+        command: &hagency_core::project_commands::ProjectCommand,
+        domain: &hagency_store::DomainStore,
+        cancel: &CancellationToken,
+    ) -> Result<hagency_core::project_commands::ProjectAuthorization, Error> {
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        let body = serde_json::json!({"commandId": command.command_id, "commandDigest": command.digest().map_err(|_| Error::Wire)?}).to_string();
+        let value = self
+            .http
+            .request("authorize-command", None, Some(body), cancel)
+            .await?
+            .success()?;
+        let authorization: hagency_core::project_commands::ProjectAuthorization =
+            serde_json::from_value(value).map_err(|_| Error::Wire)?;
+        authorization
+            .validate(command, now()?)
+            .map_err(|_| Error::Wire)?;
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        Ok(authorization)
+    }
     /// Carry the host's pending connection-probe receipts in resource updates.
     pub fn with_probe_receipts(mut self, receipts: std::sync::Arc<dyn ProbeReceipts>) -> Self {
         self.receipts = Some(receipts);

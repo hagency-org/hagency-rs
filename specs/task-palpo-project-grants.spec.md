@@ -29,8 +29,9 @@ accepted finite grant. No second human Hagency verdict is required inside it.
 
 ## Current slice
 
-Grant types, migration 61, transaction/accounting primitives, administrator
-reassignment, grant retirement, writer clocks and tests. Relevant boundaries are
+Grant types, migrations 61/62, transaction/accounting primitives, administrator
+reassignment, grant retirement, writer clocks, authenticated Palpo commands,
+short execution leases, atomic business receipts and frozen-publication recovery. Relevant boundaries are
 hagency-core, hagency-store, its historical migration fixtures, fixed Matrix
 error categories, and the native fleet reconciliation loop.
 
@@ -45,8 +46,8 @@ error categories, and the native fleet reconciliation loop.
 
 ## Remaining full workflow
 
-Authenticated operator contribution UI, closed versioned Palpo commands and
-business receipts, fresh role/revocation synchronization, richer status/usage
-publication, explicit legacy migration and inspected capacity release, and live
+Authenticated operator contribution UI and publication, Palpo Inbox/Rinx command
+integration, richer status/usage publication, explicit legacy migration and
+inspected capacity release, and live
 Rinx approval-to-Matrix readiness/cleanup validation. See
 `docs/design/palpo-project-grants-v1.md` and Rinx ADR 0010.

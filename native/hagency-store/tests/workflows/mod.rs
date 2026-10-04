@@ -260,7 +260,7 @@ fn native_graph_transactions() {
     drop(db);
     let inspect = sql(&root);
     remove_graph_schema(&inspect);
-    inspect.execute_batch("ALTER TABLE runner_sessions DROP COLUMN model_override; ALTER TABLE runner_sessions DROP COLUMN mode_override; DROP TABLE IF EXISTS agent_lifecycle; ALTER TABLE decisions DROP COLUMN kind; ALTER TABLE decisions DROP COLUMN at; DROP TABLE IF EXISTS quota_holds; DROP TABLE IF EXISTS owner_anchors; DROP TABLE IF EXISTS joined_rooms; ALTER TABLE engagements DROP COLUMN allocated_tokens; DROP TABLE IF EXISTS project_grant_decisions; DROP TABLE IF EXISTS project_grant_agents; DROP TABLE IF EXISTS project_grants; DROP TABLE IF EXISTS resource_delegations; PRAGMA user_version=9;").unwrap();
+    inspect.execute_batch("ALTER TABLE runner_sessions DROP COLUMN model_override; ALTER TABLE runner_sessions DROP COLUMN mode_override; DROP TABLE IF EXISTS agent_lifecycle; ALTER TABLE decisions DROP COLUMN kind; ALTER TABLE decisions DROP COLUMN at; DROP TABLE IF EXISTS quota_holds; DROP TABLE IF EXISTS owner_anchors; DROP TABLE IF EXISTS joined_rooms; ALTER TABLE engagements DROP COLUMN allocated_tokens; DROP TABLE IF EXISTS project_command_receipts; DROP TABLE IF EXISTS project_grant_decisions; DROP TABLE IF EXISTS project_grant_agents; DROP TABLE IF EXISTS project_grants; DROP TABLE IF EXISTS resource_delegations; PRAGMA user_version=9;").unwrap();
     for _ in 0..2 {
         let db = DomainRepository::open(&root.path().join("state")).unwrap();
         assert_eq!(

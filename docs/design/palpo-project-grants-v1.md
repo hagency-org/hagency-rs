@@ -1,10 +1,9 @@
 # Palpo project grants: reservation contract
 
-Status: local implementation of the grant and accounting foundation for Rinx
-ADR 0010. This is not an enabled wire capability or a deployed workflow.
-The operator UI, authenticated command delivery, publication receipts and Palpo
-Inbox integration are subsequent work. Do not advertise support until those
-paths and their recovery tests exist.
+Status: local grant/accounting and authenticated command/receipt implementation
+for Rinx ADR 0010. This is not an advertised workflow capability or a deployed
+workflow. The operator contribution UI, contribution snapshots, Palpo Inbox
+commands and Rinx forms still need integration before enabling the capability.
 
 ## Authority
 
@@ -21,9 +20,10 @@ belong to the existing owner-authorized protocol.
 
 The Rust domain interfaces are trusted host interfaces. A `Registration` value
 or `ProjectAgentDecision` deserialized from an arbitrary HTTP body is not an
-authenticated identity. The future consumer must obtain registration from its
-existing authenticated outbound session, and Palpo must derive the decision actor
-from the current Matrix/app session and recheck role scope before enqueueing.
+authenticated identity. The consumer obtains registration from its existing authenticated outbound
+session. Palpo must derive the decision actor from the current Matrix/app
+session before enqueueing; Hagency also obtains a fresh authorization lease
+from the fixed Palpo machine endpoint immediately before execution.
 
 ## Stored contract
 
@@ -82,25 +82,59 @@ engagements are not implicitly assigned to grants, renamed, transferred or
 approved. Explicit migration and final capacity release require additional
 reviewed operations; this foundation does not manufacture either.
 
-## Transport work still required
+## Command and receipt transport
 
-Use finite versioned operations over the existing authenticated Palpo work lane:
-reserve project, replace administrator assignment, decide agent, approve top-up,
-revoke project/agent. Bind command ID, argument digest, current fleet generation,
-actor, exact object/revision and deadline. No generic console operation or URL is
-accepted. Persist a business receipt atomically with the operation, independently
-of transport acknowledgement, and publish it with its original command digest.
+`ProjectCommand` v1 uses the existing authenticated work lane, kind `workflow`.
+It binds command ID, exact argument digest, fleet/registration generation,
+issuer, actor, deadline and a closed operation: reserve project, replace explicit
+administrators, approve/reject agent, top up agent, revoke agent/project. Unknown
+fields are rejected, including fields nested inside legacy request DTOs. There
+is no arbitrary URL, script, console command or credential in the payload.
+The shared Rust/Palpo corpus is `native/fixtures/project-commands.json` (copied
+unchanged to Palpo `web-admin/test/fixtures/project-commands.json`).
 
-Palpo commits its decision and outbound work together. It reports Awaiting
-reservation until Hagency returns an accepted grant, and Provisioning until
-runtime and actual Matrix room membership are observed. Expired, over-budget,
-unknown and revoked outcomes must remain distinct. An old notification opens
-current state; it is never a new decision command.
+Palpo's enqueue API requires the caller's existing SQLite decision transaction;
+Inbox integration must use this API for each human decision. An outbound
+transport acknowledgement proves custody only. Hagency commits the
+business operation and immutable typed receipt together (schema 62). Fresh agent
+admission shares this transaction; a failed decision/receipt insert cannot leave
+an orphan pending agent. Definitive scope, capacity, expiry and state refusals
+produce receipts. Database/authority availability and expired authorization
+leases remain retryable. An expired command is refused locally even if Palpo or
+Matrix is unavailable. Receipt replay never repeats a debit or resurrects a
+later revoked agent.
 
-Publishing workflow support must also carry bounded contribution/grant snapshots,
-current usage freshness and cleanup facts. The receiver must reject mismatched
-receipts and preserve pending commands through lost responses and restart.
-Demotion, grant revocation and generation rotation need cross-service race tests.
+Before execution, Hagency POSTs command ID/digest to its fixed authenticated
+`authorize-command` endpoint. Palpo rechecks the actor's current Matrix account,
+the designated project approver or explicit assigned project administrators,
+self-approval policy and current/pending grant revision. An unavailable Matrix
+lookup returns 503, not a permanent denial. The resulting lease lasts ten
+seconds; Hagency checks it again after the actual SQLite writer lock. Slow
+Matrix request verification is followed by another authorization check. This
+bounds the distributed authorization window; it does not claim instantaneous
+revocation across a lease already issued by another service.
+
+Up to eight pending business receipts join a frozen outbound update. A lost
+response/restart repeats those original bytes and sequence. Only the exact
+receipts included in the acknowledged update are marked published. Palpo binds
+results to original commands and persists receipts, status and transport sequence
+atomically. Repeated historical receipts do not restore old administrator lists.
+
+Status observations use bounded pages scoped to the current fleet registration,
+including agents known through durable workflow receipts. A producer advances
+after its exact frozen page is acknowledged; agents beyond the first 100 are
+not permanently omitted. Matrix room membership is still observed before Ready.
+
+## Integration still required
+
+Hagency's authenticated operator contribution controls and bounded publication
+snapshots must precede the capability advertisement. Palpo's project review UI
+must collect finite budgets and explicit administrators, create the actual owner
+room, enqueue reservation and show Awaiting reservation until its applied
+receipt. Assigned-admin Inbox decisions then enqueue agent/top-up/revoke work.
+Ready requires runtime and actual Matrix membership evidence. Usage freshness,
+cleanup results, owner removal and notification projection still need their full
+cross-service integration. Existing project owners remain unchanged.
 
 ## Validation
 

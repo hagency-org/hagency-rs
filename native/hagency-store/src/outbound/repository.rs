@@ -52,6 +52,7 @@ fn kind_text(value: Kind) -> &'static str {
         Kind::Transaction => "transaction",
         Kind::Request => "request",
         Kind::Probe => "probe",
+        Kind::Workflow => "workflow",
     }
 }
 

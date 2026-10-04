@@ -4327,6 +4327,80 @@ impl DomainStore {
         )
         .await
     }
+    pub async fn project_command_receipt(
+        &self,
+        command: hagency_core::project_commands::ProjectCommand,
+        issuer: Registration,
+    ) -> Result<Option<hagency_core::project_commands::ProjectReceipt>, Error> {
+        self.call(weight(&(&command, &issuer))?, move |db| {
+            db.project_command_receipt(&command, &issuer)
+        })
+        .await
+    }
+    pub async fn apply_project_command(
+        &self,
+        command: hagency_core::project_commands::ProjectCommand,
+        issuer: Registration,
+        authorization: hagency_core::project_commands::ProjectAuthorization,
+        proof: Option<VerifiedRequest>,
+    ) -> Result<hagency_core::project_commands::ProjectReceipt, Error> {
+        let proof_weight = proof
+            .as_ref()
+            .map(|p| (p.request(), p.registration(), p.project_name(), p.audit()));
+        self.call(
+            weight(&(&command, &issuer, &authorization, proof_weight))?,
+            move |db| {
+                db.apply_project_command_clock(
+                    &command,
+                    &issuer,
+                    &authorization,
+                    proof.as_ref(),
+                    writer_time,
+                )
+            },
+        )
+        .await
+    }
+    pub async fn is_project_command_agent(
+        &self,
+        issuer: Registration,
+        id: String,
+    ) -> Result<bool, Error> {
+        self.call(weight(&(&issuer, &id))?, move |db| {
+            db.is_project_command_agent(&issuer, &id)
+        })
+        .await
+    }
+    pub async fn palpo_status_page(
+        &self,
+        issuer: Registration,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<Engagement>, Error> {
+        self.call(weight(&(&issuer, &after))?, move |db| {
+            db.palpo_status_page(&issuer, &after, limit)
+        })
+        .await
+    }
+    pub async fn pending_project_receipts(
+        &self,
+        issuer: Registration,
+    ) -> Result<Vec<hagency_core::project_commands::ProjectReceipt>, Error> {
+        self.call(weight(&issuer)?, move |db| {
+            db.pending_project_receipts(&issuer)
+        })
+        .await
+    }
+    pub async fn mark_project_receipts_published(
+        &self,
+        issuer: Registration,
+        receipts: Vec<hagency_core::project_commands::ProjectReceipt>,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&issuer, &receipts))?, move |db| {
+            db.mark_project_receipts_published(&issuer, &receipts)
+        })
+        .await
+    }
     pub async fn delegate_resource(
         &self,
         grant: hagency_core::project_grants::ResourceDelegation,

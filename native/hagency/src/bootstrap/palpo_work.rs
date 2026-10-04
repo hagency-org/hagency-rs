@@ -9,8 +9,9 @@
 //!   transaction. It is then re-read as the representative, the room must be
 //!   invite-only, unencrypted and joined by the representative, and the room is
 //!   bound as the fleet's reception. The receipt rides the next `/updates`.
-//! - Work lane, `request`: not processed here yet; it stays in custody, never
-//!   dropped.
+//! - Work lane, `request`: legacy requests wait for a console verdict.
+//! - Work lane, `workflow`: Palpo-authorized project decisions commit their
+//!   immutable business receipt before completing transport custody.
 //!
 //! A failure is retried later, never turned into a terminal refusal: the bridge
 //! does not decide the connection is dead.
@@ -56,6 +57,7 @@ pub(super) struct Probes {
     requests: PathBuf,
     lock: Mutex<()>,
     statuses: Mutex<Vec<Value>>,
+    status_cursor: Mutex<String>,
 }
 impl Probes {
     pub(super) fn new(state: &Path) -> Arc<Self> {
@@ -65,6 +67,7 @@ impl Probes {
             requests: state.join("palpo-requests.json"),
             lock: Mutex::new(()),
             statuses: Mutex::new(Vec::new()),
+            status_cursor: Mutex::new(String::new()),
         })
     }
     fn read(path: &Path) -> Vec<Value> {
@@ -132,6 +135,10 @@ impl ProbeReceipts for Probes {
         let mut rows = Self::read(&self.outbox);
         rows.retain(|r| !receipts.contains(r));
         Self::write(&self.outbox, &rows);
+    }
+    fn statuses_published(&self, statuses: &[Value]) {
+        let mut pending = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
+        pending.retain(|row| !statuses.contains(row));
     }
 }
 
@@ -333,12 +340,12 @@ impl Reader {
 /// event is re-read, the reception, target project and private approval room
 /// are observed fresh, and the port's own `verify_request` decides. An admitted
 /// request becomes a pending engagement for the operator's console verdict.
-async fn admit_request(
+async fn verify_project_request(
     reader: &Reader,
     domain: &DomainStore,
     fleet: &str,
     payload: &Value,
-) -> Result<String, String> {
+) -> Result<hagency_core::authority::VerifiedRequest, String> {
     use hagency_core::authority::{
         ProjectRequest, RequestObservation, SourceObservation, verify_request,
     };
@@ -415,10 +422,23 @@ async fn admit_request(
     };
     let verified = verify_request(&registration, request, observation)
         .map_err(|e| format!("verification: {}", e.0))?;
+    Ok(verified)
+}
+async fn admit_request(
+    reader: &Reader,
+    domain: &DomainStore,
+    fleet: &str,
+    payload: &Value,
+) -> Result<String, String> {
+    let verified = verify_project_request(reader, domain, fleet, payload).await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default();
     let engagement = domain
         .admit(verified, now)
         .await
-        .map_err(|e| format!("admission: {e:?}"))?;
+        .map_err(|_| "admission unavailable".to_owned())?;
     Ok(engagement.id)
 }
 
@@ -526,6 +546,79 @@ async fn matrix_once(
     }
 }
 
+async fn workflow_command(
+    adapter: &Adapter,
+    domain: &DomainStore,
+    reader: &Reader,
+    fleet: &str,
+    payload: &Value,
+    cancel: &CancellationToken,
+) -> Result<hagency_core::project_commands::ProjectReceipt, ()> {
+    use hagency_core::project_commands::{ProjectAuthorization, ProjectCommand};
+    let command = ProjectCommand::decode(payload.clone()).map_err(|_| ())?;
+    let registration = domain
+        .provisioning_registration(fleet.to_owned())
+        .await
+        .map_err(|_| ())?;
+    command.validate(&registration).map_err(|_| ())?;
+    if let Some(receipt) = domain
+        .project_command_receipt(command.clone(), registration.clone())
+        .await
+        .map_err(|_| ())?
+    {
+        return Ok(receipt);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ())?
+        .as_millis() as u64;
+    // Expiry is a local, definitive refusal; it must not wait indefinitely for
+    // Matrix or an unreachable Palpo. This placeholder can never authorize an
+    // operation; the writer checks expiry again after acquiring its lock.
+    if command.expires_at_ms <= now {
+        let expired = ProjectAuthorization {
+            v: 1,
+            command_id: command.command_id.clone(),
+            command_digest: command.digest().map_err(|_| ())?,
+            allowed: false,
+            valid_until_ms: 0,
+        };
+        return domain
+            .apply_project_command(command, registration, expired, None)
+            .await
+            .map_err(|_| ());
+    }
+    let mut authorization = adapter
+        .authorize_project_command(&command, domain, cancel)
+        .await
+        .map_err(|_| ())?;
+    let proof = if authorization.allowed
+        && let Some(request) = command.request()
+    {
+        let proof = verify_project_request(
+            reader,
+            domain,
+            fleet,
+            &serde_json::to_value(request).map_err(|_| ())?,
+        )
+        .await
+        .map_err(|_| ())?;
+        // Matrix observations can be slow. Recheck current Palpo roles after
+        // them, immediately before the atomic admission/decision transaction.
+        authorization = adapter
+            .authorize_project_command(&command, domain, cancel)
+            .await
+            .map_err(|_| ())?;
+        Some(proof)
+    } else {
+        None
+    };
+    domain
+        .apply_project_command(command, registration, authorization, proof)
+        .await
+        .map_err(|_| ())
+}
+
 /// Work lane: verify one probe and bind the reception.
 async fn work_once(
     adapter: &Adapter,
@@ -533,6 +626,7 @@ async fn work_once(
     domain: &DomainStore,
     reader: &Reader,
     fleet: &str,
+    cancel: &CancellationToken,
 ) -> Outcome {
     let work = match adapter.take(Lane::Work, attempt("work")).await {
         Ok(Some(work)) => work,
@@ -543,6 +637,24 @@ async fn work_once(
             return Outcome::Later;
         }
     };
+    if work.kind == Kind::Workflow {
+        return match workflow_command(adapter, domain, reader, fleet, &work.payload, cancel).await {
+            Ok(receipt) => match adapter
+                .complete(
+                    work.ticket,
+                    serde_json::to_value(receipt).expect("fixed receipt"),
+                )
+                .await
+            {
+                Ok(()) => Outcome::Done,
+                Err(_) => Outcome::Later,
+            },
+            Err(()) => {
+                let _ = adapter.retry_later(work.ticket).await;
+                Outcome::Later
+            }
+        };
+    }
     if work.kind == Kind::Request {
         if let Some(id) = work.payload.get("requestId").and_then(Value::as_str) {
             probes.remember_request(id);
@@ -720,13 +832,39 @@ async fn approval_invites_once(reader: &Reader, bot: &str, fleet: &str, server: 
 /// bound), which the provisioning slice establishes.
 async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, reader: &Reader) {
     use hagency_core::project::EngagementState as S;
-    let Ok(engagements) = domain.engagements(String::new(), 100).await else {
+    // Hold each page until its actual publication is acknowledged. Continuously
+    // replacing it while transport retries would starve later agents forever.
+    if !probes.statuses().is_empty() {
+        return;
+    }
+    let cursor = probes
+        .status_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Ok(registration) = domain.provisioning_registration(fleet.to_owned()).await else {
         return;
     };
+    let Ok(engagements) = domain
+        .palpo_status_page(registration.clone(), cursor, 25)
+        .await
+    else {
+        return;
+    };
+    *probes
+        .status_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) =
+        engagements.last().map(|e| e.id.clone()).unwrap_or_default();
     let observed = now_iso();
     let mut out = Vec::new();
     for e in engagements {
-        if !probes.palpo_request(&e.request_id) {
+        if !probes.palpo_request(&e.request_id)
+            && !domain
+                .is_project_command_agent(registration.clone(), e.id.clone())
+                .await
+                .unwrap_or(false)
+        {
             continue;
         }
         let Ok(Some((context, _, _))) = domain
@@ -840,7 +978,7 @@ pub(super) async fn run(
         .await;
         // A retried item steps aside in custody (WORK_RETRY_MS), not the
         // whole lane: the independent items behind it are claimed now.
-        let work = work_once(adapter, probes, domain, &reader, fleet).await;
+        let work = work_once(adapter, probes, domain, &reader, fleet, cancel).await;
         let pause = match (matrix, work) {
             (Outcome::Done, _) | (_, Outcome::Done) => Duration::from_millis(100),
             (_, Outcome::Later) | (Outcome::Later, _) => Duration::from_secs(3),

@@ -13345,3 +13345,21 @@ Live, working-tree binary: kill -9 mid-round, restart ready in two seconds, both
   mobile or full Palpo workflow acceptance.
 - Contract and pending transport/UX work: docs/design/palpo-project-grants-v1.md.
   Task remains active through full command/receipt and live lifecycle integration.
+
+### 2026-10-04 — Palpo project command and receipt transport (local)
+
+- Added closed workflow commands and the authenticated native consumer. A fresh
+  Palpo execution lease binds the original command/digest and current roles;
+  the native writer checks it after the real SQLite lock. Expired commands do
+  not depend on an available Matrix/Palpo connection to record their refusal.
+- Admission, grant/accounting effects and immutable business receipt commit
+  together. Transport ACK is separate. Frozen publication retries survive
+  response loss/restart, preserve new pending receipts and acknowledge only
+  exact included status pages. Durable fleet-scoped status pagination covers
+  agents beyond the first page and excludes prior registrations.
+- Rust core/store/Palpo suites: 667 passed, zero failed, 74 ignored. Final strict
+  decoder corpus check and native executable check passed. Palpo companion
+  bb593b6: 93 tests, plus 23 focused cases after the final transaction guard.
+- Contribution UI/snapshots, Palpo Inbox command/result integration and Rinx
+  forms remain. Capability is not advertised; production and visible clients
+  were not restarted. Full ADR and live/device acceptance remain active.
