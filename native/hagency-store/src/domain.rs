@@ -134,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 67;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 68;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -947,6 +947,15 @@ impl DomainRepository {
         }).collect()
     }
     pub fn open(directory: &Path) -> Result<Self, Error> {
+        Self::open_mode(directory, true)
+    }
+    /// Offline owner operations retain the same exclusive writer lock but do
+    /// not run crash recovery or advance runtime clocks during an inventory.
+    /// Runtime startup must always use `open` and perform its normal recovery.
+    pub fn open_for_migration(directory: &Path) -> Result<Self, Error> {
+        Self::open_mode(directory, false)
+    }
+    fn open_mode(directory: &Path, recover: bool) -> Result<Self, Error> {
         let mut database = database::open(
             directory,
             database::Schema {
@@ -1136,9 +1145,14 @@ impl DomainRepository {
                         67,
                         include_str!("migrations/067-coordinator-project-setup.sql"),
                     ),
+                    (
+                        68,
+                        include_str!("migrations/068-coordinator-legacy-adoption.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
+                    "SELECT id,engagement_id,digest,receipt,accepted_at FROM coordinator_migrations LIMIT 0",
                     "SELECT id,engagement_id,project_id,digest,command,result FROM coordinator_project_setup_attempts LIMIT 0",
                     "SELECT engagement_id,project_id,attempt_id,observation FROM coordinator_project_setup LIMIT 0",
                     "SELECT id,digest,command,definition,state,reason,agent_id,received_at,updated_at FROM coordinator_deliveries LIMIT 0",
@@ -1220,29 +1234,31 @@ impl DomainRepository {
         if !transport_trigger {
             return Err(Error::Schema);
         }
-        // A previous owner died after an intent became externally executable. Inspection,
-        // not automatically repeating that effect, is the only safe default.
-        let tx = database
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("UPDATE engagements SET projection=json_set(projection,'$.cleanup','uncertain') WHERE id IN (SELECT engagement_id FROM effects WHERE kind='retire' AND state='started')",[])?;
-        tx.execute(
-            "UPDATE effects SET state='uncertain' WHERE state='started'",
-            [],
-        )?;
-        graphs::reconcile(&tx, graphs::now_ms()?)?;
-        replies::reconcile(&tx, graphs::now_ms()?, true)?;
-        notice_custody::reconcile(&tx, graphs::now_ms()?, true)?;
-        execution::recover_all(&tx, graphs::now_ms()?)?;
-        approvals::recover(&tx)?;
-        tx.execute("UPDATE approval_responses SET state='outcome_unknown' WHERE state IN ('authorized','response_may_send')", [])?;
-        tx.execute("UPDATE received_files SET state='outcome_unknown',failure='outcome_unknown' WHERE state IN ('reserved','write_possible')", [])?;
-        tx.execute(
-            "UPDATE managed_accounts SET state='uncertain' WHERE state='preparing'",
-            [],
-        )?;
-        accounts::reconcile_login_attempts(&tx, graphs::now_ms()?)?;
-        tx.commit()?;
+        if recover {
+            // A previous owner died after an intent became externally executable. Inspection,
+            // not automatically repeating that effect, is the only safe default.
+            let tx = database
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute("UPDATE engagements SET projection=json_set(projection,'$.cleanup','uncertain') WHERE id IN (SELECT engagement_id FROM effects WHERE kind='retire' AND state='started')",[])?;
+            tx.execute(
+                "UPDATE effects SET state='uncertain' WHERE state='started'",
+                [],
+            )?;
+            graphs::reconcile(&tx, graphs::now_ms()?)?;
+            replies::reconcile(&tx, graphs::now_ms()?, true)?;
+            notice_custody::reconcile(&tx, graphs::now_ms()?, true)?;
+            execution::recover_all(&tx, graphs::now_ms()?)?;
+            approvals::recover(&tx)?;
+            tx.execute("UPDATE approval_responses SET state='outcome_unknown' WHERE state IN ('authorized','response_may_send')", [])?;
+            tx.execute("UPDATE received_files SET state='outcome_unknown',failure='outcome_unknown' WHERE state IN ('reserved','write_possible')", [])?;
+            tx.execute(
+                "UPDATE managed_accounts SET state='uncertain' WHERE state='preparing'",
+                [],
+            )?;
+            accounts::reconcile_login_attempts(&tx, graphs::now_ms()?)?;
+            tx.commit()?;
+        }
         let accounts = accounts::Registry::open(&database.connection, directory)?;
         Ok(Self {
             accounts,

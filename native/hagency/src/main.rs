@@ -17,6 +17,13 @@ struct Cli {
 enum Command {
     /// Request a Matrix server association from this authenticated resource owner.
     Association(hagency::bootstrap::association::Args),
+    /// Inspect/adopt legacy allocations with the runtime stopped.
+    CoordinatorMigration {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[command(subcommand)]
+        command: hagency::bootstrap::coordinator_migration::Command,
+    },
     /// Serve scoped task tools over MCP stdio using inherited runner context.
     Mcp {
         /// Expose only the fixed owned-runner maintenance and enabled file tools.
@@ -284,6 +291,12 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::Association(args) => {
             println!("{}", hagency::bootstrap::association::run(args).await?);
+        }
+        Command::CoordinatorMigration { state_dir, command } => {
+            println!(
+                "{}",
+                hagency::bootstrap::coordinator_migration::run(&state_dir, command)?
+            );
         }
         Command::Mcp { .. } => unreachable!("MCP runs on the dedicated main thread"),
         Command::Task { call_id, command } => {

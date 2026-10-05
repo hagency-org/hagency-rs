@@ -17,12 +17,14 @@ type StoredResourceGrant = (
 mod delegations;
 mod deliveries;
 mod lifecycle;
+mod migration;
 mod project_setup;
 mod refusals;
 mod settlements;
 pub use delegations::{DelegationChange, DelegationCommand, DelegationState};
 pub use deliveries::terminal_reason as coordinator_refusal_reason;
 pub use lifecycle::{AgentControl, AgentOperation};
+pub use migration::{LegacyAdoption, LegacyProject};
 pub use project_setup::{ProjectSetupCommand, ProjectSetupWork};
 pub use settlements::{FinalUsage, SettlementCommand};
 
@@ -536,11 +538,11 @@ impl DomainRepository {
         let id = r.agent_allocation_id.as_str();
         let mut agent = read_engagement(&tx, id)?;
         let (grant,decision,retained):(String,String,u64)=tx.query_row("SELECT resource_allocation_id,decision,retained_tokens FROM coordinator_agents WHERE agent_id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?.ok_or(Error::NotFound)?;
-        let decision: AgentApproval = serde_json::from_str(&decision)?;
+        let decision = migration::approved_request(&decision)?;
         if r.resource_allocation_id.as_str() != grant
-            || decision.request.server_engagement_id != r.server_engagement_id
-            || decision.request.project_id != r.project_id
-            || decision.request.project_owner != r.project_owner
+            || decision.server_engagement_id != r.server_engagement_id
+            || decision.project_id != r.project_id
+            || decision.project_owner != r.project_owner
             || r.project_owner.as_str() != original.owner_mxid
             || r.requester != r.project_owner
             || u64::from(r.expected_allocated_tokens) != u64::from(agent.allocation())

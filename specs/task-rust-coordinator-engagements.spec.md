@@ -23,6 +23,21 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Native legacy adoption moves the existing reservation without a second allocation
+  Test: legacy_adoption_moves_existing_hold_once_and_preserves_original_decisions_across_restart
+  Given a legacy agent consumes all available parent capacity and has an original native approval receipt
+  When the owner maps it into an explicit engagement grant, tops it up and retires it
+  Then the same allocation and historical verdict survive, replay cannot undo later changes and unknown consumption is retained
+
+Scenario: Offline CLI migration audits a complete SQLite backup and preserves source state
+  Test: offline_cli_adopts_copied_legacy_allocations_and_replays_without_source_writes
+  Level: integration
+  Test Double: actual native executable, private temporary SQLite backup including committed WAL frames
+  Production caller: hagency::bootstrap::coordinator_migration::run
+  Given a reviewed inventory and explicit resource-owner adoption plan for a copied legacy database
+  When another writer holds either lock or the adopted database is restored and replayed
+  Then concurrent migration is refused and the original decisions, allocation IDs, unknown usage and migration receipts survive without changing the source
+
 Scenario: Approved project recovery preserves its grant and fences superseded attempts
   Test: approved_project_setup_recovers_without_reapproval_and_fences_stale_attempts
   Given a failed room-setup attempt with a committed project approval

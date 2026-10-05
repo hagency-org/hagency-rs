@@ -223,3 +223,34 @@ The 1,250 Rust spec bindings resolve and the caller inventory has no missing or
 ambiguous entries (the previously tracked G8 gap is unchanged). Native Rinx
 fixture run `0a97a9126f214590a91825d332085946` passed 22 checks with pinned binary
 hashes and inspected setup failure/ready captures.
+
+
+Schema 68 adds offline resource-owner adoption of historical allocations. The
+`coordinator-migration inventory` CLI emits bounded identity-free table counts
+and digests; `adopt --file` binds its private explicit grant/project/agent map to
+that digest and the currently verified owner/delegation. Native agent IDs,
+original decision receipts, effects and usage are retained. Mapping the existing
+children before checking parent commitments prevents charging their reservation
+twice. Unknown/retired usage retains the full allocation; only the established
+final-settlement path can return unused capacity. A migration never synthesizes
+a historical coordinator verdict or schedules another provisioning effect.
+
+The offline CLI holds both owner locks without recovering transport deliveries
+or advancing runtime recovery state. Runtime startup retains its normal recovery.
+Copies must be made through SQLite backup/VACUUM INTO (or include its complete
+WAL); native store close intentionally does not checkpoint. Tests cover a full
+parent, insufficient/overlarge grants, owner mismatch, top-up/retirement/restart,
+exclusive locks, repeated unchanged inventory, copied database adoption, restore
+and exact receipt replay. The generated native receipt also passes the actual
+Node-source-to-Rust-Palpo CLI import, including original project verdicts and the
+same native allocation. Legacy project requests without native room bindings and
+old profile delegation still require the remaining migration integration; this
+checkpoint does not claim that all legacy workflows or deployment gates pass.
+
+Schema-68 validation: 18 coordinator domain cases, three schema fixtures, the
+actual offline CLI copy/adoption/restore case, and library clippy pass. All 1,252
+Rust spec bindings resolve; 84 production callers are wired with no missing or
+ambiguous entries (the existing G8 remains owed). Palpo's native-receipt/Node-store
+process test and 58 Rust operations cases pass. Rinx native Save/Cancel acceptance
+also passed 19 checks in `fab3aeaa83224af4a8ba65825b4f7fed`; that run uses an
+isolated Matrix HTTP peer and is not live deployment/device evidence.

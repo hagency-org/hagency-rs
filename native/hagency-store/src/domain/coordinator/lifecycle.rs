@@ -53,10 +53,10 @@ pub(super) fn authorize(db: &Connection, command: &AgentControl, now: u64) -> Re
         )
         .optional()?
         .ok_or(Error::NotFound)?;
-    let approved: AgentApproval = serde_json::from_str(&decision)?;
-    if approved.request.server_engagement_id != c.server_engagement_id
-        || approved.request.project_id != command.project_id
-        || approved.request.project_revision != command.project_revision
+    let approved = migration::approved_request(&decision)?;
+    if approved.server_engagement_id != c.server_engagement_id
+        || approved.project_id != command.project_id
+        || approved.project_revision != command.project_revision
         || grant_id != command.resource_allocation_id.as_str()
     {
         return Err(Error::Conflict);
@@ -70,9 +70,7 @@ pub(super) fn authorize(db: &Connection, command: &AgentControl, now: u64) -> Re
         .optional()?
         .ok_or(Error::NotFound)?;
     let project: ProjectGrant = serde_json::from_str(&raw)?;
-    if project.revision != command.project_revision
-        || project.owner != approved.request.project_owner
-    {
+    if project.revision != command.project_revision || project.owner != approved.project_owner {
         return Err(Error::Generation);
     }
     let delegated = c.actor == authority.coordinator && authority.delegation_expires_at_ms > now;
