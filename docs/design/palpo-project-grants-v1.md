@@ -79,15 +79,27 @@ with explicit clocks remain available for deterministic domain tests.
 Once a project has a grant, its new agent approvals must use the scoped project
 decision path. The legacy console approval path cannot bypass it. Existing
 engagements are not implicitly assigned to grants, renamed, transferred or
-approved. Explicit migration and final capacity release require additional
-reviewed operations; this foundation does not manufacture either.
+approved. Explicit migration and refunds for any grant that funded an agent
+require additional reviewed operations; this foundation does not manufacture either.
+
+An explicit `release_unused_project` command can return a failed project's whole
+reservation to its contribution, under the designated Palpo administrator's fresh
+authorization. The writer verifies the current registration, exact grant revision
+and absence of any lifetime `project_grant_agents` debit. It sets revocation and
+the schema-64 `released_at` marker in the receipt transaction. The original grant
+row remains permanently, fencing delayed admission, reused grant IDs and legacy
+console approval. Expiry alone is not release. A grant that ever funded an agent
+is refused even after that agent ends or its ordinary history is retained away.
+Same-ID/restart retries return the original receipt; another project can use the
+returned contribution capacity, while the provider's contribution stays reserved.
 
 ## Command and receipt transport
 
 `ProjectCommand` v1 uses the existing authenticated work lane, kind `workflow`.
 It binds command ID, exact argument digest, fleet/registration generation,
 issuer, actor, deadline and a closed operation: reserve project, replace explicit
-administrators, approve/reject agent, top up agent, revoke agent/project. Unknown
+administrators, approve/reject agent, top up agent, revoke agent/project, and
+release a provably unused project reservation. Unknown
 fields are rejected, including fields nested inside legacy request DTOs. There
 is no arbitrary URL, script, console command or credential in the payload.
 The shared Rust/Palpo corpus is `native/fixtures/project-commands.json` (copied
@@ -142,12 +154,20 @@ other fleets and prior registrations. Frozen updates retain their original page
 and advance only after acknowledgement, including restart. An empty page is not
 deletion. Publication does not advertise the complete project workflow capability.
 
-Palpo commits validated pages with the transport sequence. It refuses changed
-grant identities/budgets, decreasing reservations, restoration after retirement,
+Palpo commits validated pages with the transport sequence. Pages now include
+cumulative `reserved` and `released` limits. Both are monotonic; held capacity is
+their difference. Cumulative reservations may exceed the original budget after
+reuse, but held capacity cannot, and all sums remain JSON-safe integers. Old
+frozen pages without `released` deserialize as zero. The console displays the
+held amount. Palpo refuses changed grant identities/budgets, decreasing counters,
+restoration after retirement,
 foreign fleets and old registration generations. Accepted project receipts now
 retain their registration generation so a new registration cannot authorize work
 against an old grant. UI availability still needs to check freshness, current
 generation and remaining limits; a cached observation is not an allocation.
+The release operation additionally needs `projectWorkflow.unusedRelease: true`.
+Hagency still withholds the complete workflow capability pending integration
+acceptance; the local fixture explicitly advertises the extension for tests.
 
 ## Integration still required
 

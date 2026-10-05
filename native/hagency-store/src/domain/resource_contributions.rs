@@ -70,8 +70,18 @@ pub enum ContributionState {
 pub struct ContributionStatus {
     pub grant: ResourceDelegation,
     pub state: ContributionState,
-    /// Includes retired project reservations. Cleanup is not a budget refund.
+    /// Cumulative reservations, including explicitly released unused grants.
     pub reserved: GrantLimits,
+    /// Cumulative verified unused releases. Agent cleanup never increments it.
+    #[serde(default = "zero_limits")]
+    pub released: GrantLimits,
+}
+fn zero_limits() -> GrantLimits {
+    GrantLimits {
+        tokens: 0,
+        max_agents: 0,
+        max_rate_per_day: 0,
+    }
 }
 /// A bounded page of authority observations for one current registration.
 /// Missing records on a page are never a withdrawal or a budget refund.
@@ -116,13 +126,37 @@ pub(super) fn status(db: &Connection, id: &str, now: u64) -> Result<Contribution
         ContributionState::Active
     };
     let reserved = db.query_row("SELECT COALESCE(SUM(json_extract(config,'$.limits.tokens')),0),COALESCE(SUM(json_extract(config,'$.limits.maxAgents')),0),COALESCE(SUM(json_extract(config,'$.limits.maxRatePerDay')),0) FROM project_grants WHERE delegation_id=?1", [id], |r| Ok(GrantLimits { tokens:r.get(0)?, max_agents:r.get(1)?, max_rate_per_day:r.get(2)? }))?;
-    if !grant.limits.contains(&reserved) {
+    let released = db.query_row("SELECT COALESCE(SUM(json_extract(config,'$.limits.tokens')),0),COALESCE(SUM(json_extract(config,'$.limits.maxAgents')),0),COALESCE(SUM(json_extract(config,'$.limits.maxRatePerDay')),0) FROM project_grants WHERE delegation_id=?1 AND released_at IS NOT NULL", [id], |r| Ok(GrantLimits { tokens:r.get(0)?, max_agents:r.get(1)?, max_rate_per_day:r.get(2)? }))?;
+    let held = GrantLimits {
+        tokens: reserved
+            .tokens
+            .checked_sub(released.tokens)
+            .ok_or(Error::Schema)?,
+        max_agents: reserved
+            .max_agents
+            .checked_sub(released.max_agents)
+            .ok_or(Error::Schema)?,
+        max_rate_per_day: reserved
+            .max_rate_per_day
+            .checked_sub(released.max_rate_per_day)
+            .ok_or(Error::Schema)?,
+    };
+    if !grant.limits.contains(&held)
+        || [
+            reserved.tokens,
+            reserved.max_agents,
+            reserved.max_rate_per_day,
+        ]
+        .iter()
+        .any(|v| *v > hagency_core::JSON_SAFE_MAX)
+    {
         return Err(Error::Schema);
     }
     Ok(ContributionStatus {
         grant,
         state,
         reserved,
+        released,
     })
 }
 impl DomainRepository {

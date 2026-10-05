@@ -516,7 +516,19 @@ pub(super) fn reserve(
         return Ok(project(tx, &grant.id, now)?.0);
     }
     bounded_row(tx, "project_grants", "id", &grant.id, 10_000)?;
-    let (tokens, agents, rate): (u64, u64, u64) = tx.query_row("SELECT COALESCE(SUM(json_extract(config,'$.limits.tokens')),0),COALESCE(SUM(json_extract(config,'$.limits.maxAgents')),0),COALESCE(SUM(json_extract(config,'$.limits.maxRatePerDay')),0) FROM project_grants WHERE delegation_id=?1", [&parent.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    // Cumulative reservations and releases remain monotonic in publications.
+    // Bound cumulative sums too, before SQLite or JSON can lose precision.
+    let totals: (u64, u64, u64) = tx.query_row("SELECT COALESCE(SUM(json_extract(config,'$.limits.tokens')),0),COALESCE(SUM(json_extract(config,'$.limits.maxAgents')),0),COALESCE(SUM(json_extract(config,'$.limits.maxRatePerDay')),0) FROM project_grants WHERE delegation_id=?1", [&parent.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    for (total, add) in [
+        (totals.0, grant.limits.tokens),
+        (totals.1, grant.limits.max_agents),
+        (totals.2, grant.limits.max_rate_per_day),
+    ] {
+        if total.checked_add(add).is_none_or(|n| n > JSON_SAFE_MAX) {
+            return Err(Error::Capacity);
+        }
+    }
+    let (tokens, agents, rate): (u64, u64, u64) = tx.query_row("SELECT COALESCE(SUM(json_extract(config,'$.limits.tokens')),0),COALESCE(SUM(json_extract(config,'$.limits.maxAgents')),0),COALESCE(SUM(json_extract(config,'$.limits.maxRatePerDay')),0) FROM project_grants WHERE delegation_id=?1 AND released_at IS NULL", [&parent.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
     if tokens
         .checked_add(grant.limits.tokens)
         .is_none_or(|n| n > parent.limits.tokens)
@@ -601,6 +613,53 @@ pub(super) fn revoke_project(
         params![id, now],
     )?;
     reconcile(tx, now)?;
+    Ok(())
+}
+
+/// A durable debit survives engagement cleanup/retention, so absence here proves
+/// this project never funded an agent. Revocation alone does not prove that.
+pub(super) fn release_unused_project(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    expected_revision: u64,
+    issuer: &Registration,
+    now: u64,
+) -> Result<(), Error> {
+    let (raw, fleet): (String, String) = tx
+        .query_row(
+            "SELECT config,fleet_id FROM project_grants WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    let grant: ProjectGrant = serde_json::from_str(&raw)?;
+    let parent: String = tx.query_row(
+        "SELECT config FROM resource_delegations WHERE id=?1",
+        [&grant.delegation_id],
+        |r| r.get(0),
+    )?;
+    let parent: ResourceDelegation = serde_json::from_str(&parent)?;
+    if issuer != &registration(tx, &fleet)?
+        || parent.registration_generation != issuer.generation
+        || parent.issuer != issuer.server_name
+    {
+        return Err(Error::GrantAuthority);
+    }
+    if grant.revision != expected_revision {
+        return Err(Error::Conflict);
+    }
+    let used: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_grant_agents WHERE grant_id=?1)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if used {
+        return Err(Error::Conflict);
+    }
+    // Keep the grant and its original scope forever. A delayed approval, old
+    // reserve receipt or reused grant ID cannot resurrect released authority.
+    tx.execute("UPDATE project_grants SET revoked_at=COALESCE(revoked_at,?2), released_at=COALESCE(released_at,?2) WHERE id=?1", params![id, now])?;
     Ok(())
 }
 

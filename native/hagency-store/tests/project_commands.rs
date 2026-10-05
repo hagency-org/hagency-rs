@@ -90,6 +90,246 @@ fn proof_for_agent(_db: &mut DomainRepository) -> VerifiedRequest {
 }
 
 #[test]
+fn unused_release_recovers_capacity_and_survives_restart_without_resurrecting_the_grant() {
+    let (dir, mut db, grant) = setup();
+    let reserve = command(
+        "reserve",
+        ProjectOperation::ReserveProject {
+            grant: grant.clone(),
+        },
+    );
+    let original = apply(&mut db, &reserve, None);
+    let release = command(
+        "release",
+        ProjectOperation::ReleaseUnusedProject {
+            grant_id: grant.id.clone(),
+            expected_revision: 1,
+        },
+    );
+    let result = apply(&mut db, &release, None);
+    assert!(matches!(
+        result.outcome,
+        ProjectOutcome::Applied {
+            result: ProjectResult::ReleasedUnusedProject { .. }
+        }
+    ));
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    assert_eq!(apply(&mut db, &release, None), result);
+    assert_eq!(apply(&mut db, &reserve, None), original);
+    assert!(matches!(
+        db.project_grant(&grant.id, 1000),
+        Err(Error::GrantRevoked)
+    ));
+    let replay = command(
+        "another_reserve",
+        ProjectOperation::ReserveProject {
+            grant: grant.clone(),
+        },
+    );
+    assert!(matches!(
+        apply(&mut db, &replay, None).outcome,
+        ProjectOutcome::Refused {
+            code: ProjectRefusal::GrantRevoked
+        }
+    ));
+    let proof = proof_for_agent(&mut db);
+    let approve = command(
+        "late_approve",
+        ProjectOperation::ApproveAgent {
+            grant_id: grant.id.clone(),
+            grant_revision: 1,
+            request: proof.request().clone(),
+            allocated_tokens: 200,
+        },
+    );
+    assert!(matches!(
+        apply(&mut db, &approve, Some(&proof)).outcome,
+        ProjectOutcome::Refused {
+            code: ProjectRefusal::GrantRevoked
+        }
+    ));
+    db.admit(&proof, 1000).unwrap();
+    assert!(matches!(
+        db.approve("legacy_after_release", &proof, 1000),
+        Err(Error::GrantAuthority)
+    ));
+    let mut replacement = grant.clone();
+    replacement.id = "replacement_grant".into();
+    replacement.project_id = "new_project".into();
+    replacement.room_id = "!new:example.test".into();
+    assert!(matches!(
+        apply(
+            &mut db,
+            &command(
+                "new_project",
+                ProjectOperation::ReserveProject { grant: replacement }
+            ),
+            None
+        )
+        .outcome,
+        ProjectOutcome::Applied { .. }
+    ));
+    let page = db
+        .resource_contributions(&resource("commands", "seat", 1000).id(), "", 16, 1000)
+        .unwrap();
+    assert_eq!(page[0].reserved.tokens, grant.limits.tokens * 2);
+    assert_eq!(page[0].released, grant.limits);
+}
+
+#[test]
+fn unused_release_is_atomic_and_does_not_refund_any_lifetime_agent_debit() {
+    let (dir, mut db, grant) = setup();
+    apply(
+        &mut db,
+        &command(
+            "reserve",
+            ProjectOperation::ReserveProject {
+                grant: grant.clone(),
+            },
+        ),
+        None,
+    );
+    let release = command(
+        "release",
+        ProjectOperation::ReleaseUnusedProject {
+            grant_id: grant.id.clone(),
+            expected_revision: 1,
+        },
+    );
+    let sql = rusqlite::Connection::open(dir.path().join("state/domain.sqlite3")).unwrap();
+    sql.execute_batch("CREATE TRIGGER fail_release_receipt BEFORE INSERT ON project_command_receipts BEGIN SELECT RAISE(ABORT,'receipt failure'); END;").unwrap();
+    assert!(matches!(
+        db.apply_project_command(
+            &release,
+            &registration(),
+            &authorization(&release),
+            None,
+            1000
+        ),
+        Err(Error::Sqlite(_))
+    ));
+    assert!(db.project_grant(&grant.id, 1000).is_ok());
+    assert_eq!(
+        sql.query_row("SELECT released_at FROM project_grants", [], |r| r
+            .get::<_, Option<u64>>(0))
+            .unwrap(),
+        None
+    );
+    sql.execute_batch("DROP TRIGGER fail_release_receipt")
+        .unwrap();
+    let proof = proof_for_agent(&mut db);
+    let approve = command(
+        "approve",
+        ProjectOperation::ApproveAgent {
+            grant_id: grant.id.clone(),
+            grant_revision: 1,
+            request: proof.request().clone(),
+            allocated_tokens: 200,
+        },
+    );
+    assert!(matches!(
+        apply(&mut db, &approve, Some(&proof)).outcome,
+        ProjectOutcome::Applied { .. }
+    ));
+    let revoke = command(
+        "revoke",
+        ProjectOperation::RevokeProject {
+            grant_id: grant.id.clone(),
+            expected_revision: 1,
+        },
+    );
+    apply(&mut db, &revoke, None);
+    assert!(matches!(
+        apply(&mut db, &release, None).outcome,
+        ProjectOutcome::Refused {
+            code: ProjectRefusal::Conflict
+        }
+    ));
+    assert_eq!(
+        sql.query_row("SELECT released_at FROM project_grants", [], |r| r
+            .get::<_, Option<u64>>(0))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        sql.query_row("SELECT debited_tokens FROM project_grant_agents", [], |r| r
+            .get::<_, u64>(0))
+            .unwrap(),
+        200
+    );
+}
+
+#[test]
+fn unused_release_requires_current_authority_and_revision_but_can_release_expired_capacity() {
+    let (dir, mut db, grant) = setup();
+    apply(
+        &mut db,
+        &command(
+            "reserve",
+            ProjectOperation::ReserveProject {
+                grant: grant.clone(),
+            },
+        ),
+        None,
+    );
+    let mut release = command(
+        "release",
+        ProjectOperation::ReleaseUnusedProject {
+            grant_id: grant.id.clone(),
+            expected_revision: 2,
+        },
+    );
+    assert!(matches!(
+        apply(&mut db, &release, None).outcome,
+        ProjectOutcome::Refused {
+            code: ProjectRefusal::Conflict
+        }
+    ));
+    release.command_id = "denied".into();
+    release.operation = ProjectOperation::ReleaseUnusedProject {
+        grant_id: grant.id.clone(),
+        expected_revision: 1,
+    };
+    let mut auth = authorization(&release);
+    auth.allowed = false;
+    assert!(matches!(
+        db.apply_project_command(&release, &registration(), &auth, None, 1000)
+            .unwrap()
+            .outcome,
+        ProjectOutcome::Refused {
+            code: ProjectRefusal::Authority
+        }
+    ));
+    drop(db);
+    // A real schema-63 database has no release column. Upgrade must not infer a
+    // release from existing revoked/expired grants.
+    let sql = rusqlite::Connection::open(dir.path().join("state/domain.sqlite3")).unwrap();
+    sql.execute_batch(
+        "ALTER TABLE project_grants DROP COLUMN released_at; PRAGMA user_version=63;",
+    )
+    .unwrap();
+    drop(sql);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    let page = db
+        .resource_contributions(&resource("commands", "seat", 1000).id(), "", 16, 100_001)
+        .unwrap();
+    assert_eq!(page[0].released.tokens, 0);
+    release.command_id = "after_expiry".into();
+    release.expires_at_ms = 200_000;
+    let mut auth = authorization(&release);
+    auth.valid_until_ms = 101_000;
+    assert!(matches!(
+        db.apply_project_command(&release, &registration(), &auth, None, 100_001)
+            .unwrap()
+            .outcome,
+        ProjectOutcome::Applied {
+            result: ProjectResult::ReleasedUnusedProject { .. }
+        }
+    ));
+}
+
+#[test]
 fn fresh_removal_command_retries_only_definitively_failed_cleanup() {
     use hagency_store::EffectOutcome;
     let (_dir, mut db, grant) = setup();

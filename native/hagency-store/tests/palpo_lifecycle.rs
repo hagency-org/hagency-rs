@@ -214,7 +214,7 @@ fn schema_62_upgrade_preserves_original_engagement_and_has_no_remote_proof() {
     let (root, db, id, _) = setup(true);
     drop(db);
     let sql = rusqlite::Connection::open(root.path().join("state/domain.sqlite3")).unwrap();
-    sql.execute_batch("DROP TABLE palpo_agent_retirements; PRAGMA user_version=62;")
+    sql.execute_batch("ALTER TABLE project_grants DROP COLUMN released_at; DROP TABLE palpo_agent_retirements; PRAGMA user_version=62;")
         .unwrap();
     drop(sql);
     for _ in 0..2 {

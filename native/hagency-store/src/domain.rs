@@ -138,7 +138,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 63;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 64;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -1094,11 +1094,12 @@ impl DomainRepository {
                     (61, include_str!("migrations/075-project-grants.sql")),
                     (62, include_str!("migrations/076-project-commands.sql")),
                     (63, include_str!("migrations/077-palpo-retirement.sql")),
+                    (64, include_str!("migrations/078-unused-project-release.sql")),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
                     "SELECT id,config,revoked_at FROM resource_delegations LIMIT 0",
-                    "SELECT id,delegation_id,config FROM project_grants LIMIT 0",
+                    "SELECT id,delegation_id,config,released_at FROM project_grants LIMIT 0",
                     "SELECT engagement_id,grant_id,debited_tokens FROM project_grant_agents LIMIT 0",
                     "SELECT id,digest,result,created_at FROM project_grant_decisions LIMIT 0",
                     "SELECT fleet_id,generation,command_id,receipt FROM project_command_receipts LIMIT 0",

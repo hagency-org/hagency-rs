@@ -88,7 +88,8 @@ fn execute(
         | RejectAgent { grant_id, .. }
         | TopUpAgent { grant_id, .. }
         | RevokeAgent { grant_id, .. }
-        | RevokeProject { grant_id, .. } => Some(grant_id),
+        | RevokeProject { grant_id, .. }
+        | ReleaseUnusedProject { grant_id, .. } => Some(grant_id),
     };
     if let Some(grant_id) = grant_id {
         let fleet: String = tx
@@ -224,6 +225,16 @@ fn execute(
         } => {
             grants::revoke_project(tx, grant_id, *expected_revision, issuer, now)?;
             Ok(ProjectResult::RevokedProject {
+                grant_id: grant_id.clone(),
+                revision: *expected_revision,
+            })
+        }
+        ReleaseUnusedProject {
+            grant_id,
+            expected_revision,
+        } => {
+            grants::release_unused_project(tx, grant_id, *expected_revision, issuer, now)?;
+            Ok(ProjectResult::ReleasedUnusedProject {
                 grant_id: grant_id.clone(),
                 revision: *expected_revision,
             })

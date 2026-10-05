@@ -64,6 +64,11 @@ pub enum ProjectOperation {
         grant_id: String,
         expected_revision: u64,
     },
+    /// Return a reservation only when no agent has ever debited this grant.
+    ReleaseUnusedProject {
+        grant_id: String,
+        expected_revision: u64,
+    },
 }
 fn positive(n: u64) -> Result<(), InvalidInput> {
     if n == 0 || n > JSON_SAFE_MAX {
@@ -173,6 +178,10 @@ impl ProjectCommand {
             RevokeProject {
                 grant_id,
                 expected_revision,
+            }
+            | ReleaseUnusedProject {
+                grant_id,
+                expected_revision,
             } => {
                 identifier(grant_id, 128)?;
                 positive(*expected_revision)?;
@@ -233,6 +242,10 @@ pub enum ProjectResult {
         cleanup: String,
     },
     RevokedProject {
+        grant_id: String,
+        revision: u64,
+    },
+    ReleasedUnusedProject {
         grant_id: String,
         revision: u64,
     },

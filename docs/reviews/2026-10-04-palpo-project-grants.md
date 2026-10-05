@@ -174,3 +174,39 @@ These tests use isolated stores and explicit Matrix/HTTP fixtures. Actual
 cross-service lifecycle acceptance, final accounting/refund semantics,
 Hagency-originated association, mobile acceptance and release remain. The
 workflow capability is still disabled; production services are unchanged.
+
+## Failed project reservation recovery
+
+Schema 64 adds explicit release of a project's never-used reservation back to
+its contribution. The release checks current registration and grant revision
+under the same writer transaction as its typed business receipt. Any lifetime
+agent debit refuses release, including after agent retirement. Ordinary
+revocation, expiry and missing status are not refund evidence. The grant remains
+as a permanent fence against late admission, legacy approval and reused IDs.
+
+Contribution publications retain cumulative reserved and released counters;
+their difference is currently held capacity. Both counters are monotonic and
+bounded to JSON-safe integers. A different project can reuse verified released
+capacity. Old frozen pages without release counters still deserialize. The
+console displays held tokens. Palpo's separate recovery action retries only
+refused reservations or requests typed unused release after all original results
+settle. The optional `projectWorkflow.unusedRelease: true` extension gates the
+new wire operation; real workflow capability advertisement remains disabled.
+
+Validation:
+
+- Store/Palpo regressions: **645 passed, zero failed, 50 existing ignored**.
+- Final project-command integration file: **12 passed**, covering schema 63 to
+  64, exact replay after restart, stale reserve receipts, receipt rollback,
+  wrong authority/revision, expired reservations, refused lifetime debits,
+  legacy approval after release and safe capacity reuse.
+- Rust and Node share eight command/result vectors. The Rust core corpus test,
+  production Hagency host check and schema-64 console asset build pass.
+- Companion Palpo: **130 backend tests passed**, including partial retry,
+  release refusal/retry, changed roles, exact grant denial, pending results,
+  queue rollback and monotonic cumulative counters.
+
+This proves isolated storage and transport boundaries. Actual cross-service
+runtime/Matrix acceptance, Hagency-originated association, allocation increases,
+legacy migration and release still remain. No live Matrix work, deployment,
+visible session restart or mobile acceptance is claimed.
