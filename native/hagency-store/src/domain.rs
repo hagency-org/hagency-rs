@@ -2454,7 +2454,24 @@ impl DomainRepository {
         })
     }
     pub fn reject(&mut self, command_id: &str, id: &str) -> Result<Engagement, Error> {
-        self.end(command_id, id, false)
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Like approve and top-up: once a coordinator decides this fleet's
+        // requests, a console rejection would be a second verdict on them.
+        let fleet: Option<String> = tx
+            .query_row("SELECT fleet_id FROM engagements WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if let Some(fleet) = fleet
+            && coordinator::binding(&tx, &fleet)?.is_some()
+        {
+            return Err(Error::LocalAuthority);
+        }
+        let value = end_in_transaction(&tx, command_id, id, false)?;
+        tx.commit()?;
+        Ok(value)
     }
     pub fn revoke(&mut self, command_id: &str, id: &str) -> Result<Engagement, Error> {
         self.end(command_id, id, true)

@@ -432,6 +432,10 @@ async fn refuse(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             // silent second write.
             refusal(res, StatusCode::CONFLICT, "decision_conflict")
         }
+        // ADR-191: the engagement's coordinator decides this request in Rinx.
+        Err(hagency_store::Error::LocalAuthority) => {
+            refusal(res, StatusCode::CONFLICT, "coordinator_managed")
+        }
         Err(error) => failure(res, error),
     }
 }

@@ -290,6 +290,13 @@ fn coordinator_approval_reserves_and_provisions_without_a_console_decision() {
         db.approve("console_bypass", &proof, 1000),
         Err(Error::LocalAuthority)
     ));
+    // A console rejection would be a second verdict on the coordinator's
+    // request, exactly like a console approval.
+    let pending = proof.request().engagement_id().unwrap();
+    assert!(matches!(
+        db.reject("console_reject_bypass", &pending),
+        Err(Error::LocalAuthority)
+    ));
     let approved = db
         .approve_coordinated_agent(&command, &proof, 1000)
         .unwrap();
