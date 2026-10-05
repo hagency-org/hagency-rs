@@ -137,6 +137,7 @@ impl DomainRepository {
             "representativeMxid":current.representative_mxid,
             "approvalBotMxid":current.approval_bot_mxid,"offers":offers,
             "coordinatorAgentControlV1": coordinator::binding(&self.db, &current.fleet_id)?.is_some_and(|e| e.coordinator_approval_v1),
+            "coordinatorAgentProfileV1": coordinator::binding(&self.db, &current.fleet_id)?.is_some_and(|e| e.coordinator_approval_v1),
             "coordinatorApprovalV1": coordinator::binding(&self.db, &current.fleet_id)?.is_some_and(|e| e.coordinator_approval_v1),
         }});
         if canonical::encode_transport(&body)?.len() > MAX_BODY {

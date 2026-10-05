@@ -1,4 +1,5 @@
 use super::*;
+type ProfileObservation = (String, Option<String>, Option<String>, Option<u64>);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -7,6 +8,7 @@ pub enum AgentOperation {
     Start,
     Retire,
     RetryCleanup,
+    Rename,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +20,8 @@ pub struct AgentControl {
     pub project_revision: contract::Revision,
     pub resource_allocation_id: contract::ResourceAllocationId,
     pub operation: AgentOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 pub(super) fn authorize(db: &Connection, command: &AgentControl, now: u64) -> Result<(), Error> {
@@ -77,7 +81,10 @@ pub(super) fn authorize(db: &Connection, command: &AgentControl, now: u64) -> Re
     }
     // Ending work remains possible after suspension. Only a verified, current
     // delegation/project may re-enable a serving allocation.
-    if command.operation == AgentOperation::Start {
+    if matches!(
+        command.operation,
+        AgentOperation::Start | AgentOperation::Rename
+    ) {
         current(db, c.server_engagement_id.as_str(), now)?;
         if project.state != contract::ProjectState::Ready {
             return Err(Error::State);
@@ -107,7 +114,24 @@ impl DomainRepository {
             return Ok(receipt);
         }
         authorize(&tx, command, now)?;
+        if (command.operation == AgentOperation::Rename) != command.display_name.is_some() {
+            return Err(InvalidInput("display name is only valid for rename").into());
+        }
         match command.operation {
+            AgentOperation::Rename => {
+                if read_engagement(&tx, agent)?.state != EngagementState::Active {
+                    return Err(Error::State);
+                }
+                let name = command.display_name.as_ref().unwrap();
+                if name.trim() != name
+                    || name.is_empty()
+                    || name.chars().count() > 128
+                    || name.chars().any(char::is_control)
+                {
+                    return Err(InvalidInput("invalid display name").into());
+                }
+                tx.execute("INSERT INTO coordinator_agent_profiles(agent_id,command_id,desired_name,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(agent_id) DO UPDATE SET command_id=excluded.command_id,desired_name=excluded.desired_name,updated_at=excluded.updated_at,last_error=NULL",params![agent,id,name,now])?;
+            }
             AgentOperation::Retire => {
                 end_in_transaction(&tx, id, agent, true)?;
             }
@@ -158,7 +182,32 @@ impl DomainRepository {
             )
             .optional()?;
         Ok(
-            json!({"paused":stopped,"runtimeState":record.state,"cleanup":record.cleanup,"cleanupEffect":cleanup,"settlement":self.coordinator_settlement(agent).ok()}),
+            json!({"paused":stopped,"runtimeState":record.state,"cleanup":record.cleanup,"cleanupEffect":cleanup,"settlement":self.coordinator_settlement(agent).ok(),"matrixProfile":self.matrix_agent_profile(agent)?}),
         )
+    }
+
+    /// Desired and observed public label. Canonical agent/resource identities
+    /// and the immutable allocation request remain unchanged.
+    pub fn matrix_agent_profile(&self, agent: &str) -> Result<Value, Error> {
+        let record = read_engagement(&self.db, agent)?;
+        let row:Option<ProfileObservation>=self.db.query_row("SELECT desired_name,confirmed_name,last_error,observed_at FROM coordinator_agent_profiles WHERE agent_id=?1",[agent],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        Ok(match row {
+            Some((desired, confirmed, error, at)) => {
+                json!({"desiredName":desired,"observedName":confirmed,"state":if error.is_some(){"failed"}else if confirmed.as_ref()==Some(&desired){"verified"}else{"pending"},"lastError":error,"observedAtMs":at})
+            }
+            None => json!({"desiredName":record.agent_name,"state":"default"}),
+        })
+    }
+    /// The original native Matrix collector records only its exact attempted
+    /// label. An old response cannot confirm or overwrite a newer request.
+    pub fn observe_matrix_agent_profile(
+        &mut self,
+        agent: &str,
+        desired: &str,
+        verified: bool,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.db.execute("UPDATE coordinator_agent_profiles SET confirmed_name=CASE WHEN ?3 THEN ?2 ELSE confirmed_name END,last_error=CASE WHEN ?3 THEN NULL ELSE 'matrix_profile_unverified' END,observed_at=?4 WHERE agent_id=?1 AND desired_name=?2",params![agent,desired,verified,now])?;
+        Ok(())
     }
 }

@@ -4450,6 +4450,21 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn matrix_agent_profile(&self, agent: String) -> Result<serde_json::Value, Error> {
+        self.call(weight(&agent)?, move |db| db.matrix_agent_profile(&agent))
+            .await
+    }
+    pub async fn observe_matrix_agent_profile(
+        &self,
+        agent: String,
+        desired: String,
+        verified: bool,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&agent, &desired))?, move |db| {
+            db.observe_matrix_agent_profile(&agent, &desired, verified, writer_time()?)
+        })
+        .await
+    }
     pub async fn settle_coordinator_agent(
         &self,
         command: crate::coordinator::SettlementCommand,

@@ -44,6 +44,14 @@ export function validateReport(v, selected) {
     || !evidence(s.evidence) || !period(v.daily) || !period(v.monthly)) throw new Error('invalid_native_response');
   return v;
 }
+function validMatrixProfile(p) {
+  const label = (s) => typeof s === 'string' && [...s].length > 0 && [...s].length <= 128;
+  return object(p, ['desiredName', 'observedName', 'state', 'lastError', 'observedAtMs'])
+    && label(p.desiredName) && (p.observedName === null || label(p.observedName))
+    && ['pending', 'failed', 'verified'].includes(p.state)
+    && (p.lastError === null || p.lastError === 'matrix_profile_unverified')
+    && (p.observedAtMs === null || number(p.observedAtMs));
+}
 export function validateEngagements(v) {
   /* projectName is bounded in Unicode SCALAR VALUES (code points), not JS
    * string length (UTF-16 code units): the server truncates at verification
@@ -56,7 +64,8 @@ export function validateEngagements(v) {
    * implementation accident of `slice`, not a designed rule; the native
    * verifier's scalar bound is the contract. */
   if (!object(v, ['engagements', 'next_after']) || !Array.isArray(v.engagements) || v.engagements.length > 16
-    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup', 'agentRemainingTokens', 'ownerBindingRequired', 'createdAtMs', 'endedAtMs', 'allocatedTokens', 'spentTokens', 'quotaPaused', ...(Object.hasOwn(e, 'coordinatorManaged') ? ['coordinatorManaged'] : [])]) || (Object.hasOwn(e, 'coordinatorManaged') && typeof e.coordinatorManaged !== 'boolean')
+    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup', 'agentRemainingTokens', 'ownerBindingRequired', 'createdAtMs', 'endedAtMs', 'allocatedTokens', 'spentTokens', 'quotaPaused', ...(Object.hasOwn(e, 'coordinatorManaged') ? ['coordinatorManaged'] : []), ...(Object.hasOwn(e, 'matrixProfile') ? ['matrixProfile'] : [])]) || (Object.hasOwn(e, 'coordinatorManaged') && typeof e.coordinatorManaged !== 'boolean')
+      || (Object.hasOwn(e, 'matrixProfile') && !validMatrixProfile(e.matrixProfile))
       || !id(e.id) || typeof e.agentName !== 'string' || e.agentName.length > 128
       || !(e.projectName === null || (typeof e.projectName === 'string' && [...e.projectName].length <= 255))
       || typeof e.role !== 'string' || e.role.length > 128 || !number(e.requestedTokens) || !STATES.includes(e.state) || !CLEANUP.includes(e.cleanup)

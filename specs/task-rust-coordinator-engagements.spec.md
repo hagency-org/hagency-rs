@@ -23,6 +23,21 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Scoped rename preserves identity and capacity across schema upgrade and restart
+  Test: scoped_agent_rename_preserves_identity_budget_and_newer_name_across_restart
+  Given a coordinated agent with an existing allocation
+  When an authorized rename is replayed or an obsolete Matrix response arrives
+  Then only the current desired label is confirmed and identity, capacity and newer requests remain unchanged
+
+Scenario: Explicit rename replaces an existing custom Matrix label only with exact readback
+  Test: explicit_agent_rename_replaces_custom_name_and_requires_exact_readback
+  Level: integration
+  Test Double: real bounded Matrix client and isolated HTTPS peer
+  Production caller: hagency_matrix::collector::Collector::reconcile_agent_profile
+  Given a durable owner or coordinator rename
+  When Matrix returns a different label or the exact requested label on retry
+  Then a mismatch remains unverified and the exact readback confirms the original desired name
+
 Scenario: Whole Matrix identity retirement requires every original remote proof field
   Test: native_retirement_requires_every_exact_remote_identity_field
   Given the original fleet, request and Matrix identity

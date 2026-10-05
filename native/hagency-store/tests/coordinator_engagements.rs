@@ -1001,3 +1001,105 @@ fn final_account_settlement_refunds_only_unused_capacity_and_late_usage_remains_
     );
     access.revoke().unwrap();
 }
+
+#[test]
+fn scoped_agent_rename_preserves_identity_budget_and_newer_name_across_restart() {
+    let (dir, mut db) = setup();
+    let (approval, proof) = prepared(&mut db, "renamed_agent", "Original", 200);
+    let agent = db
+        .approve_coordinated_agent(&approval, &proof, 1000)
+        .unwrap();
+    let effect = db
+        .claim_effect_for(&format!("provision_{}", agent.id))
+        .unwrap()
+        .unwrap();
+    db.observe_effect(
+        &effect.id,
+        effect.fence,
+        &hagency_store::EffectOutcome::Applied {
+            receipt: "fixture".into(),
+        },
+    )
+    .unwrap();
+    let fleet = registration().fleet_id;
+    // Upgrade a copied schema-65 database without changing its existing grant.
+    drop(db);
+    let sql = rusqlite::Connection::open(dir.path().join("state/domain.sqlite3")).unwrap();
+    sql.execute_batch("DROP TABLE coordinator_agent_profiles; PRAGMA user_version=65;")
+        .unwrap();
+    drop(sql);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    let rename = |id: &str, name: &str| {
+        serde_json::from_value::<AgentControl>(json!({"context":context(id),"agentAllocationId":agent.id,"projectId":"project_one","projectRevision":1,"resourceAllocationId":"grant_one","operation":"rename","displayName":name})).unwrap()
+    };
+    let first = rename("name_one", "First friendly name");
+    let receipt = db.control_coordinator_agent(&fleet, &first, 1000).unwrap();
+    assert_eq!(
+        db.matrix_agent_profile(&agent.id).unwrap()["state"],
+        "pending"
+    );
+    db.observe_matrix_agent_profile(&agent.id, "First friendly name", true, 1001)
+        .unwrap();
+    assert_eq!(
+        db.matrix_agent_profile(&agent.id).unwrap()["observedName"],
+        "First friendly name"
+    );
+    let second = rename("name_two", "Second friendly name");
+    db.control_coordinator_agent(&fleet, &second, 1002).unwrap();
+    db.observe_matrix_agent_profile(&agent.id, "First friendly name", true, 1003)
+        .unwrap();
+    assert_eq!(
+        db.matrix_agent_profile(&agent.id).unwrap()["state"],
+        "pending"
+    );
+    db.observe_matrix_agent_profile(&agent.id, "Second friendly name", false, 1004)
+        .unwrap();
+    assert_eq!(
+        db.matrix_agent_profile(&agent.id).unwrap()["state"],
+        "failed"
+    );
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    assert_eq!(
+        db.control_coordinator_agent(&fleet, &first, 1005).unwrap(),
+        receipt
+    );
+    assert_eq!(
+        db.matrix_agent_profile(&agent.id).unwrap()["desiredName"],
+        "Second friendly name"
+    );
+    db.observe_matrix_agent_profile(&agent.id, "Second friendly name", true, 1006)
+        .unwrap();
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["matrixProfile"]["state"],
+        "verified"
+    );
+    let current = db.get(&agent.id).unwrap();
+    assert_eq!(current.agent_name.as_str(), "Original");
+    assert_eq!(u64::from(current.allocation()), 200);
+    assert_eq!(
+        db.server_engagement_resources(&fleet, "", 50).unwrap()[0]["retainedTokens"],
+        200
+    );
+    let mut forbidden = rename("name_forbidden", "No");
+    forbidden.context.actor = "@stranger:example.test".to_owned().try_into().unwrap();
+    assert!(matches!(
+        db.control_coordinator_agent(&fleet, &forbidden, 1007),
+        Err(Error::LocalAuthority)
+    ));
+    let mut invalid = rename("name_invalid", "Bad\nName");
+    assert!(
+        db.control_coordinator_agent(&fleet, &invalid, 1007)
+            .is_err()
+    );
+    invalid.operation = AgentOperation::Stop;
+    invalid.display_name = Some("Good".into());
+    assert!(
+        db.control_coordinator_agent(&fleet, &invalid, 1007)
+            .is_err()
+    );
+    assert!(matches!(
+        db.control_coordinator_agent(&fleet, &rename("expired", "Expired"), 100001),
+        Err(Error::Generation)
+    ));
+}

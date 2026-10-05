@@ -141,31 +141,58 @@ impl Collector {
     ) -> Result<bool, Error> {
         let inner = &self.inner;
         let now = profile_clock_ms();
+        let profile = inner
+            .domain
+            .matrix_agent_profile(engagement.to_owned())
+            .await?;
+        let pending = matches!(profile["state"].as_str(), Some("pending" | "failed"));
         let last = inner
             .profile_checked_at
             .load(std::sync::atomic::Ordering::Relaxed);
         if last != 0
-            && now.saturating_sub(last) < crate::identity_polish::PROFILE_RECONCILE_INTERVAL_MS
+            && now.saturating_sub(last)
+                < if pending {
+                    5000
+                } else {
+                    crate::identity_polish::PROFILE_RECONCILE_INTERVAL_MS
+                }
         {
             return Ok(false);
         }
-        let name = inner
-            .domain
-            .engagement(engagement.to_owned())
-            .await?
-            .agent_name;
-        let changed = crate::identity_polish::reconcile_display_name(
-            &inner.http,
-            &inner.config.identity.transport.sender_mxid,
-            name.as_str(),
-            name.as_str(),
-            cancel,
-        )
-        .await?;
+        let name = profile["desiredName"].as_str().ok_or(Error::Config)?;
+        let explicit = profile["state"] != "default";
+        let changed = if explicit {
+            crate::identity_polish::apply_display_name(
+                &inner.http,
+                &inner.config.identity.transport.sender_mxid,
+                name,
+                cancel,
+            )
+            .await
+        } else {
+            crate::identity_polish::reconcile_display_name(
+                &inner.http,
+                &inner.config.identity.transport.sender_mxid,
+                name,
+                name,
+                cancel,
+            )
+            .await
+        };
+        if explicit {
+            inner
+                .domain
+                .observe_matrix_agent_profile(
+                    engagement.to_owned(),
+                    name.to_owned(),
+                    changed.is_ok(),
+                )
+                .await?;
+        }
         inner
             .profile_checked_at
             .store(profile_clock_ms(), std::sync::atomic::Ordering::Relaxed);
-        Ok(changed)
+        changed
     }
 
     /// The engagement this collector's transport belongs to — task #12's
@@ -1278,6 +1305,55 @@ mod tests {
         let (second, ()) = tokio::join!(c.reconcile_agent_profile(&engagement, &cancel), async {});
         assert!(!second.unwrap());
         fake.quiesced(admitted, &common::limits()).await;
+        c.close().await.unwrap();
+        f.store.shutdown().await.unwrap();
+        fake.close().await;
+    }
+    #[tokio::test]
+    async fn explicit_agent_rename_replaces_custom_name_and_requires_exact_readback() {
+        let f = common::Fixture::new();
+        let mut fake = common::Fake::start(false).await;
+        let c = Collector::new(f.config(&fake.endpoint), f.store.clone()).unwrap();
+        let cancel = CancellationToken::new();
+        let mxid = &c.inner.config.identity.transport.sender_mxid;
+        let (result, ()) = tokio::join!(
+            crate::identity_polish::apply_display_name(
+                &c.inner.http,
+                mxid,
+                "Requested name",
+                &cancel
+            ),
+            async {
+                fake.next()
+                    .await
+                    .json(200, json!({"displayname":"Existing custom name"}));
+                let put = fake.next().await;
+                assert_eq!(put.method, "PUT");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&put.body).unwrap()["displayname"],
+                    "Requested name"
+                );
+                put.json(200, json!({}));
+                fake.next()
+                    .await
+                    .json(200, json!({"displayname":"Wrong readback"}));
+            }
+        );
+        assert_eq!(result, Err(Error::Wire));
+        let (result, ()) = tokio::join!(
+            crate::identity_polish::apply_display_name(
+                &c.inner.http,
+                mxid,
+                "Requested name",
+                &cancel
+            ),
+            async {
+                fake.next()
+                    .await
+                    .json(200, json!({"displayname":"Requested name"}));
+            }
+        );
+        assert_eq!(result, Ok(false));
         c.close().await.unwrap();
         f.store.shutdown().await.unwrap();
         fake.close().await;

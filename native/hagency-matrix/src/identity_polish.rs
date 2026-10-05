@@ -212,6 +212,27 @@ pub async fn reconcile_display_name(
     display_name: &str,
     cancel: &CancellationToken,
 ) -> Result<bool, Error> {
+    reconcile_name(http, mxid, Some(agent_name), display_name, cancel).await
+}
+
+/// A scoped, durable owner/coordinator rename explicitly replaces an existing
+/// custom label. Success requires reading back the exact requested label.
+pub async fn apply_display_name(
+    http: &Http,
+    mxid: &str,
+    display_name: &str,
+    cancel: &CancellationToken,
+) -> Result<bool, Error> {
+    reconcile_name(http, mxid, None, display_name, cancel).await
+}
+
+async fn reconcile_name(
+    http: &Http,
+    mxid: &str,
+    automatic_agent_name: Option<&str>,
+    display_name: &str,
+    cancel: &CancellationToken,
+) -> Result<bool, Error> {
     let Some(desired) = desired_display_name(display_name) else {
         return Ok(false);
     };
@@ -230,7 +251,10 @@ pub async fn reconcile_display_name(
     if current == desired {
         return Ok(false);
     }
-    if !current.is_empty() && !is_machine_generated(current, mxid, agent_name) {
+    if !current.is_empty()
+        && automatic_agent_name
+            .is_some_and(|agent_name| !is_machine_generated(current, mxid, agent_name))
+    {
         return Ok(false);
     }
     http.put(

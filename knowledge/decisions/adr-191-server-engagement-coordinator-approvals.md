@@ -61,7 +61,7 @@ existing workflow until reconciled.
 
 ## Implemented integration boundary
 
-The current Rust slice adds schema version 65, typed coordinator commands,
+The current Rust slice adds schema version 66, typed coordinator commands,
 transactional reservations/top-ups, owner contribution HTTP routes, independent
 profile import/launch, native Matrix verification and outbound projections.
 `GET /console/api/server-engagements` and its `/{id}/resources` routes expose the
@@ -196,3 +196,14 @@ tests followed by both focused recovery/cancellation tests, library clippy and
 all 1,246 Rust spec bindings. The production-caller check reports no missing or
 ambiguous caller. Cancellation is verified in SQLite before reopening the store,
 so recovery does not depend on startup converting an abandoned Started effect.
+
+Scoped Matrix renaming is now an additive `coordinatorAgentProfileV1` capability.
+Schema 66 stores desired and verified labels separately from immutable agent
+identity, resource and allocation history. The native collector explicitly
+replaces a custom name only for an authorized durable request and reads it back;
+a mismatch remains failed/retryable. Both Palpo/Rinx and Agent allocations expose
+pending/verified/failure. Migration-65/restart, stale observation, old command
+replay, scope denial and unchanged capacity pass store tests; the bounded HTTPS
+client test verifies custom-name replacement and rejects incorrect read-back.
+The native Rinx run `db6e9f0cfe45422c801846e432a3bdda` passed 21 fixture-backed
+checks. Console assets built into `target/coordinator-console-v66` (167 files).

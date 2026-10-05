@@ -221,7 +221,8 @@ export default function NativeEngagements({ lead = null, pending = null, other =
                   <td>
                     {/* The agent name reaches the usage page for THIS engagement
                         — the drill-down the reader expects a triage row to have. */}
-                    <a href={`/console/usage/?engagement_id=${encodeURIComponent(e.id)}`}>{e.agentName}</a>
+                    <a href={`/console/usage/?engagement_id=${encodeURIComponent(e.id)}`}>{e.matrixProfile?.observedName ?? e.agentName}</a>
+                    {e.matrixProfile && <small className="dim" data-matrix-profile>{e.agentName} · {e.matrixProfile.state === 'verified' ? 'Matrix name verified' : e.matrixProfile.state === 'failed' ? 'Matrix name verification failed · retrying' : 'Matrix name pending'}{e.matrixProfile.state !== 'verified' && ` · ${e.matrixProfile.desiredName}`}</small>}
                   </td>
                   <td>{e.projectName ?? '—'}</td>
                   <td>{e.role}</td>

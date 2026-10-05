@@ -134,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 65;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 66;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -362,6 +362,8 @@ pub struct AgentRosterRow {
 #[serde(rename_all = "camelCase")]
 pub struct EngagementLabel {
     pub coordinator_managed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix_profile: Option<Value>,
     pub id: String,
     pub agent_name: String,
     pub project_name: Option<String>,
@@ -1126,6 +1128,10 @@ impl DomainRepository {
                         65,
                         include_str!("migrations/065-coordinator-settlements.sql"),
                     ),
+                    (
+                        66,
+                        include_str!("migrations/066-coordinator-agent-profiles.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
@@ -1133,6 +1139,7 @@ impl DomainRepository {
                     "SELECT engagement_id,revision,digest,change,authority,accepted_at FROM coordinator_delegations LIMIT 0",
                     "SELECT id,engagement_id,digest,receipt,refused_at FROM coordinator_refusals LIMIT 0",
                     "SELECT agent_id,command_id,digest,receipt,accepted_at FROM coordinator_settlements LIMIT 0",
+                    "SELECT agent_id,command_id,desired_name,confirmed_name,last_error,updated_at,observed_at FROM coordinator_agent_profiles LIMIT 0",
                     "SELECT allocated_tokens FROM engagements LIMIT 0",
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
@@ -1546,6 +1553,7 @@ impl DomainRepository {
             };
             let quota_paused = quota_holds::paused(&self.db, &engagement.id)?;
             labels.push(EngagementLabel {
+                matrix_profile: {let profile=self.matrix_agent_profile(&engagement.id)?; (profile["state"]!="default").then_some(profile)},
                 coordinator_managed:self.db.query_row("SELECT EXISTS(SELECT 1 FROM coordinator_engagements c JOIN engagements e ON e.fleet_id=c.id WHERE e.id=?1)",[&engagement.id],|r|r.get(0))?,
                 id: engagement.id.clone(),
                 agent_name: engagement.agent_name.as_str().to_owned(),
