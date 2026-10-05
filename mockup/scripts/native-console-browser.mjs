@@ -455,7 +455,8 @@ try {
   await page.locator('[data-native-state="ready"]').first().waitFor();
   assert((await page.locator('tbody tr').count()) >= 1, 'the seeded engagement renders');
   assert.match(await page.locator('main').innerText(), /UsageWorker|NewUsageWorker/);
-  assert.match(await page.locator('main').innerText(), /Approve or reject new requests here; projects start and end them|在这里批准或拒绝新请求；项目负责发起和结束/);
+  assert.match(await page.locator('main').innerText(), /Agent allocations|Agent 配额/);
+  assert.match(await page.locator('main').innerText(), /Coordinator approvals are reviewed in Rinx\.|协调员审批在 Rinx 中进行。/);
   // #16/#44: the verdict panel carries the operator decision — the pending
   // row renders its Approve/Reject controls. Under #31 one login carries the
   // authority to click them; this walk asserts they render for the seeded

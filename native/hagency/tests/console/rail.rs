@@ -72,7 +72,7 @@ fn rail_pages() -> Vec<String> {
         .collect();
     assert_eq!(
         keys.len(),
-        13,
+        14,
         "the native rail's link set changed size; re-derive and confirm the pages ship: {keys:?}"
     );
     keys.into_iter()
@@ -81,6 +81,7 @@ fn rail_pages() -> Vec<String> {
             // the agents roster, the camel-cased keys by their hyphenated
             // pages, every other row by its own path.
             "workforce" => "/console/agents/".to_owned(),
+            "serverEngagements" => "/console/server-engagements/".to_owned(),
             "taskGraphs" => "/console/task-graphs/".to_owned(),
             "projectSides" => "/console/project-sides/".to_owned(),
             "projectBoard" => "/console/project-board/".to_owned(),
