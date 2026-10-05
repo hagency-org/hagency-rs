@@ -61,21 +61,24 @@ try {
   await page.locator('[data-native-state="ready"]').waitFor();
   assert(!/private_|operator\.token/.test(await page.locator('main').innerText()), 'no credential value on screen');
 
-  /* --- Part 1: every rail entry opens its page (heading, no blank, no error). */
+  /* --- Part 1: rail navigation opens each selected page, without stale content. */
   const PAGES = [
-    ['usage', /usage|用量/],
-    ['resources', /resources|资源/],
-    ['alerts', /alert|告警/],
-    ['engagements', /engagement|接洽/],
-    ['agents', /workforce|员工名册|roster|projections/],
+    ['usage', /usage|用量/i],
+    ['resources', /resources|资源/i],
+    ['alerts', /alert|告警/i],
+    ['server-engagements', /server engagements|服务器关联/i],
+    ['engagements', /agent allocations|Agent 配额/i],
+    ['agents', /workforce|员工名册|roster|projections/i],
   ];
   const headings = {};
   for (const [key, pattern] of PAGES) {
     await page.locator(`nav.rail a[href$="/${key}/"]`).click();
-    // The resources page marks readiness on its own panel attribute; every
-    // other page uses the generic one. Either proves the page painted.
-    await page.locator('[data-native-state], [data-native-resource-state]').first().waitFor();
-    const head = await page.locator('.page-head h1').innerText();
+    await page.waitForURL(`${config.base}/console/${key}/`);
+    // Resource and server-engagement pages have their own panel attributes.
+    await page.locator('[data-native-state], [data-native-resource-state], [data-server-engagements]').first().waitFor();
+    const heading = page.locator('.page-head h1').filter({ hasText: pattern });
+    await heading.waitFor({ state: 'visible' });
+    const head = await heading.innerText();
     assert(head && head.trim().length > 0, `${key}: the page renders an h1 heading`);
     assert(pattern.test(head) || pattern.test(await page.locator('main').innerText()), `${key}: heading matches its page`);
     assert((await page.locator('main').innerText()).trim().length > 0, `${key}: not a blank page`);
@@ -90,6 +93,7 @@ try {
     await route.continue();
   });
   await page.locator('nav.rail a[href$="/engagements/"]').click();
+  await page.waitForURL(`${config.base}/console/engagements/`);
   await page.locator('p[role="status"]').first().waitFor();
   await page.unroute('**/console/api/**');
   await page.locator('[data-native-state="ready"]').waitFor();
