@@ -210,3 +210,50 @@ This proves isolated storage and transport boundaries. Actual cross-service
 runtime/Matrix acceptance, Hagency-originated association, allocation increases,
 legacy migration and release still remain. No live Matrix work, deployment,
 visible session restart or mobile acceptance is claimed.
+
+## Actual Palpo HTTP / Rust worker integration
+
+The opt-in native test now runs the production `palpo_work` consumer and status
+publisher against Palpo `06b888e92c8f4cf85d512ae2a1017137e55184a9`'s actual HTTP
+mini-app sessions, workflow, outbound queue and isolated SQLite. Resource
+contributions originate in Hagency's domain ledger. Authorization uses the real
+machine endpoint; receipts come from real domain transactions and publication.
+The test verifies the explicit checkout revision and refuses changes to the
+service or its Matrix/peer fixtures.
+
+The final run passed both selected native worker tests (zero failures/ignored),
+including 11 business commands: nine applied and two refused after the designated
+administrator was locked between queueing and execution. It verifies:
+
+- A delivery ACK leaves the project awaiting its business receipt.
+- Dropping an accepted publication's response, reopening Hagency's stores and
+  replaying the identical bytes does not advance Palpo's sequence or add notices.
+- Actual Matrix fixture reads validate the request source, reception, project
+  room and private approval room before assigned-admin admission/rejection.
+- Restart and duplicate admission delivery preserve one engagement; duplicate
+  top-up delivery preserves one increase from 80,000 to 120,000 tokens.
+- Real lifecycle/status publication preserves unknown usage and does not claim
+  Ready. Revocation before provisioning reports cleanup not required, no Matrix
+  identity, runtime stopped and Matrix-retired false; Palpo closes this specific
+  never-started removal without claiming account deactivation.
+- Partial refusal retry and unused release settle through actual receipts.
+  Cumulative reserved tokens are 1,600,000, verified unused release is 400,000,
+  and no pending delivery or legacy Hagency human-approval request remains.
+
+Run from the Hagency repository root with Node 24 and the pinned companion tree:
+
+```sh
+PALPO_SOURCE_DIR=/absolute/path/to/palpo \
+PALPO_SOURCE_REVISION=06b888e92c8f4cf85d512ae2a1017137e55184a9 \
+PALPO_TEST_NODE=/absolute/path/to/node \
+cargo test --locked -p hagency --lib bootstrap::palpo_work \
+  -- --include-ignored --nocapture
+```
+
+Normal Cargo runs intentionally skip the test requiring the external checkout.
+This run uses an explicit loopback Matrix fixture and a test-only workflow
+capability opt-in. It does not run a model process or a real Matrix homeserver,
+test production signup/notification delivery, or prove retirement of a running
+agent. There is no deployed service access. Those ADR acceptance requirements,
+Hagency-originated association and capability release remain open. The local
+Docker daemon was unavailable; no daemon or deployed service was started.

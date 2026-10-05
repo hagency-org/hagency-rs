@@ -27,6 +27,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+mod cross_service;
+
 /// The fleet's App Service identity, from `palpo-appservice.json`.
 pub(super) struct Appservice {
     homeserver: String,
