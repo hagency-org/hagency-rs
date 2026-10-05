@@ -179,8 +179,12 @@ impl DomainRepository {
                 |r| r.get(0),
             )
             .optional()?;
+        let provision: Option<String> = self.db.query_row(
+            "SELECT state FROM effects WHERE engagement_id=?1 AND kind='provision'",
+            [agent], |r| r.get(0),
+        ).optional()?;
         Ok(
-            json!({"paused":stopped,"runtimeState":record.state,"cleanup":record.cleanup,"cleanupEffect":cleanup,"settlement":self.coordinator_settlement(agent).ok(),"matrixProfile":self.matrix_agent_profile(agent)?}),
+            json!({"paused":stopped,"runtimeState":record.state,"provisionEffect":provision,"cleanup":record.cleanup,"cleanupEffect":cleanup,"settlement":self.coordinator_settlement(agent).ok(),"matrixProfile":self.matrix_agent_profile(agent)?}),
         )
     }
 

@@ -37,7 +37,10 @@ impl Custody {
     async fn ready(&self, cancel: &CancellationToken) -> Result<(), Error> {
         let mut runtime = self.runtime.lock().await;
         let owner = runtime.as_mut().ok_or(Error::OutcomeUnknown)?;
-        let result = tokio::select! {result=owner.ready()=>result.map_err(|_|Error::OutcomeUnknown),_ = cancel.cancelled()=>Err(Error::Cancelled)};
+        let result = tokio::select! {result=owner.ready()=>result.map_err(|error| {
+            eprintln!("agent factory runtime readiness refused: {error:?}");
+            Error::OutcomeUnknown
+        }),_ = cancel.cancelled()=>Err(Error::Cancelled)};
         if result.is_err() {
             owner.cancel();
         }
@@ -747,7 +750,10 @@ impl TokenProvisioningHost {
         let runtime = plan
             .start(domain.clone(), scope.clone(), home)
             .await
-            .map_err(|_| Error::OutcomeUnknown)?;
+            .map_err(|error| {
+                eprintln!("agent factory {} runtime startup refused: {error:?}", effect.engagement_id);
+                Error::OutcomeUnknown
+            })?;
         *custody.runtime.lock().await = Some(runtime);
         custody.ready(cancel).await?;
         // GET-only current verification on the original successful SDK job;

@@ -23,6 +23,12 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Uncertain provisioning remains visible without retrying or releasing capacity
+  Test: uncertain_provision_is_visible_after_restart_without_releasing_its_reservation
+  Given a coordinated allocation whose original provisioning effect has an unknown outcome
+  When the domain restarts and another request needs the reserved capacity
+  Then the lifecycle reports uncertainty, a second claim is refused and the reservation is retained
+
 Scenario: Each native engagement validates only its own private Matrix root
   Test: native_matrix_ca_is_private_bounded_and_profile_scoped
   Level: unit
