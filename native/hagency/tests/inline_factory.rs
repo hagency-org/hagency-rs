@@ -183,6 +183,7 @@ async fn native_configured_fleet_recurring_driver() {
 }
 use serde_json::json;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn queue_service_task(f: &Fixture, n: u32) {
     let task = format!("service_task_{n}");
     f.base
@@ -212,6 +213,7 @@ async fn queue_service_task(f: &Fixture, n: u32) {
 }
 /// Run the fleet until `done(completed dispatches, this agent's fleet row)`,
 /// then stop and close it cleanly. Returns the last fleet snapshot.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn run_fleet_until(
     f: &mut Fixture,
     label: &str,
@@ -300,6 +302,7 @@ async fn run_fleet_until(
     }
     last
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn fleet_snapshot(client: &reqwest::Client, url: &str) -> serde_json::Value {
     let response = client
         .get(url)
@@ -310,6 +313,7 @@ async fn fleet_snapshot(client: &reqwest::Client, url: &str) -> serde_json::Valu
     let value: serde_json::Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
     value["factory_service"].clone()
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn agent_row(snapshot: &serde_json::Value, engagement: &str) -> serde_json::Value {
     snapshot["agents"]
         .as_array()

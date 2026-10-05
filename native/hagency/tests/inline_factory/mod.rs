@@ -100,8 +100,11 @@ pub struct Fixture {
     custody: hagency_store::Store,
     server: tokio::task::JoinHandle<()>,
     handle: salvo::server::ServerHandle,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     application_service: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     service_mode: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub address: std::net::SocketAddr,
 }
 impl Fixture {
@@ -401,8 +404,11 @@ impl Fixture {
             server,
             handle,
             fleet,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             application_service,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             service_mode,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             address,
         };
         {
@@ -429,13 +435,16 @@ impl Fixture {
     /// the same state, and the domain repository is reopened the way a real
     /// start reopens it. The fake homeserver and the owner's device keep their
     /// state, as the real ones would.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub async fn restart(self) -> Self {
         self.rebuild(true).await
     }
     /// Replace a transport without replacing its process/domain writer.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub async fn reconnect(self) -> Self {
         self.rebuild(false).await
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn rebuild(mut self, reopen_domain: bool) -> Self {
         if let Some(fleet) = &mut self.fleet {
             fleet.close().await.unwrap();
