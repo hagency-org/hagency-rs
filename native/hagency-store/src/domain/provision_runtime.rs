@@ -303,21 +303,22 @@ impl DomainRepository {
     /// Engagements this service's inline factory completed and that are still
     /// Active, in id order. An engagement another path provisioned (an adopted
     /// coordinator or approval account) is not listed.
-    pub fn inline_factory_engagements(&mut self) -> Result<Vec<String>, Error> {
+    pub fn inline_factory_engagements(&mut self, registration: &Registration) -> Result<Vec<String>, Error> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = tx
             .prepare(
                 "SELECT e.id FROM engagements e JOIN effects f ON f.engagement_id=e.id \
-                 WHERE e.state='active' AND f.kind='provision' AND f.state='complete' \
+                 WHERE e.fleet_id=?1 AND e.generation=?2 \
+                 AND e.state='active' AND f.kind='provision' AND f.state='complete' \
                  ORDER BY e.id",
             )?
-            .query_map([], |r| r.get::<_, String>(0))?
+            .query_map(rusqlite::params![registration.fleet_id, registration.generation], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         let mut found = Vec::new();
         for id in ids {
-            if inline_factory_snapshot(&tx, &id)?.is_some() {
+            if inline_factory_snapshot(&tx, &id)?.is_some_and(|(_, actual, _)| &actual == registration) {
                 found.push(id);
             }
         }

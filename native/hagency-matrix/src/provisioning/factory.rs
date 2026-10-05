@@ -1100,10 +1100,10 @@ impl Collector {
     /// The engagements this coordinator's inline factory completed and that a
     /// restart should bring back, in id order. Read-only.
     pub async fn provisioned_engagements(&self) -> Result<Vec<String>, Error> {
-        if self.inner.config.provisioning.is_none() {
+        let Some(host) = &self.inner.config.provisioning else {
             return Ok(Vec::new());
-        }
-        Ok(self.inner.domain.inline_factory_engagements().await?)
+        };
+        host.provisioned_engagements(&self.inner.domain).await
     }
     /// Bring back one such agent after a restart. It concerns that agent only:
     /// a refusal leaves the coordinator and every other agent as they were. On

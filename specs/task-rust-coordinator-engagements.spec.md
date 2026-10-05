@@ -23,6 +23,12 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Restart recovery cannot claim another engagement's agents
+  Test: restarted_factories_list_only_agents_of_their_exact_registration
+  Given two completed agents in distinct registrations on the same homeserver
+  When both factories restart or a stale registration attempts recovery
+  Then each lists only its own exact registration's agents and cannot take the other's recovery route
+
 Scenario: Uncertain provisioning remains visible without retrying or releasing capacity
   Test: uncertain_provision_is_visible_after_restart_without_releasing_its_reservation
   Given a coordinated allocation whose original provisioning effect has an unknown outcome

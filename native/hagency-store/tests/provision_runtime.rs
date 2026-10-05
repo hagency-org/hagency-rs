@@ -228,14 +228,14 @@ fn native_reattach_scope_rebuilds_only_what_the_factory_completed() {
             );
             if case != "absent" {
                 assert!(
-                    db.inline_factory_engagements().unwrap().is_empty(),
+                    db.inline_factory_engagements(&registration()).unwrap().is_empty(),
                     "{case}"
                 );
             }
             continue;
         }
         assert_eq!(
-            db.inline_factory_engagements().unwrap(),
+            db.inline_factory_engagements(&registration()).unwrap(),
             vec![engagement.clone()]
         );
         let (rebuilt, registered, scope) = db.reattach_provision_scope(&engagement).unwrap();
@@ -700,4 +700,53 @@ fn native_warm_runtime_managed_readiness() {
     login(&mut db, &account, LoginOutcome::Observed, now() + 60_000);
     account.retire();
     assert!(db.validate_warm_runtime_scope(&scope).is_err());
+}
+
+#[test]
+fn restarted_factories_list_only_agents_of_their_exact_registration() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let mut db = DomainRepository::open(&state).unwrap();
+    let pool = resource("shared_pool", "shared_seat", 1000);
+    db.put_resource(&pool).unwrap();
+    let first = registration();
+    let second = Registration {
+        fleet_id: format!("hf_{}", "b".repeat(32)),
+        representative_mxid: format!("@hf_{}_representative:example.test", "b".repeat(32)),
+        ..first.clone()
+    };
+    let mut agents = Vec::new();
+    for (index, registered) in [&first, &second].into_iter().enumerate() {
+        db.register(registered).unwrap();
+        let mut req = request(&format!("agent_{index}"), &format!("Agent{index}"), &pool, 100);
+        req.fleet_id = registered.fleet_id.clone();
+        let mut observed = observation(&req);
+        observed.reception.joined.remove(&first.representative_mxid);
+        observed.reception.joined.insert(registered.representative_mxid.clone());
+        observed.project.joined.remove(&first.representative_mxid);
+        observed.project.joined.insert(registered.representative_mxid.clone());
+        observed.project.binding.as_mut().unwrap()["fleetId"] = serde_json::json!(registered.fleet_id);
+        let verified = hagency_core::authority::verify_request(registered, req, observed).unwrap();
+        db.admit(&verified, 1000).unwrap();
+        db.approve(&format!("approve_{index}"), &verified, 1000).unwrap();
+        let effect = db.claim_effect().unwrap().unwrap();
+        let scope = db.provision_runtime_scope(&effect, registered).unwrap();
+        scope.claim_warm().unwrap();
+        db.complete_original_provision(&scope).unwrap();
+        agents.push(effect.engagement_id);
+    }
+    drop(db);
+    let mut db = DomainRepository::open(&state).unwrap();
+    for (index, registered) in [&first, &second].into_iter().enumerate() {
+        assert_eq!(db.inline_factory_engagements(registered).unwrap(), vec![agents[index].clone()]);
+        let mut wrong = registered.clone();
+        wrong.generation += 1;
+        assert!(db.inline_factory_engagements(&wrong).unwrap().is_empty());
+        wrong = registered.clone();
+        wrong.reception_room_id = "!other:example.test".into();
+        assert!(db.inline_factory_engagements(&wrong).unwrap().is_empty());
+        let (_, actual, scope) = db.reattach_provision_scope(&agents[index]).unwrap();
+        assert_eq!(&actual, registered);
+        scope.claim_warm().unwrap();
+    }
 }

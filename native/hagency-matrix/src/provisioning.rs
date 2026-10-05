@@ -230,7 +230,7 @@ impl TokenProvisioningHost {
         &self,
         domain: &DomainStore,
     ) -> Result<Vec<String>, Error> {
-        Ok(domain.inline_factory_engagements().await?)
+        Ok(domain.inline_factory_engagements(self.registration.clone()).await?)
     }
     /// ADR-187 §A.5: the fleet's membership sweep, acting with the
     /// representative's credential instead of a coordinator's.
