@@ -116,6 +116,33 @@ fn approval_host(wait: u64, limits: Limits) -> Result<hagency_execution::Approva
 mod approval_wait_tests {
     use super::*;
     #[test]
+    fn native_matrix_ca_is_private_bounded_and_profile_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        private::directory(&first).unwrap();
+        private::directory(&second).unwrap();
+        assert!(matrix_root(&first).unwrap().is_none());
+        let pem = include_bytes!("../../../hagency-matrix/tests/fixtures/ca.pem");
+        let path = first.join("matrix.ca.pem");
+        private::write_new(&path, pem).unwrap();
+        assert_eq!(matrix_root(&first).unwrap().unwrap(), pem);
+        assert!(matrix_root(&second).unwrap().is_none());
+        private::replace(&path, b"not a certificate").unwrap();
+        assert!(matrix_root(&first).is_err());
+        private::replace(&path, &vec![b'x'; 16385]).unwrap();
+        assert!(matrix_root(&first).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            let target = second.join("matrix.ca.pem");
+            private::write_new(&target, pem).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(matrix_root(&first).is_err());
+            assert_eq!(matrix_root(&second).unwrap().unwrap(), pem);
+        }
+    }
+    #[test]
     fn native_matrix_pacing_configuration() {
         assert!(
             matrix_limits("https://example.test/", None, None)
@@ -337,6 +364,25 @@ pub(super) fn read(path: &Path, limit: usize, field: &'static str) -> Result<Vec
         });
     }
     Ok(bytes)
+}
+/// An operator-installed root belongs to this engagement's Matrix connection.
+/// An invalid or unreadable file must not silently fall back to public roots.
+pub(super) fn matrix_root(state: &Path) -> Result<Option<Vec<u8>>, Failure> {
+    let path = state.join("matrix.ca.pem");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => {
+            let bytes = read(&path, 16 * 1024, "matrix.ca.pem")?;
+            reqwest::Certificate::from_pem_bundle(&bytes)
+                .ok()
+                .filter(|roots| !roots.is_empty())
+                .ok_or(Failure::Config {
+                    field: "matrix.ca.pem",
+                    fix: "the engagement's Matrix CA must be a usable PEM root certificate",
+                })?;
+            Ok(Some(bytes))
+        }
+    }
 }
 /// Fixed-memory digest under trusted executable/ancestor provisioning. This is
 /// not handle-based executable launch or a claim of hostile namespace isolation.

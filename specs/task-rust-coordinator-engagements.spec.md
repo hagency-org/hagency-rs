@@ -23,6 +23,15 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Each native engagement validates only its own private Matrix root
+  Test: native_matrix_ca_is_private_bounded_and_profile_scoped
+  Level: unit
+  Test Double: private temporary profile directories and a test CA certificate
+  Production caller: hagency::bootstrap::config::matrix_root
+  Given independent engagement profiles with an optional operator-installed Matrix CA
+  When a CA is absent, malformed, too large or a symlink
+  Then only a bounded private regular PEM file is accepted and another profile never inherits it
+
 Scenario: Native legacy setup keeps the selected namespace and freezes the owner intent
   Test: native_legacy_association_keeps_selected_fleet_and_frozen_owner_intent
   Level: integration

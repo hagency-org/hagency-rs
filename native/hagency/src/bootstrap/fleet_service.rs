@@ -198,6 +198,7 @@ struct Running {
     agents: approval::AgentDirectory,
     homeserver: String,
     matrix_limits: hagency_matrix::Limits,
+    matrix_root: Option<Vec<u8>>,
 }
 
 fn build(
@@ -225,6 +226,7 @@ fn build(
         fix: "the imported fleet's files must form a provisioning host",
     };
     let representative = secret(state, "matrix.representative_token")?;
+    let matrix_root = config::matrix_root(state)?;
     let host = TokenProvisioningHost::application_service(
         registration.clone(),
         &homeserver,
@@ -237,6 +239,10 @@ fn build(
         key,
         runtime.matrix_limits.clone(),
     )
+    .and_then(|host| match &matrix_root {
+        Some(pem) => host.with_root_pem(pem),
+        None => Ok(host),
+    })
     .and_then(|host| host.with_agent_rooms_pinned_anchors(&representative))
     .and_then(|host| host.with_managed_homes(runtime.homes))
     .and_then(|host| host.with_warm_plan(runtime.warm))
@@ -265,6 +271,7 @@ fn build(
         agents,
         homeserver,
         matrix_limits: runtime.matrix_limits,
+        matrix_root,
     })
 }
 
@@ -486,6 +493,10 @@ fn owner_collector(
         }],
         running.matrix_limits.clone(),
     )
+    .and_then(|config| match &running.matrix_root {
+        Some(pem) => config.with_root_pem(pem),
+        None => Ok(config),
+    })
     .map_err(|_| refused())?;
     let approval = HostApprovalConfig::for_fleet(
         config,

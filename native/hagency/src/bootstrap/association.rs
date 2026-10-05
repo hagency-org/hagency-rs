@@ -149,11 +149,17 @@ pub async fn run(args: Args) -> Result<Value, Error> {
     if token.is_empty() || token.len() > 8192 {
         return Err(Error::Invalid("Matrix token file"));
     }
-    let client = reqwest::Client::builder()
+    let mut client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|_| Error::Invalid("HTTP client"))?;
+        .timeout(std::time::Duration::from_secs(20));
+    if let Some(pem) =
+        super::config::matrix_root(&args.state_dir).map_err(|_| Error::Invalid("matrix.ca.pem"))?
+    {
+        client = client.add_root_certificate(
+            reqwest::Certificate::from_pem(&pem).map_err(|_| Error::Invalid("matrix.ca.pem"))?,
+        );
+    }
+    let client = client.build().map_err(|_| Error::Invalid("HTTP client"))?;
     let who = response(
         client
             .get(

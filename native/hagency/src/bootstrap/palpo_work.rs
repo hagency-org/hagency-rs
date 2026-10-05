@@ -32,6 +32,7 @@ pub(super) struct Appservice {
     homeserver: String,
     as_token: String,
     representative: String,
+    matrix_root: Option<Vec<u8>>,
 }
 impl Appservice {
     pub(super) fn load(state: &Path, server_name: &str) -> Option<Self> {
@@ -42,6 +43,7 @@ impl Appservice {
             homeserver: text("homeserver")?,
             as_token: text("as_token")?,
             representative: format!("@{}:{server_name}", text("sender_localpart")?),
+            matrix_root: super::config::matrix_root(state).ok()?,
         })
     }
 }
@@ -181,13 +183,15 @@ struct Reader {
 }
 impl Reader {
     fn new(appservice: &Appservice) -> Option<Self> {
+        let mut client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20));
+        if let Some(pem) = &appservice.matrix_root {
+            client = client.add_root_certificate(reqwest::Certificate::from_pem(pem).ok()?);
+        }
         Some(Self {
-            client: reqwest::Client::builder()
-                .redirect(Policy::none())
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(20))
-                .build()
-                .ok()?,
+            client: client.build().ok()?,
             origin: Url::parse(&appservice.homeserver).ok()?,
             token: appservice.as_token.clone(),
             user: appservice.representative.clone(),
