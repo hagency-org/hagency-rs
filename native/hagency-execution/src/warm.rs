@@ -220,6 +220,7 @@ struct Activation {
 #[derive(Clone)]
 pub(crate) struct Binding {
     scope: OwnedProvisionScope,
+    _runtime_lease: Arc<hagency_store::OwnedRuntimeLease>,
     home: Arc<ManagedAgentHome>,
     root: Arc<crate::workspace::Root>,
     workspace_id: String,
@@ -232,6 +233,7 @@ impl Binding {
     /// checked the scope, the home and the workspace root against each other.
     pub(crate) fn reattached(
         scope: OwnedProvisionScope,
+        runtime_lease: Arc<hagency_store::OwnedRuntimeLease>,
         home: Arc<ManagedAgentHome>,
         root: Arc<crate::workspace::Root>,
         workspace_id: String,
@@ -239,6 +241,7 @@ impl Binding {
     ) -> Self {
         Self {
             scope,
+            _runtime_lease: runtime_lease,
             home,
             root,
             workspace_id,
@@ -335,6 +338,7 @@ impl WarmRuntime {
         // Shared by all recaptured/cloned scopes in the producing writer. A
         // failed/unknown original job never grants another warm attempt.
         scope.claim_warm().map_err(|_| Failure::Admission)?;
+        let runtime_lease = scope.claim_runtime().map_err(|_| Failure::Admission)?;
         let prepared = host
             .0
             .prepare_warm(&scope, &home, &workspace_id, limits.initialize)?;
@@ -362,6 +366,7 @@ impl WarmRuntime {
         let fixed = host.clone();
         let binding = Binding {
             scope: scope.clone(),
+            _runtime_lease: runtime_lease.clone(),
             home: home.clone(),
             root: prepared.root.clone(),
             workspace_id: workspace_id.clone(),
@@ -375,6 +380,7 @@ impl WarmRuntime {
                 let mut report = Box::new(Report::new(Arc::new(Mutex::new(None))));
                 report.warm = Some(Binding {
                     scope,
+                    _runtime_lease: runtime_lease,
                     home,
                     root: prepared.root.clone(),
                     workspace_id,

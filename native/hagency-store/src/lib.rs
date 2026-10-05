@@ -36,6 +36,7 @@ pub use domain::{
     OVER_BUDGET_NOTICE_KIND, OfferBook, OfferResource, OfferRole, OfferServing, OperatorMessage,
     OperatorTask, OperatorTaskComment, OverBudgetNotice, OwnedClaimProfile, OwnedClaimRoom,
     OwnedCompletion, OwnedDispatchScope, OwnedFailure, OwnedObservation, OwnedProvisionScope,
+    OwnedRuntimeLease,
     PEER_RECEIPT_CEILING, PEER_RETENTION_CEILING, PEER_RETENTION_FLOOR, PeerRetentionStatus,
     PeerSweepOutcome, PendingInvite, Preview, ProjectSide, QuotaStatus, Reminder, ReminderReceipt,
     ReminderSweep, Representative, RetentionStatus, RoleOffer, RuntimeProfile, RuntimeProfileRole,

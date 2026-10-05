@@ -98,7 +98,7 @@ pub use peers::{
     PEER_RECEIPT_CEILING, PEER_RETENTION_CEILING, PEER_RETENTION_FLOOR, PeerRetentionStatus,
     PeerSweepOutcome,
 };
-pub use provision_runtime::OwnedProvisionScope;
+pub use provision_runtime::{OwnedProvisionScope, OwnedRuntimeLease};
 pub use side_registration::{IssueSideRegistration, IssueSideRegistrationRequest, SideCredential};
 pub(crate) mod file_delivery;
 mod peers;

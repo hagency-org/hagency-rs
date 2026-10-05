@@ -429,7 +429,14 @@ impl Fixture {
     /// the same state, and the domain repository is reopened the way a real
     /// start reopens it. The fake homeserver and the owner's device keep their
     /// state, as the real ones would.
-    pub async fn restart(mut self) -> Self {
+    pub async fn restart(self) -> Self {
+        self.rebuild(true).await
+    }
+    /// Replace a transport without replacing its process/domain writer.
+    pub async fn reconnect(self) -> Self {
+        self.rebuild(false).await
+    }
+    async fn rebuild(mut self, reopen_domain: bool) -> Self {
         if let Some(fleet) = &mut self.fleet {
             fleet.close().await.unwrap();
         }
@@ -441,7 +448,9 @@ impl Fixture {
         self.approvals.close().await.unwrap();
         self.handle.stop_graceful(Some(Duration::from_secs(1)));
         self.server.await.unwrap();
-        self.base.store.shutdown().await.unwrap();
+        if reopen_domain {
+            self.base.store.shutdown().await.unwrap();
+        }
         self.custody.shutdown().await.unwrap();
         assert!(self.foreign.is_none());
         let Self {
@@ -452,11 +461,13 @@ impl Fixture {
             service_mode,
             ..
         } = self;
-        base.store = hagency_store::DomainStore::start(
-            hagency_store::DomainRepository::open(&base.root.path().join("domain")).unwrap(),
-            32,
-        )
-        .unwrap();
+        if reopen_domain {
+            base.store = hagency_store::DomainStore::start(
+                hagency_store::DomainRepository::open(&base.root.path().join("domain")).unwrap(),
+                32,
+            )
+            .unwrap();
+        }
         Self::assemble(base, fake, peer, application_service, false, service_mode).await
     }
     pub async fn provision(&mut self) {

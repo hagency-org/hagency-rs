@@ -24,6 +24,16 @@ pub struct OwnedProvisionScope {
     pub(super) account: Option<accounts::Association>,
     owner: Arc<()>,
     claimed: Arc<AtomicBool>,
+    runtime_live: Arc<AtomicBool>,
+}
+/// Exclusive live runtime custody. Cloned bindings share this guard; the next
+/// attachment is admitted only after all original workers and bindings drop it.
+/// This does not reset the one-shot warm initialization claim.
+pub struct OwnedRuntimeLease(Arc<AtomicBool>);
+impl Drop for OwnedRuntimeLease {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 impl OwnedProvisionScope {
     pub fn resource(&self) -> &Resource {
@@ -40,6 +50,12 @@ impl OwnedProvisionScope {
             return Err(Error::Busy);
         }
         Ok(())
+    }
+    pub fn claim_runtime(&self) -> Result<Arc<OwnedRuntimeLease>, Error> {
+        if self.runtime_live.swap(true, Ordering::AcqRel) {
+            return Err(Error::Busy);
+        }
+        Ok(Arc::new(OwnedRuntimeLease(self.runtime_live.clone())))
     }
     pub(crate) fn queue_value(&self) -> impl Serialize + '_ {
         (
@@ -242,6 +258,7 @@ impl DomainRepository {
             resource,
             owner: self.approval_owner.clone(),
             claimed: Arc::new(AtomicBool::new(false)),
+            runtime_live: Arc::new(AtomicBool::new(false)),
         };
         current(&tx, &scope, &self.accounts, &self.approval_owner, false)?;
         tx.commit()?;
@@ -283,6 +300,7 @@ impl DomainRepository {
             resource,
             owner: self.approval_owner.clone(),
             claimed: Arc::new(AtomicBool::new(false)),
+            runtime_live: Arc::new(AtomicBool::new(false)),
         };
         current(&tx, &scope, &self.accounts, &self.approval_owner, true)?;
         tx.commit()?;

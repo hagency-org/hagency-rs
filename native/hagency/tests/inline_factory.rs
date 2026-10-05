@@ -433,7 +433,7 @@ async fn native_provisioning_waits_for_the_owner_without_a_deadline() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn native_configured_fleet_reattaches_after_restart() {
-    for case in ["reattached", "home_tampered"] {
+    for case in ["reattached", "live_reconnect", "home_tampered"] {
         let mut f = Fixture::new_service(false).await;
         f.provision().await;
         f.original_owner().await;
@@ -461,9 +461,13 @@ async fn native_configured_fleet_reattaches_after_restart() {
             )
             .unwrap();
         }
-        let mut f = f.restart().await;
+        let mut f = if case == "live_reconnect" {
+            f.reconnect().await
+        } else {
+            f.restart().await
+        };
         queue_service_task(&f, 2).await;
-        if case == "reattached" {
+        if case != "home_tampered" {
             let snapshot = run_fleet_until(&mut f, "after restart", &engagement, |completed, _| {
                 completed == 2
             })

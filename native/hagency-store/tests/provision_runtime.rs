@@ -530,6 +530,17 @@ fn native_warm_runtime_writer_scope() {
     db.validate_warm_runtime_scope(&scope).unwrap();
     scope.claim_warm().unwrap();
     assert!(matches!(scope.clone().claim_warm(), Err(Error::Busy)));
+    let runtime = scope.claim_runtime().unwrap();
+    let worker = runtime.clone();
+    let recaptured = db.provision_runtime_scope(&effect, &registration()).unwrap();
+    assert!(matches!(recaptured.claim_runtime(), Err(Error::Busy)));
+    drop(runtime);
+    assert!(matches!(recaptured.claim_runtime(), Err(Error::Busy)));
+    drop(worker);
+    let replacement = recaptured.claim_runtime().unwrap();
+    assert!(matches!(scope.claim_runtime(), Err(Error::Busy)));
+    assert!(matches!(recaptured.claim_warm(), Err(Error::Busy)));
+    drop(replacement);
     assert!(matches!(
         db.provision_runtime_scope(&effect, &registration())
             .unwrap()
