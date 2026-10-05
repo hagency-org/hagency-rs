@@ -23,6 +23,15 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Native legacy setup keeps the selected namespace and freezes the owner intent
+  Test: native_legacy_association_keeps_selected_fleet_and_frozen_owner_intent
+  Level: integration
+  Test Double: local Matrix and Palpo HTTP fixture; real private native setup state
+  Production caller: hagency::bootstrap::association::run
+  Given the authenticated resource owner selects an existing legacy fleet for protocol upgrade
+  When the setup response is lost, fields change or another installation imports its profile
+  Then retry retains the selected fleet and only the original runtime and delegation binding can import it
+
 Scenario: Native legacy adoption moves the existing reservation without a second allocation
   Test: legacy_adoption_moves_existing_hold_once_and_preserves_original_decisions_across_restart
   Given a legacy agent consumes all available parent capacity and has an original native approval receipt

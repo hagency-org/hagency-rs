@@ -254,3 +254,19 @@ ambiguous entries (the existing G8 remains owed). Palpo's native-receipt/Node-st
 process test and 58 Rust operations cases pass. Rinx native Save/Cancel acceptance
 also passed 19 checks in `fab3aeaa83224af4a8ba65825b4f7fed`; that run uses an
 isolated Matrix HTTP peer and is not live deployment/device evidence.
+
+
+Legacy connection setup now accepts `association --existing-fleet-id hf_…`.
+The authenticated owner selects the original namespace in a durable local intent.
+Palpo independently checks its recorded owner and installed outbound registration;
+the designated Matrix administrator approves the protocol/delegation upgrade.
+It preserves existing credentials and agents, invalidates the old connection
+proof, and requires the same installation to import its versioned profile and
+complete a fresh probe. Native HTTP fixtures cover frozen retries and foreign
+imports; Palpo's HTTP test proves original namespace/credentials/history and no
+second appservice installation. Both native association cases, all 59 Palpo
+operations cases, and both library clippy checks pass. Actual combined legacy
+upgrade/native probing and remaining pending legacy workflow conversion are
+separate acceptance work.
+The legacy-connection change resolves all 1,253 Rust spec bindings and 85 wired
+production callers; the existing G8 gap remains the sole owed entry.

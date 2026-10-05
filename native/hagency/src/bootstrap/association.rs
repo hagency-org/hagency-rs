@@ -28,6 +28,9 @@ pub struct Args {
     /// Stable local request name; repeat it unchanged to recover a lost reply.
     #[arg(long)]
     pub request_id: String,
+    /// Upgrade this existing legacy namespace through an owner/admin review.
+    #[arg(long)]
+    pub existing_fleet_id: Option<String>,
     #[arg(long)]
     pub name: String,
     #[arg(long)]
@@ -188,13 +191,24 @@ pub async fn run(args: Args) -> Result<Value, Error> {
         .extend(["_matrix", "client", "v3", "profile", &args.coordinator]);
     response(client.get(profile).bearer_auth(token).send().await).await?;
     let runtime = identity(&args.state_dir)?;
-    let intent = json!({"requestId":args.request_id,"name":args.name,"runtimeId":runtime,"coordinatorMxid":args.coordinator,
+    let mut intent = json!({"requestId":args.request_id,"name":args.name,"runtimeId":runtime,"coordinatorMxid":args.coordinator,
         "delegationExpiresAtMs":args.delegation_expires_at_ms,"allowSelfApproval":args.allow_self_approval,"exportMxids":args.export_mxid});
     let key = hagency_core::canonical::digest(
         &json!({"kind":"association","owner":owner,"requestId":args.request_id}),
     )
     .map_err(|_| Error::Invalid("request id"))?;
-    let fleet = format!("hf_{}", &key[..32]);
+    let fleet = if let Some(existing) = &args.existing_fleet_id {
+        if existing.len() != 35
+            || !existing.starts_with("hf_")
+            || !existing[3..].bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(Error::Invalid("legacy fleet id"));
+        }
+        intent["existingFleetId"] = json!(existing);
+        existing.clone()
+    } else {
+        format!("hf_{}", &key[..32])
+    };
     let pending = json!({"fleetId":fleet,"serverName":server,"ownerMxid":owner,"homeserver":homeserver.origin().ascii_serialization(),
         "serverOrigin":palpo.origin().ascii_serialization(),"intent":intent});
     let directory = args.state_dir.join("palpo-associations");
@@ -346,12 +360,23 @@ mod tests {
             return;
         }
         let key=hagency_core::canonical::digest(&json!({"kind":"association","owner":"@owner:example.test","requestId":body["requestId"]})).unwrap();
-        res.render(Json(json!({"action":{"fleetId":format!("hf_{}",&key[..32]),"id":format!("action_{}",&key[..32]),"ownerMxid":"@owner:example.test","state":"requested"},
+        let fleet = body["existingFleetId"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("hf_{}", &key[..32]));
+        res.render(Json(json!({"action":{"fleetId":fleet,"id":format!("action_{}",&key[..32]),"ownerMxid":"@owner:example.test","state":"requested"},
             "serverName":"example.test","serverOrigin":depot.get::<String>("origin").unwrap()})));
     }
 
     #[tokio::test]
     async fn native_owner_association_retries_frozen_intent_and_refuses_foreign_profile() {
+        association_recovery(None).await;
+    }
+    #[tokio::test]
+    async fn native_legacy_association_keeps_selected_fleet_and_frozen_owner_intent() {
+        association_recovery(Some(format!("hf_{}", "a".repeat(32)))).await;
+    }
+    async fn association_recovery(existing: Option<String>) {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("owner");
         crate::setup::init_state(&state).unwrap();
@@ -372,6 +397,7 @@ mod tests {
             palpo_origin: origin.clone(),
             homeserver: origin.clone(),
             matrix_token_file: state.join("matrix.token"),
+            existing_fleet_id: existing.clone(),
             request_id: "stable_request".into(),
             name: "Owner Hagency".into(),
             coordinator: "@coordinator:example.test".into(),
@@ -390,6 +416,10 @@ mod tests {
         assert!(run(changed).await.is_err());
         assert_eq!(requests.lock().unwrap().len(), 2);
         let fleet = result["fleetId"].as_str().unwrap();
+        if let Some(existing) = &existing {
+            assert_eq!(fleet, existing);
+        }
+
         let saved = read(
             &state
                 .join("palpo-associations")
