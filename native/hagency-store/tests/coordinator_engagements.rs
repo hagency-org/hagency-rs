@@ -78,6 +78,31 @@ fn coordinator_approval_reserves_and_provisions_without_a_console_decision() {
 }
 
 #[test]
+fn project_purpose_is_part_of_the_frozen_coordinator_decision() {
+    let (_dir, mut db) = setup();
+    let definition = json!({"name":"Another project","reason":"Build a useful app","roomId":"!another:example.test","ownerDmRoomId":"!another_private:example.test"});
+    let command:ProjectApproval=serde_json::from_value(json!({"context":context("purpose_decision"),"request":{"id":"purpose_request","revision":1,
+        "serverEngagementId":registration().fleet_id,"projectId":"project_two","owner":"@owner:example.test","requester":"@owner:example.test",
+        "definitionDigest":canonical::digest(&definition).unwrap(),"resourceAllocations":["grant_one"]}})).unwrap();
+    let mut changed = definition.clone();
+    changed["reason"] = json!("Different purpose");
+    assert!(
+        db.approve_coordinator_project(&command, &changed, 1000)
+            .is_err()
+    );
+    assert_eq!(
+        db.approve_coordinator_project(&command, &definition, 1000)
+            .unwrap()
+            .state,
+        contract::ProjectState::Approved
+    );
+    assert!(
+        db.approve_coordinator_project(&command, &changed, 1000)
+            .is_err()
+    );
+}
+
+#[test]
 fn contribution_and_agent_reservations_cannot_exceed_parent_or_child() {
     let (_dir, mut db) = setup();
     let (one, p1) = prepared(&mut db, "one", "One", 200);

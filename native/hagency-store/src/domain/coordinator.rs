@@ -45,6 +45,8 @@ impl ResourceContributionCommand {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectDefinition {
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
     pub room_id: String,
     pub owner_dm_room_id: String,
 }
@@ -841,6 +843,8 @@ impl DomainRepository {
         if detail.name.trim().is_empty()
             || detail.name.len() > 256
             || detail.name.chars().any(char::is_control)
+            || detail.reason.chars().count() > 2000
+            || detail.reason.chars().any(char::is_control)
             || !room(&detail.room_id)
             || !room(&detail.owner_dm_room_id)
             || detail.room_id == detail.owner_dm_room_id
