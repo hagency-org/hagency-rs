@@ -416,7 +416,13 @@ async fn asset(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let alerts_document = matches!(path, "/console/alerts" | "/console/alerts/");
     // The engagements document takes NO query: it is a paginated triage list
     // whose selection happens in-page, not a per-entity view like usage.
-    let engagements_document = matches!(path, "/console/engagements" | "/console/engagements/");
+    let engagements_document = matches!(
+        path,
+        "/console/engagements"
+            | "/console/engagements/"
+            | "/console/server-engagements"
+            | "/console/server-engagements/"
+    );
     let document = editor_document
         || resource_document
         || alerts_document

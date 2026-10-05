@@ -46,6 +46,113 @@ fn prepared(
 }
 
 #[test]
+fn delivered_approval_is_visible_before_matrix_admission_and_terminal_refusal_survives_restart() {
+    let (dir, mut db) = setup();
+    let proof = proof(&request(
+        "pending_agent",
+        "VisiblePending",
+        &resource("pool", "seat", 1000),
+        200,
+    ));
+    db.verify_coordinator_project(&proof, 1000).unwrap();
+    let command:AgentApproval=serde_json::from_value(json!({"context":context("pending_decision"),"request":{"id":"pending_agent","revision":1,
+        "serverEngagementId":registration().fleet_id,"projectId":"project_one","projectRevision":1,"resourceAllocationId":"grant_one",
+        "projectOwner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":canonical::digest(&value(proof.request())).unwrap(),"requestedTokens":200},"allocatedTokens":200})).unwrap();
+    let mut payload = value(proof.request());
+    payload["coordinatorApproval"] = value(&command);
+    let row = db
+        .receive_coordinator_agent(&registration().fleet_id, &payload, 1000)
+        .unwrap();
+    assert_eq!(row["state"], "pending");
+    assert_eq!(row["agentName"], "VisiblePending");
+    assert!(row["agentAllocationId"].is_null());
+    assert!(db.engagement_labels("", None, 16).unwrap().is_empty());
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    assert_eq!(
+        db.coordinator_deliveries(&registration().fleet_id, "", 50)
+            .unwrap(),
+        vec![row.clone()]
+    );
+    assert_eq!(
+        db.receive_coordinator_agent(&registration().fleet_id, &payload, 1001)
+            .unwrap(),
+        row
+    );
+    let mut changed = payload.clone();
+    changed["coordinatorApproval"]["allocatedTokens"] = json!(150);
+    assert!(matches!(
+        db.receive_coordinator_agent(&registration().fleet_id, &changed, 1001),
+        Err(Error::Conflict)
+    ));
+    let mut authority = authority();
+    authority.coordinator = "@replacement:example.test".to_owned().try_into().unwrap();
+    authority.delegation_revision = 2.try_into().unwrap();
+    db.configure_coordinator(&authority).unwrap();
+    let refused = db
+        .receive_coordinator_agent(&registration().fleet_id, &payload, 1002)
+        .unwrap();
+    assert_eq!(refused["state"], "refused");
+    assert_eq!(refused["reason"], "authority_changed");
+    assert_eq!(
+        db.receive_coordinator_agent(&registration().fleet_id, &payload, 1003)
+            .unwrap(),
+        refused
+    );
+    db.admit(&proof, 1003).unwrap();
+    assert!(matches!(
+        db.approve_coordinated_agent(&command, &proof, 1003),
+        Err(Error::State)
+    ));
+}
+
+#[test]
+fn capacity_refusal_has_a_durable_receipt_and_applied_delivery_replays_without_reserving_again() {
+    let (_dir, mut db) = setup();
+    let (command, proof) = prepared(&mut db, "agent_first", "First", 200);
+    let mut payload = value(proof.request());
+    payload["coordinatorApproval"] = value(&command);
+    db.receive_coordinator_agent(&registration().fleet_id, &payload, 1000)
+        .unwrap();
+    let applied = db
+        .approve_coordinated_agent(&command, &proof, 1000)
+        .unwrap();
+    let row = db
+        .receive_coordinator_agent(&registration().fleet_id, &payload, 200000)
+        .unwrap();
+    assert_eq!(row["state"], "applied");
+    assert_eq!(row["agentAllocationId"], applied.id);
+    let (second, proof) = prepared(&mut db, "agent_second", "Second", 200);
+    let mut payload = value(proof.request());
+    payload["coordinatorApproval"] = value(&second);
+    db.receive_coordinator_agent(&registration().fleet_id, &payload, 1000)
+        .unwrap();
+    let error = db
+        .approve_coordinated_agent(&second, &proof, 1000)
+        .unwrap_err();
+    assert!(matches!(error, Error::InsufficientCapacity));
+    let row = db
+        .refuse_coordinator_agent(
+            second.context.command_id.as_str(),
+            coordinator_refusal_reason(&error).unwrap(),
+            1000,
+        )
+        .unwrap();
+    assert_eq!(row["reason"], "insufficient_capacity");
+    db.put_coordinator_resource(&resource_grant(600, 2), 1000)
+        .unwrap();
+    assert_eq!(
+        db.receive_coordinator_agent(&registration().fleet_id, &payload, 1001)
+            .unwrap(),
+        row
+    );
+    assert!(matches!(
+        db.approve_coordinated_agent(&second, &proof, 1001),
+        Err(Error::State)
+    ));
+}
+
+#[test]
 fn coordinator_approval_reserves_and_provisions_without_a_console_decision() {
     let (dir, mut db) = setup();
     let (command, proof) = prepared(&mut db, "agent_one", "Littlewhite", 200);

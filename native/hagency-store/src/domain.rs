@@ -134,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 61;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 62;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -361,6 +361,7 @@ pub struct AgentRosterRow {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngagementLabel {
+    pub coordinator_managed: bool,
     pub id: String,
     pub agent_name: String,
     pub project_name: Option<String>,
@@ -1112,9 +1113,14 @@ impl DomainRepository {
                         61,
                         include_str!("migrations/075-coordinator-engagements.sql"),
                     ),
+                    (
+                        62,
+                        include_str!("migrations/062-coordinator-deliveries.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
+                    "SELECT id,digest,command,definition,state,reason,agent_id,received_at,updated_at FROM coordinator_deliveries LIMIT 0",
                     "SELECT allocated_tokens FROM engagements LIMIT 0",
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
@@ -1521,6 +1527,7 @@ impl DomainRepository {
             let spent_tokens = quota_holds::spend(&self.db, &engagement.id)?;
             let quota_paused = quota_holds::paused(&self.db, &engagement.id)?;
             labels.push(EngagementLabel {
+                coordinator_managed:self.db.query_row("SELECT EXISTS(SELECT 1 FROM coordinator_engagements c JOIN engagements e ON e.fleet_id=c.id WHERE e.id=?1)",[&engagement.id],|r|r.get(0))?,
                 id: engagement.id.clone(),
                 agent_name: engagement.agent_name.as_str().to_owned(),
                 project_name: engagement.project_name.clone(),

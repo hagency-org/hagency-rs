@@ -1,0 +1,48 @@
+import assert from 'node:assert/strict';
+import { createInterface } from 'node:readline';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { chromium } from 'playwright-core';
+const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+const config = JSON.parse((await lines.next()).value);
+const browser = await chromium.launch({ executablePath: process.env.HAGENCY_BROWSER_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+await mkdir(config.output, { recursive: true });
+try {
+  const context = await browser.newContext({ serviceWorkers: 'block', viewport: { width: 1440, height: 1100 } });
+  const page = await context.newPage(); const failures = [];
+  page.on('pageerror', e => failures.push(e.message));
+  await context.route('**/*', async route => {
+    if (new URL(route.request().url()).origin !== config.base) { failures.push('unexpected external request'); await route.abort(); }
+    else await route.continue();
+  });
+  await page.goto(config.url);
+  await page.locator('[data-native-state="ready"][aria-busy="false"]').waitFor();
+  await page.goto(`${config.base}/console/server-engagements/`);
+  await page.getByText('RefusedVisible', { exact: false }).waitFor();
+  await page.getByRole('button', { name: 'Allocate resource', exact: true }).click();
+  await page.getByLabel('Owned resource').selectOption(config.resource);
+  await page.getByLabel('Allocated tokens', { exact: true }).fill('3000');
+  await page.getByLabel('Eligible Matrix project managers').fill('@owner:example.test');
+  await page.getByRole('button', { name: 'Save allocation', exact: true }).click();
+  await page.getByText('Allocation saved. Publication to Palpo is queued.', { exact: true }).waitFor();
+  const row = page.locator('tr').filter({ hasText: config.resource });
+  assert.match(await row.textContent(), /3,000/);
+  await row.getByRole('button', { name: 'Edit allocation' }).click();
+  await page.getByLabel('Allocated tokens', { exact: true }).fill('4000');
+  await page.getByRole('button', { name: 'Save allocation', exact: true }).click();
+  await page.getByText('Allocation saved. Publication to Palpo is queued.', { exact: true }).waitFor();
+  await page.screenshot({ path: join(config.output, 'server-engagement-ledger.png'), fullPage: true });
+  await page.goto(`${config.base}/console/resources/?resource_id=${config.resource}`);
+  const allocation = page.locator('[data-server-engagements] tr').filter({ hasText: config.resource });
+  await allocation.waitFor(); assert.match(await allocation.textContent(), /4,000/);
+  await page.screenshot({ path: join(config.output, 'resource-shared-ledger.png'), fullPage: true });
+  await page.goto(`${config.base}/console/engagements/`);
+  await page.getByRole('heading', { name: 'Agent allocations', exact: true }).waitFor();
+  await page.getByText('RefusedVisible', { exact: false }).waitFor();
+  await page.getByText('project_unavailable', { exact: true }).waitFor();
+  await page.screenshot({ path: join(config.output, 'agent-delivered-refusal.png'), fullPage: true });
+  assert.deepEqual(failures, []);
+  await writeFile(join(config.output, 'report.json'), JSON.stringify({ passed: true, scope: 'Real native console router and domain writer; seeded registration/resource/decision fixture',
+    checks: ['owner creates and increases one engagement resource allocation', 'Resources and Server engagements show the same ledger', 'delivered refusal is visible before agent admission', 'Agent allocations label is distinct from server engagements'] }, null, 2));
+  await context.close();
+} finally { await browser.close(); }

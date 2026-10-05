@@ -61,7 +61,7 @@ existing workflow until reconciled.
 
 ## Implemented integration boundary
 
-The current Rust slice adds schema version 61, typed coordinator commands,
+The current Rust slice adds schema version 62, typed coordinator commands,
 transactional reservations/top-ups, owner contribution HTTP routes, independent
 profile import/launch, native Matrix verification and outbound projections.
 `GET /console/api/server-engagements` and its `/{id}/resources` routes expose the
@@ -108,11 +108,6 @@ It does not claim live Matrix, agent execution or native save-dialog acceptance.
 ## Remaining acceptance work
 
 - Owner delegation changes and semantic legacy reconciliation.
-- Rinx Rust-host/OctoScript screens and manifest, plus the Hagency contribution
-  page consuming the new Rust endpoints.
-- A portal-visible pending record for commands blocked before native Matrix
-  admission. Current native agent rows begin after verified admission; this is
-  not yet the complete "every delivered approved agent" guarantee.
 - Live Matrix notification acceptance and final command outcomes
   for authority expiry or permanently invalid room bindings.
 - Isolated combined Palpo/Rinx/Hagency tests, real Makepad instrumentation and
@@ -120,3 +115,10 @@ It does not claim live Matrix, agent execution or native save-dialog acceptance.
 
 Passing domain, HTTP and transport tests does not establish those user-facing
 acceptance results. Existing production state and services are unchanged.
+
+The native portal now has Server engagements and Agent allocations pages.
+Resources and Server engagements edit the same contribution record and revision.
+The delivered-decision registry precedes Matrix admission, preserves refusals and
+replays after restart, and exposes no private agent instructions. The Chrome
+acceptance test operates the actual native console, edits one allocation twice,
+checks the shared resource view and observes a refused delivered approval.

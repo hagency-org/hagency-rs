@@ -1,5 +1,6 @@
 'use client';
 import PageHead from '@/components/PageHead';
+import NativeServerEngagements from '@/components/NativeServerEngagements';
 import NativeStatusStrip from '@/components/NativeStatusStrip';
 import TechnicalDetails from '@/components/TechnicalDetails';
 import ResourceAgents from '@/components/ResourceAgents';
@@ -55,6 +56,7 @@ export default function NativeResources() {
       {['ready', 'stale'].includes(phase) && (resources.length > 0 || selected) && <a className="btn primary" href={`/console/resources/new/${selected ? `?source_resource_id=${selected}` : ''}`}>{t('nr.createLink')}</a>}
       <NativeStatusStrip />
     </PageHead>
+    <NativeServerEngagements resourceId={selected} />
     <p className="muted notice">{t('nr.localOnly')}</p>
     {/* Creating a resource needs a SOURCE resource to derive from, so with none
         configured this link landed on `nc.noSource` — a dead end two clicks in.

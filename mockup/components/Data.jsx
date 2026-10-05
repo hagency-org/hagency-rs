@@ -5,7 +5,7 @@ import DataStatus from '@/components/DataStatus';
 import { makeDerive } from '@/lib/derive';
 import { fetchLive, CONTRACT_SLICES } from '@/lib/api';
 import * as fixture from '@/lib/mock-data';
-import { NATIVE_MODE, exchangeAccess, fetchNative, fetchResources, resourceView, publishResource, configurationView, configurationSelection, fetchConfiguration, configureResource, logoutNative, selection, alertsView, fetchAlerts, agentsView, fetchAgents, projectSidesView, fetchProjectSides, transitionAlert, approvalsView, accountsView, engagementsView } from '@/lib/native-api';
+import { NATIVE_MODE, serverEngagementsView, exchangeAccess, fetchNative, fetchResources, resourceView, publishResource, configurationView, configurationSelection, fetchConfiguration, configureResource, logoutNative, selection, alertsView, fetchAlerts, agentsView, fetchAgents, projectSidesView, fetchProjectSides, transitionAlert, approvalsView, accountsView, engagementsView } from '@/lib/native-api';
 import { useLiveStream } from '@/lib/native-stream';
 
 /*
@@ -166,7 +166,7 @@ function NativeDataProvider({ children }) {
        * operator paid for and never saw.
        */
       const standalone = !alerts && !roster && !sideList
-        && (approvalsView(window.location) || accountsView(window.location));
+        && (approvalsView(window.location) || accountsView(window.location) || serverEngagementsView(window.location));
       /*
        * The engagements triage page reads the SAME list as /usage but renders no
        * report, so it must not request one. That is the other half of the same

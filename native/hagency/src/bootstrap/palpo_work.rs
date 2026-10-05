@@ -348,12 +348,12 @@ async fn verify_project_request(
     domain: &DomainStore,
     fleet: &str,
     payload: &Value,
-) -> Result<hagency_core::authority::VerifiedRequest, String> {
+) -> Result<hagency_core::authority::VerifiedRequest, AdmissionError> {
     use hagency_core::authority::{
         ProjectRequest, RequestObservation, SourceObservation, verify_request,
     };
-    let request: ProjectRequest =
-        serde_json::from_value(payload.clone()).map_err(|e| format!("request shape: {e}"))?;
+    let request: ProjectRequest = serde_json::from_value(payload.clone())
+        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
     let registration = domain
         .provisioning_registration(fleet.to_owned())
         .await
@@ -424,21 +424,51 @@ async fn verify_project_request(
         owner_room,
     };
     verify_request(&registration, request, observation)
-        .map_err(|e| format!("verification: {}", e.0))
+        .map_err(|_| AdmissionError::Refused("invalid_request"))
 }
 
+#[derive(Debug, thiserror::Error)]
+enum AdmissionError {
+    #[error("{0}")]
+    Pending(String),
+    #[error("{0}")]
+    Refused(&'static str),
+}
+impl From<String> for AdmissionError {
+    fn from(error: String) -> Self {
+        Self::Pending(error)
+    }
+}
+impl From<&str> for AdmissionError {
+    fn from(error: &str) -> Self {
+        Self::Pending(error.into())
+    }
+}
+impl From<AdmissionError> for String {
+    fn from(error: AdmissionError) -> Self {
+        error.to_string()
+    }
+}
+impl From<hagency_store::Error> for AdmissionError {
+    fn from(error: hagency_store::Error) -> Self {
+        match hagency_store::coordinator::coordinator_refusal_reason(&error) {
+            Some(code) => Self::Refused(code),
+            None => Self::Pending(error.to_string()),
+        }
+    }
+}
 async fn admit_request(
     reader: &Reader,
     domain: &DomainStore,
     fleet: &str,
     payload: &Value,
-) -> Result<String, String> {
+) -> Result<String, AdmissionError> {
     let verified = verify_project_request(reader, domain, fleet, payload).await?;
     if payload.get("coordinatorApproval").is_some() {
         domain
             .verify_coordinator_project(verified.clone())
             .await
-            .map_err(|_| "approved project binding is not current".to_owned())?;
+            .map_err(AdmissionError::from)?;
     }
     let engagement = domain
         .admit(
@@ -449,15 +479,15 @@ async fn admit_request(
                 .unwrap_or_default(),
         )
         .await
-        .map_err(|e| format!("admission: {e:?}"))?;
+        .map_err(AdmissionError::from)?;
     if let Some(command) = payload.get("coordinatorApproval") {
         let command: hagency_store::coordinator::AgentApproval =
             serde_json::from_value(command.clone())
-                .map_err(|_| "invalid coordinator decision".to_owned())?;
+                .map_err(|_| AdmissionError::Refused("invalid_request"))?;
         domain
             .approve_coordinated_agent(command, verified)
             .await
-            .map_err(|e| format!("coordinator decision refused: {e}"))?;
+            .map_err(AdmissionError::from)?;
     }
     Ok(engagement.id)
 }
@@ -718,6 +748,25 @@ async fn work_once(
         if let Some(id) = work.payload.get("requestId").and_then(Value::as_str) {
             probes.remember_request(id);
         }
+        if work.payload.get("coordinatorApproval").is_some() {
+            match domain
+                .receive_coordinator_agent(fleet.into(), work.payload.clone())
+                .await
+            {
+                Ok(row) if row["state"] == "refused" || row["state"] == "applied" => {
+                    return match adapter.complete(work.ticket, row).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("palpo decision could not be recorded: {error}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    return Outcome::Later;
+                }
+            }
+        }
         return match admit_request(reader, domain, fleet, &work.payload).await {
             Ok(engagement) => {
                 if work.payload.get("coordinatorApproval").is_some() {
@@ -735,6 +784,26 @@ async fn work_once(
                 {
                     Ok(()) => Outcome::Done,
                     Err(_) => Outcome::Later,
+                }
+            }
+            Err(AdmissionError::Refused(reason))
+                if work.payload.get("coordinatorApproval").is_some() =>
+            {
+                let id = work.payload["coordinatorApproval"]["context"]["commandId"]
+                    .as_str()
+                    .unwrap_or_default();
+                match domain
+                    .refuse_coordinator_agent(id.into(), reason.into())
+                    .await
+                {
+                    Ok(row) => match adapter.complete(work.ticket, row).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    },
+                    Err(_) => {
+                        let _ = adapter.retry_later(work.ticket).await;
+                        Outcome::Later
+                    }
                 }
             }
             Err(reason) => {

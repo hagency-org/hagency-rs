@@ -38,6 +38,85 @@ fn script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../mockup/scripts/native-console-browser.mjs")
 }
+
+#[tokio::test]
+async fn native_coordinator_ledger_browser_shares_resource_allocation_and_shows_delivered_refusals()
+{
+    let address = address();
+    let f = Fixture::new(address, Some(&built()));
+    hagency_store::private::write_new(
+        &f.root.path().join("state/operator.token"),
+        TOKEN.as_bytes(),
+    )
+    .unwrap();
+    let fleet = common::registration().fleet_id;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let policy = json!({"id":fleet,"server":"example.test","owner":"@provider:example.test","coordinator":"@coordinator:example.test",
+        "registrationGeneration":1,"delegationRevision":1,"delegationExpiresAtMs":now+3600000,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true});
+    f.domain
+        .configure_coordinator(serde_json::from_value(policy).unwrap())
+        .await
+        .unwrap();
+    let resource = native_resource("browser_ledger_resource");
+    f.domain.put_resource(resource.clone()).await.unwrap();
+    let definition = common::request("delivered_browser", "RefusedVisible", &resource, 100);
+    let digest =
+        hagency_core::canonical::digest(&serde_json::to_value(&definition).unwrap()).unwrap();
+    let mut payload = serde_json::to_value(definition).unwrap();
+    payload["coordinatorApproval"] = json!({"context":{"version":1,"commandId":"browser_decision","serverEngagementId":fleet,"registrationGeneration":1,
+        "delegationRevision":1,"actor":"@coordinator:example.test","issuedAtMs":now,"expiresAtMs":now+300000},
+        "request":{"id":"delivered_browser","revision":1,"serverEngagementId":fleet,"projectId":"project_one","projectRevision":1,"resourceAllocationId":"browser_grant",
+        "projectOwner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":digest,"requestedTokens":100},"allocatedTokens":100});
+    assert_eq!(
+        f.domain
+            .receive_coordinator_agent(fleet.clone(), payload)
+            .await
+            .unwrap()["state"],
+        "refused"
+    );
+    let server = Server::new(TcpListener::new(address).try_bind().await.unwrap());
+    let handle = server.handle();
+    let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
+    let url = hagency::console::client::access(&f.root.path().join("state"), address)
+        .await
+        .unwrap();
+    let mut child = Command::new(node())
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../mockup/scripts/native-coordinator-ledger-browser.mjs"),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(format!("{}\n",json!({"base":format!("http://{address}"),"url":url,"fleet":fleet,"resource":resource.id(),
+        "output":PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/coordinator-ledger-browser")})).as_bytes()).await.unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let grants = f
+        .domain
+        .server_engagement_resources(fleet, String::new(), 50)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0]["allocatedTokens"], 4000);
+    assert_eq!(grants[0]["revision"], 2);
+    handle.stop_graceful(Some(Duration::from_secs(2)));
+    serving.await.unwrap().unwrap();
+    f.close().await;
+}
 /// Wait for the spawned executable to admit on `address`; when it refuses
 /// to start, SAY WHY — the child's exit status and its stderr. A bare
 /// "process exited" line made #83 need this re-run at all. The stderr read

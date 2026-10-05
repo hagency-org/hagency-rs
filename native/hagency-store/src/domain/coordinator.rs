@@ -14,6 +14,8 @@ type StoredResourceGrant = (
     String,
     String,
 );
+mod deliveries;
+pub use deliveries::terminal_reason as coordinator_refusal_reason;
 
 pub use contract::{
     AgentApproval, ProjectApproval, ProjectGrant, ServerEngagement, TokenTopUpApproval,
@@ -255,6 +257,18 @@ pub(super) fn check_agent(
     proof: &VerifiedRequest,
     now: u64,
 ) -> Result<(), Error> {
+    if db
+        .query_row(
+            "SELECT state FROM coordinator_deliveries WHERE id=?1",
+            [command.context.command_id.as_str()],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .as_deref()
+        == Some("refused")
+    {
+        return Err(Error::State);
+    }
     let legacy = proof.request();
     let authority = current(db, &legacy.fleet_id, now)?;
     let raw: String = db
@@ -364,6 +378,10 @@ pub(super) fn commit_agent(
         command.context.server_engagement_id.as_str(),
         &format!("command_{id}"),
         json!({"kind":"receipt","commandId":id,"commandDigest":command_digest(command)?,"agentId":value.id,"state":"applied"}),
+    )?;
+    tx.execute(
+        "UPDATE coordinator_deliveries SET state='applied',agent_id=?2,reason=NULL WHERE id=?1",
+        params![id, value.id],
     )?;
     Ok(())
 }

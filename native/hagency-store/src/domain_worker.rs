@@ -4403,6 +4403,37 @@ impl DomainStore {
         )
         .await
     }
+    pub async fn receive_coordinator_agent(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.receive_coordinator_agent(&fleet, &payload, writer_time()?)
+        })
+        .await
+    }
+    pub async fn refuse_coordinator_agent(
+        &self,
+        id: String,
+        reason: String,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&(&id, &reason))?, move |db| {
+            db.refuse_coordinator_agent(&id, &reason, writer_time()?)
+        })
+        .await
+    }
+    pub async fn coordinator_deliveries(
+        &self,
+        fleet: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&(&fleet, &after))?, move |db| {
+            db.coordinator_deliveries(&fleet, &after, limit)
+        })
+        .await
+    }
     pub async fn approve_coordinator_top_up(
         &self,
         command: crate::coordinator::TokenTopUpApproval,

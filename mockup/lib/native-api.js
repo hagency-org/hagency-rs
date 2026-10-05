@@ -3,6 +3,7 @@
 import { remember } from './labels';
 
 export const NATIVE_MODE = process.env.NEXT_PUBLIC_HAGENCY_NATIVE_CONSOLE === '1';
+export function serverEngagementsView(location) { return /^\/console\/server-engagements\/?$/.test(location.pathname); }
 const ROOT = '/console';
 
 /* Build-time constants (ADR-145): the workspace version and the binary's
@@ -55,7 +56,7 @@ export function validateEngagements(v) {
    * implementation accident of `slice`, not a designed rule; the native
    * verifier's scalar bound is the contract. */
   if (!object(v, ['engagements', 'next_after']) || !Array.isArray(v.engagements) || v.engagements.length > 16
-    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup', 'agentRemainingTokens', 'ownerBindingRequired', 'createdAtMs', 'endedAtMs', 'allocatedTokens', 'spentTokens', 'quotaPaused'])
+    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup', 'agentRemainingTokens', 'ownerBindingRequired', 'createdAtMs', 'endedAtMs', 'allocatedTokens', 'spentTokens', 'quotaPaused', ...(Object.hasOwn(e, 'coordinatorManaged') ? ['coordinatorManaged'] : [])]) || (Object.hasOwn(e, 'coordinatorManaged') && typeof e.coordinatorManaged !== 'boolean')
       || !id(e.id) || typeof e.agentName !== 'string' || e.agentName.length > 128
       || !(e.projectName === null || (typeof e.projectName === 'string' && [...e.projectName].length <= 255))
       || typeof e.role !== 'string' || e.role.length > 128 || !number(e.requestedTokens) || !STATES.includes(e.state) || !CLEANUP.includes(e.cleanup)
@@ -1186,4 +1187,41 @@ export async function offerResource(model, reasoning, tokens) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ADR-191 owner ledger and delivered approvals. Every call uses the native
+// session adapter above; runtime credentials never enter these read models.
+function engagementPage(value, key, fields) {
+  if (!object(value, [key, 'nextCursor']) || !Array.isArray(value[key]) || value[key].length > 50
+      || !(value.nextCursor === null || id(value.nextCursor))
+      || value[key].some(row => !object(row, fields) || !id(row.id))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchServerEngagements(after = '') {
+  if (after && !id(after)) throw new Error('invalid_selection');
+  return engagementPage(await request(`/api/server-engagements?limit=50${after ? `&after=${after}` : ''}`), 'engagements',
+    ['id', 'serverName', 'ownerMxid', 'coordinatorMxid', 'state', 'registrationGeneration', 'delegationRevision', 'delegationExpiresAtMs']);
+}
+export async function fetchEngagementResources(fleet, after = '') {
+  if (!id(fleet) || after && !id(after)) throw new Error('invalid_selection');
+  return engagementPage(await request(`/api/server-engagements/${fleet}/resources?limit=50${after ? `&after=${after}` : ''}`), 'resources',
+    ['id', 'serverEngagementId', 'resourceId', 'revision', 'allocatedTokens', 'retainedTokens', 'remainingTokens', 'overdrawn', 'period', 'periodKey', 'eligibleManagers']);
+}
+export async function fetchCoordinatorDecisions(fleet, after = '') {
+  if (!id(fleet) || after && !id(after)) throw new Error('invalid_selection');
+  return engagementPage(await request(`/api/server-engagements/${fleet}/decisions?limit=50${after ? `&after=${after}` : ''}`), 'decisions',
+    ['id', 'serverEngagementId', 'requestId', 'agentAllocationId', 'agentName', 'projectId', 'projectOwner', 'decidedBy', 'approvedAtMs', 'resourceAllocationId', 'resourceId', 'requestedTokens', 'approvedTokens', 'state', 'reason', 'receivedAtMs', 'updatedAtMs']);
+}
+export async function fetchAllocationResources(after = '') {
+  if (after && !id(after)) throw new Error('invalid_selection');
+  return validateResources(await request(`/api/resources?limit=16${after ? `&after=${after}` : ''}`));
+}
+export async function contributeEngagementResource(grant) {
+  if (!id(grant.serverEngagementId) || !id(grant.id) || !id(grant.resourceId)
+      || !number(grant.allocatedTokens) || !number(grant.revision) || grant.revision < 1) throw new Error('invalid_selection');
+  const value = await request(`/api/server-engagements/${grant.serverEngagementId}/resources`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(grant),
+  });
+  if (!object(value, ['ok']) || value.ok !== true) throw new Error('invalid_native_response');
+  return value;
 }

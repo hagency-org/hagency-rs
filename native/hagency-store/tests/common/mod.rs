@@ -200,7 +200,7 @@ pub fn remove_upload_schema(db: &rusqlite::Connection) {
 
 /// Remove ADR 0011 additions when a migration fixture reconstructs an older DB.
 pub fn remove_coordinator_schema(db: &rusqlite::Connection) {
-    db.execute_batch("DROP TABLE IF EXISTS coordinator_publications; DROP TABLE IF EXISTS coordinator_commands; DROP TABLE IF EXISTS coordinator_agents; DROP TABLE IF EXISTS coordinator_projects; DROP TABLE IF EXISTS coordinator_resources; DROP TABLE IF EXISTS coordinator_engagements;").unwrap();
+    db.execute_batch("DROP TABLE IF EXISTS coordinator_deliveries; DROP TABLE IF EXISTS coordinator_publications; DROP TABLE IF EXISTS coordinator_commands; DROP TABLE IF EXISTS coordinator_agents; DROP TABLE IF EXISTS coordinator_projects; DROP TABLE IF EXISTS coordinator_resources; DROP TABLE IF EXISTS coordinator_engagements;").unwrap();
 }
 
 pub fn remove_attachment_schema(db: &rusqlite::Connection) {

@@ -7,11 +7,40 @@ use salvo::prelude::*;
 use serde_json::json;
 
 pub(super) fn router() -> Router {
-    Router::with_path("server-engagements").get(list).push(
-        Router::with_path("{id}/resources")
-            .get(resources)
-            .put(contribute),
-    )
+    Router::with_path("server-engagements")
+        .get(list)
+        .push(Router::with_path("{id}/decisions").get(decisions))
+        .push(
+            Router::with_path("{id}/resources")
+                .get(resources)
+                .put(contribute),
+        )
+}
+#[handler]
+async fn decisions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let (after, limit) = match page(req) {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let id = req.param::<String>("id").unwrap_or_default();
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = store.coordinator_deliveries(id, after, limit).await;
+    if let Err(e) = recheck(depot) {
+        failed(res, e);
+        return;
+    }
+    match result {
+        Ok(rows) => bounded(
+            res,
+            &json!({"nextCursor":rows.last().map(|r|&r["id"]),"decisions":rows}),
+        ),
+        Err(e) => failure(res, e),
+    }
 }
 fn page(req: &Request) -> Result<(String, usize), Error> {
     query(req, &["after", "limit"], 300)?;

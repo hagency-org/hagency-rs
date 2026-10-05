@@ -23,6 +23,26 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Delivered approvals remain visible before Matrix admission
+  Test: delivered_approval_is_visible_before_matrix_admission_and_terminal_refusal_survives_restart
+  Given a delivered command whose Matrix admission has not completed
+  When the store restarts or its delegation changes
+  Then the pending decision remains visible and an authority refusal is durable
+
+Scenario: Capacity refusals and successful commands retain their original result
+  Test: capacity_refusal_has_a_durable_receipt_and_applied_delivery_replays_without_reserving_again
+  Given concurrent demand for the last available capacity
+  When a successful or refused command replays after expiry or an allocation increase
+  Then its terminal outcome remains unchanged and no reservation is repeated
+
+Scenario: The actual portal shares one ledger across both resource views
+  Test: native_coordinator_ledger_browser_shares_resource_allocation_and_shows_delivered_refusals
+  Level: integration
+  Test Double: real native console and SQLite writer, isolated seeded registration; Chrome browser
+  Given a verified server engagement and a delivered approval refused before provisioning
+  When the owner edits its allocation through the server-engagement page
+  Then the resource page displays the same ledger and Agent allocations displays the refusal
+
 Scenario: Owner setup retries its original association and refuses another installation's profile
   Test: native_owner_association_retries_frozen_intent_and_refuses_foreign_profile
   Level: integration
