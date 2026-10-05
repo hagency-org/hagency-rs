@@ -196,6 +196,8 @@ await step('4-agents-stop-then-start', async () => {
   // locator PER ROW, so it must be the bare locator — `.first()` would match
   // every row (each has a first stop) and trip strict mode.
   const row = page.locator('tbody tr').filter({ has: stop }).first();
+  const engagement = await row.getAttribute('data-engagement-id');
+  if (!engagement) throw new Error('the lifecycle row has no engagement binding');
   const before = (await row.innerText()).replace(/\s+/g, ' ');
   await stop.first().click();
   await page.locator('[data-stop-action="saved"], [data-stop-action="refused"], [data-stop-action="unknown"]').waitFor({ timeout: 20_000 });
@@ -204,18 +206,17 @@ await step('4-agents-stop-then-start', async () => {
   // The stop is an awaited mutation that refreshes the roster itself, so the
   // state change to observe is the row's own return to serving.
   await ready();
-  const start = page.locator('[data-lifecycle-action="start"]');
-  if ((await start.count()) === 0) {
-    throw new Error(`stopped an agent (row was ${JSON.stringify(before.slice(0, 100))}); the service accepted the stop and the roster re-read, but the row offers no start control — the operator cannot bring the agent back`);
-  }
-  await start.first().click();
+  // The mutation receipt can render before the follow-up roster fetch. Wait
+  // for this exact agent's new control, not another ready panel or agent row.
+  const currentRow = page.locator(`tbody tr[data-engagement-id="${engagement}"]`);
+  const start = currentRow.locator('[data-lifecycle-action="start"]');
+  await start.waitFor({ state: 'visible', timeout: 20_000 });
+  await start.click();
   await page.locator('[data-start-action="saved"], [data-start-action="refused"], [data-start-action="unknown"]').waitFor({ timeout: 20_000 });
   const restarted = await page.locator('[data-start-action]').first().getAttribute('data-start-action');
   if (restarted !== 'saved') throw new Error(`the start returned "${restarted}"`);
   await ready();
-  if ((await page.locator('[data-lifecycle-action="stop"]').count()) === 0) {
-    throw new Error('the agent was started but no Stop control came back — it is not serving again');
-  }
+  await currentRow.locator('[data-lifecycle-action="stop"]').waitFor({ state: 'visible', timeout: 20_000 });
   return 'stopped an agent and started it again';
 });
 

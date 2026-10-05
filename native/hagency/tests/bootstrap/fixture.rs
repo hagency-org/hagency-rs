@@ -73,12 +73,14 @@ pub struct Fixture {
     /// a remote refusal or another account's identity. The harness's fault,
     /// injected at the homeserver, never in the product.
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fault: Option<Fault>,
     /// When each whoami arrived, for the backoff scenario.
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub whoami_at: Vec<std::time::Instant>,
 }
 /// A fault the fixture's homeserver answers with (ADR-183 scenarios).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug)]
 pub enum Fault {
     /// Every whoami answers this HTTP status.
@@ -129,6 +131,7 @@ impl Fixture {
     /// backend-v2.js:2057-2075). The settings ride the production admission
     /// path (`agentDefinition` on the verified request) — not a serve-level
     /// or host-level switch.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub async fn with_worktree_agent(
         fenced: bool,
         worktrees_dir: PathBuf,
@@ -330,6 +333,7 @@ impl Fixture {
             fake,
             address,
             served: 0,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             fault: None,
             whoami_at: Vec::new(),
         }

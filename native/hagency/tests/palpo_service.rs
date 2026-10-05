@@ -41,7 +41,10 @@ async fn retirement_recovery(cancel_reply: bool) {
             )
             .unwrap();
         }
-        let mut child = f.launch(true);
+        let child = f.launch(true);
+        #[cfg(unix)]
+        let mut child = child;
+        #[cfg(unix)]
         let mut stopped = false;
         let until = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut identity_calls = 0;
@@ -68,8 +71,10 @@ async fn retirement_recovery(cancel_reply: bool) {
                 if !restart {
                     if cancel_reply {
                         #[cfg(unix)]
-                        child.graceful().await;
-                        stopped = true;
+                        {
+                            child.graceful().await;
+                            stopped = true;
+                        }
                         drop(request);
                     } else {
                         request.json(502, json!({}));
@@ -192,7 +197,9 @@ async fn native_palpo_worker_publishes_terminal_project_and_top_up_refusals() {
             "definitionDigest":"a".repeat(64),"expectedAllocatedTokens":200,"requestedAdditionalTokens":50},
         "additionalTokens":50}});
     let commands = [project, top_up];
-    let mut child = f.launch(true);
+    let child = f.launch(true);
+    #[cfg(unix)]
+    let mut child = child;
     let mut sent = 0;
     let mut refusals = std::collections::BTreeMap::new();
     let until = tokio::time::Instant::now() + Duration::from_secs(45);
@@ -584,7 +591,9 @@ async fn native_project_setup_failure_and_owner_retry_preserve_the_original_appr
             vec![original.clone()]
         };
         let expected = if restart { "ready" } else { "failed" };
-        let mut child = f.launch(true);
+        let child = f.launch(true);
+        #[cfg(unix)]
+        let mut child = child;
         let mut sent = 0;
         let mut outcome = None;
         let until = tokio::time::Instant::now() + Duration::from_secs(45);
