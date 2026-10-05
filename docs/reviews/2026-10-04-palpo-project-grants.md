@@ -140,3 +140,37 @@ No production activation, visible client restart, live Matrix mutation or new
 Makepad/mobile acceptance is part of this follow-up. Hagency-originated
 association and Palpo/Rinx project-budget forms, assigned-admin Inbox decisions
 and their result projection remain before capability advertisement.
+
+## Scoped retirement and lifecycle follow-up
+
+Palpo/Rinx now have owner removal, assigned-admin decisions and token-increase
+forms in the companion branches. Removal uses the existing authorized
+`revoke_agent` command. A fresh command retries only a definitively failed local
+retirement effect; replaying an old business receipt cannot repeat physical work.
+Uncertain effects remain for inspection.
+
+The status publisher reads the Matrix identity recorded during provisioning,
+including after revocation, rather than constructing an ID. Lifecycle reports
+include local cleanup, attempt fence, runtime custody, independent Matrix
+retirement, allocation, observed usage lower bound and quota pause. Unknown usage
+remains null. Local cleanup alone never proves account deactivation: outstanding
+dispatch custody or an open process fence prevents remote retirement.
+
+The fixed machine `retire-agent` endpoint must confirm the exact fleet, request,
+identity, empty rooms, deactivation, App Service denial and local-stop claim.
+Schema 63 journals that exact target after a transaction-scoped registration and
+custody recheck. Lost responses retry identical content; conflicting journals and
+registration rotation fail. One retirement call per acknowledged status page
+rotates across full scans so a refused identity cannot starve its neighbours.
+
+Validation: the store/Palpo regression run passed **642 tests, 50 ignored, zero
+failures**. Final focused lifecycle, command and TLS tests cover never-provisioned
+agents, active dispatch custody, failed versus uncertain cleanup, immutable retry
+receipts, schema upgrade, conflicting journals, mismatched remote replies,
+response loss/restart and registration changes. The native host scheduling test
+also builds the production consumer. Companion Palpo passes 122 backend tests.
+
+These tests use isolated stores and explicit Matrix/HTTP fixtures. Actual
+cross-service lifecycle acceptance, final accounting/refund semantics,
+Hagency-originated association, mobile acceptance and release remain. The
+workflow capability is still disabled; production services are unchanged.

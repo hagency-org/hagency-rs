@@ -52,6 +52,49 @@ pub struct Adapter {
     receipts: Option<std::sync::Arc<dyn ProbeReceipts>>,
 }
 impl Adapter {
+    /// Revoke the exact observed Matrix identity only after local retirement
+    /// and process custody are settled. No script-supplied MXID is accepted.
+    pub async fn retire_project_agent(
+        &self,
+        id: String,
+        domain: &hagency_store::DomainStore,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        let issuer = domain
+            .provisioning_registration(self.registration.fleet_id.clone())
+            .await?;
+        let target = domain.palpo_retirement_target(issuer.clone(), id).await?;
+        let body =
+            serde_json::json!({"requestId": target.request_id, "agentMxid": target.agent_mxid,
+            "endedAt": target.ended_at, "localStopped": true})
+            .to_string();
+        let answer = self
+            .http
+            .request("retire-agent", None, Some(body), cancel)
+            .await?
+            .success()?;
+        let agent = &answer["agent"];
+        if answer["ok"] != true
+            || answer["fleetId"] != target.fleet_id
+            || answer["requestId"] != target.request_id
+            || agent["mxid"] != target.agent_mxid
+            || agent["state"] != "retired"
+            || agent["matrixIdentity"] != "deactivated"
+            || agent["appserviceAccess"] != "revoked"
+            || agent["localTaskStop"] != "confirmed"
+            || agent["joinedRooms"] != serde_json::json!([])
+        {
+            return Err(Error::Wire);
+        }
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        domain.confirm_palpo_retirement(issuer, target).await?;
+        Ok(())
+    }
     /// Read fresh business authority from the configured machine endpoint.
     /// A queued delivery alone cannot preserve a demoted administrator's rights.
     pub async fn authorize_project_command(

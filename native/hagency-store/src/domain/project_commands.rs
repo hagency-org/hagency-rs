@@ -210,6 +210,10 @@ fn execute(
             }
             let agent = super::read_engagement(tx, engagement_id)?;
             if agent.state == hagency_core::project::EngagementState::Revoked {
+                let failed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM effects WHERE engagement_id=?1 AND kind='retire' AND state='failed')", [engagement_id], |r| r.get(0))?;
+                if failed {
+                    return agent_result(super::retry_cleanup_transaction(tx, &id, engagement_id)?);
+                }
                 return agent_result(agent);
             }
             agent_result(super::end_transaction(tx, &id, engagement_id, true, now)?)

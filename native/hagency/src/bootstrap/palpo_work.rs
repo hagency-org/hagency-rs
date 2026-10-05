@@ -58,6 +58,7 @@ pub(super) struct Probes {
     lock: Mutex<()>,
     statuses: Mutex<Vec<Value>>,
     status_cursor: Mutex<String>,
+    retirement_round: Mutex<usize>,
 }
 impl Probes {
     pub(super) fn new(state: &Path) -> Arc<Self> {
@@ -68,6 +69,7 @@ impl Probes {
             lock: Mutex::new(()),
             statuses: Mutex::new(Vec::new()),
             status_cursor: Mutex::new(String::new()),
+            retirement_round: Mutex::new(0),
         })
     }
     fn read(path: &Path) -> Vec<Value> {
@@ -826,11 +828,36 @@ async fn approval_invites_once(reader: &Reader, bot: &str, fleet: &str, server: 
     }
 }
 
+fn retirement_candidate<T>(candidates: &[T], round: usize) -> Option<&T> {
+    (!candidates.is_empty()).then(|| &candidates[round % candidates.len()])
+}
+
+#[test]
+fn retirement_pages_do_not_starve_behind_a_refused_identity() {
+    let pages = [vec!["refused-a", "b"], vec!["refused-c", "d"]];
+    for page in pages {
+        assert_eq!(
+            (0..2)
+                .map(|round| *retirement_candidate(&page, round).unwrap())
+                .collect::<Vec<_>>(),
+            page
+        );
+    }
+    assert_eq!(retirement_candidate::<u8>(&[], 1), None);
+}
+
 /// The fleet's request statuses in the TS `fleetPublicEngagement` shape, observed
 /// now. Rust `reserved` is TS's approved-and-fulfilling `active` with an open
 /// fulfillment phase; `ready` needs an active, bound agent (TS: state active and
 /// bound), which the provisioning slice establishes.
-async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, reader: &Reader) {
+async fn refresh_statuses(
+    adapter: &Adapter,
+    domain: &DomainStore,
+    probes: &Probes,
+    fleet: &str,
+    reader: &Reader,
+    cancel: &CancellationToken,
+) {
     use hagency_core::project::EngagementState as S;
     // Hold each page until its actual publication is acknowledged. Continuously
     // replacing it while transport retries would starve later agents forever.
@@ -856,8 +883,17 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         .lock()
         .unwrap_or_else(|e| e.into_inner()) =
         engagements.last().map(|e| e.id.clone()).unwrap_or_default();
+    if engagements.is_empty() {
+        let mut round = probes
+            .retirement_round
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *round = round.wrapping_add(1);
+        return;
+    }
     let observed = now_iso();
     let mut out = Vec::new();
+    let mut retirements = Vec::new();
     for e in engagements {
         if !probes.palpo_request(&e.request_id)
             && !domain
@@ -876,6 +912,16 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         let Ok(c) = serde_json::from_str::<Value>(&context) else {
             continue;
         };
+        let Ok(lifecycle) = domain
+            .palpo_agent_lifecycle(registration.clone(), e.id.clone())
+            .await
+        else {
+            continue;
+        };
+        if lifecycle.runtime_stopped && lifecycle.agent_mxid.is_some() && !lifecycle.matrix_retired
+        {
+            retirements.push((e.id.clone(), out.len()));
+        }
         let resource = domain
             .resource_configuration(e.resource_id.clone())
             .await
@@ -893,14 +939,10 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         // The serving identity is the fleet-namespaced account the App Service
         // factory created for this engagement; `ready` is TS's rule (active and
         // bound) plus the observed fact the agent is joined in the target room.
-        let server = reader
-            .user
-            .split_once(':')
-            .map(|(_, s)| s)
-            .unwrap_or_default();
-        let agent = format!("@{fleet}_{}:{server}", e.id);
+        let agent = lifecycle.agent_mxid.clone();
         let target = c["targetRoomId"].as_str().unwrap_or_default().to_owned();
         let joined = bound
+            && agent.is_some()
             && reader
                 .get(&[
                     "_matrix",
@@ -916,7 +958,11 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
                 .is_some_and(|m| {
                     m.pointer(&format!(
                         "/joined/{}",
-                        agent.replace('~', "~0").replace('/', "~1")
+                        agent
+                            .as_deref()
+                            .unwrap_or_default()
+                            .replace('~', "~0")
+                            .replace('/', "~1")
                     ))
                     .is_some()
                 });
@@ -925,12 +971,31 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
             "targetProjectId": c["targetProjectId"], "targetRoomId": c["targetRoomId"],
             "sourceRoomId": c["sourceRoomId"], "sourceEventId": c["sourceEventId"], "role": e.role,
             "agentDefinition": c["agentDefinition"], "requestedTokens": c["requestedTokens"],
-            "allocatedTokens": allocated, "agentMxid": if bound { json!(agent) } else { Value::Null }, "bound": bound,
+            "allocatedTokens": allocated, "agentMxid": agent, "bound": bound,
             "serving": resource.map(|r| json!({"framework": r.framework, "model": r.model,
                 "reasoning": r.reasoning})),
             "fulfillment": phase.map(|p| json!({"phase": p, "incomplete": false})),
             "ready": joined, "decidedAt": null, "endedAt": null, "observedAt": observed,
+            "lifecycle": lifecycle,
         }));
+    }
+    // One bounded call per page; rotate across each complete status scan so a
+    // permanently refused first identity cannot starve the rest of that page.
+    // Lost responses repeat the exact target, and only verified replies journal.
+    let round = *probes
+        .retirement_round
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some((id, index)) = retirement_candidate(&retirements, round) {
+        if adapter
+            .retire_project_agent(id.clone(), domain, cancel)
+            .await
+            .is_ok()
+        {
+            if let Ok(latest) = domain.palpo_agent_lifecycle(registration, id.clone()).await {
+                out[*index]["lifecycle"] = json!(latest);
+            }
+        }
     }
     *probes.statuses.lock().unwrap_or_else(|e| e.into_inner()) = out;
 }
@@ -963,7 +1028,7 @@ pub(super) async fn run(
     // A work item that could not finish is retried on a slower clock: each
     // retry is a new custody attempt row, and those are finite.
     while !cancel.is_cancelled() {
-        refresh_statuses(domain, probes, fleet, &reader).await;
+        refresh_statuses(adapter, domain, probes, fleet, &reader, cancel).await;
         if !bot.is_empty() && std::time::Instant::now() >= invites_due {
             approval_invites_once(&reader, &bot, fleet, &server).await;
             invites_due = std::time::Instant::now() + Duration::from_secs(15);

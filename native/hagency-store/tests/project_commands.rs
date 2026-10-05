@@ -88,6 +88,90 @@ fn proof_for_agent(_db: &mut DomainRepository) -> VerifiedRequest {
     request.rate_per_day = Some(100.try_into().unwrap());
     proof(&request)
 }
+
+#[test]
+fn fresh_removal_command_retries_only_definitively_failed_cleanup() {
+    use hagency_store::EffectOutcome;
+    let (_dir, mut db, grant) = setup();
+    let reserve = command(
+        "reserve",
+        ProjectOperation::ReserveProject {
+            grant: grant.clone(),
+        },
+    );
+    apply(&mut db, &reserve, None);
+    let proof = proof_for_agent(&mut db);
+    let id = proof.request().engagement_id().unwrap();
+    let approve = command(
+        "approve",
+        ProjectOperation::ApproveAgent {
+            grant_id: grant.id.clone(),
+            grant_revision: 1,
+            request: proof.request().clone(),
+            allocated_tokens: 200,
+        },
+    );
+    apply(&mut db, &approve, Some(&proof));
+    let effect = db
+        .claim_effect_for_at(&format!("provision_{id}"), 1001)
+        .unwrap()
+        .unwrap();
+    db.observe_effect_at(
+        &effect.id,
+        effect.fence,
+        &EffectOutcome::Applied {
+            receipt: "provisioned".into(),
+        },
+        1002,
+    )
+    .unwrap();
+    let operation = ProjectOperation::RevokeAgent {
+        grant_id: grant.id,
+        grant_revision: 1,
+        engagement_id: id.clone(),
+    };
+    let remove = command("remove", operation.clone());
+    let original_receipt = apply(&mut db, &remove, None);
+    let effect = db
+        .claim_effect_for_at(&format!("retire_{id}"), 1003)
+        .unwrap()
+        .unwrap();
+    db.observe_effect_at(&effect.id, effect.fence, &EffectOutcome::Unknown, 1004)
+        .unwrap();
+    let uncertain = command("do_not_retry_uncertain", operation.clone());
+    apply(&mut db, &uncertain, None);
+    assert!(db.claim_effect_for_at(&effect.id, 1005).unwrap().is_none());
+    db.observe_effect_at(
+        &effect.id,
+        effect.fence,
+        &EffectOutcome::NotApplied {
+            receipt: "definitely not performed".into(),
+        },
+        1006,
+    )
+    .unwrap();
+    // Replaying the original immutable receipt does not reset a physical effect.
+    assert_eq!(apply(&mut db, &remove, None), original_receipt);
+    assert!(db.claim_effect_for_at(&effect.id, 1007).unwrap().is_none());
+    let retry = command("retry_failed_cleanup", operation);
+    let receipt = apply(&mut db, &retry, None);
+    assert!(
+        matches!(&receipt.outcome, ProjectOutcome::Applied { result: ProjectResult::Agent { state, .. } } if state == "revoked")
+    );
+    let fresh = db.claim_effect_for_at(&effect.id, 1008).unwrap().unwrap();
+    assert!(fresh.fence > effect.fence);
+    db.observe_effect_at(
+        &fresh.id,
+        fresh.fence,
+        &EffectOutcome::NotApplied {
+            receipt: "still unavailable".into(),
+        },
+        1009,
+    )
+    .unwrap();
+    assert_eq!(apply(&mut db, &retry, None), receipt);
+    assert!(db.claim_effect_for_at(&fresh.id, 1010).unwrap().is_none());
+}
 #[test]
 fn reserve_approve_and_top_up_have_durable_business_receipts() {
     let (dir, mut db, grant) = setup();

@@ -30,7 +30,9 @@ pub use agent_message_leftovers::{
 mod approvals;
 mod engagement_retention;
 mod engagement_terms;
+mod palpo_lifecycle;
 mod project_commands;
+pub use palpo_lifecycle::{PalpoAgentLifecycle, PalpoRetirementTarget};
 pub(crate) mod project_grants;
 pub use approvals::card::PrivateApprovalCard;
 mod attachments;
@@ -136,7 +138,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 62;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 63;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -1091,6 +1093,7 @@ impl DomainRepository {
                     (60, include_str!("migrations/074-joined-rooms.sql")),
                     (61, include_str!("migrations/075-project-grants.sql")),
                     (62, include_str!("migrations/076-project-commands.sql")),
+                    (63, include_str!("migrations/077-palpo-retirement.sql")),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
@@ -2174,19 +2177,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let digest = decision_digest("retry_cleanup", id)?;
-        if let Some(value) = replay_decision(&tx, command_id, &digest)? {
-            return Ok(value);
-        }
-        let value = read_engagement(&tx, id)?;
-        if value.state != EngagementState::Revoked {
-            return Err(Error::State);
-        }
-        let changed=tx.execute("UPDATE effects SET state='pending',outcome_digest=NULL WHERE engagement_id=?1 AND kind='retire' AND state='failed'",[id])?;
-        if changed != 1 {
-            return Err(Error::State);
-        }
-        record_decision(&tx, command_id, &digest, &value, None)?;
+        let value = retry_cleanup_transaction(&tx, command_id, id)?;
         tx.commit()?;
         Ok(value)
     }
@@ -2489,6 +2480,26 @@ fn end_transaction(
             "engagement.rejected"
         }),
     )?;
+    Ok(value)
+}
+fn retry_cleanup_transaction(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    id: &str,
+) -> Result<Engagement, Error> {
+    let digest = decision_digest("retry_cleanup", id)?;
+    if let Some(value) = replay_decision(tx, command_id, &digest)? {
+        return Ok(value);
+    }
+    let value = read_engagement(tx, id)?;
+    if value.state != EngagementState::Revoked {
+        return Err(Error::State);
+    }
+    let changed=tx.execute("UPDATE effects SET state='pending',outcome_digest=NULL WHERE engagement_id=?1 AND kind='retire' AND state='failed'",[id])?;
+    if changed != 1 {
+        return Err(Error::State);
+    }
+    record_decision(tx, command_id, &digest, &value, None)?;
     Ok(value)
 }
 // Shared effect kernel: scoped factory activation and ordinary observations

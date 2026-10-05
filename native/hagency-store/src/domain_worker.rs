@@ -4422,6 +4422,36 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn palpo_agent_lifecycle(
+        &self,
+        issuer: Registration,
+        id: String,
+    ) -> Result<crate::PalpoAgentLifecycle, Error> {
+        self.call(weight(&(&issuer, &id))?, move |db| {
+            db.palpo_agent_lifecycle(&issuer, &id)
+        })
+        .await
+    }
+    pub async fn palpo_retirement_target(
+        &self,
+        issuer: Registration,
+        id: String,
+    ) -> Result<crate::PalpoRetirementTarget, Error> {
+        self.call(weight(&(&issuer, &id))?, move |db| {
+            db.palpo_retirement_target(&issuer, &id)
+        })
+        .await
+    }
+    pub async fn confirm_palpo_retirement(
+        &self,
+        issuer: Registration,
+        target: crate::PalpoRetirementTarget,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&issuer, &target))?, move |db| {
+            db.confirm_palpo_retirement(&issuer, &target, writer_time()?)
+        })
+        .await
+    }
     pub async fn pending_project_receipts(
         &self,
         issuer: Registration,

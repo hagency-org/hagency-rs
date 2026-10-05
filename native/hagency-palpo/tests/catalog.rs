@@ -88,6 +88,244 @@ fn offers(v: &Value) -> &[Value] {
     v["capabilities"]["offers"].as_array().unwrap()
 }
 
+async fn retired_agent(ctx: &Context) -> hagency_store::PalpoRetirementTarget {
+    use hagency_core::{authority::*, replies::MatrixTransportObservation};
+    use hagency_store::EffectOutcome;
+    use std::collections::{BTreeMap, BTreeSet};
+    let reg = domain_registration();
+    let request: ProjectRequest = serde_json::from_value(json!({
+        "v":1,"fleetId":FLEET,"requestId":"retirement_request",
+        "requesterMxid":"@owner:matrix.example.test","sourceRoomId":reg.reception_room_id,
+        "targetProjectId":"project_one","targetRoomId":"!project:matrix.example.test",
+        "ownerMxid":"@owner:matrix.example.test","ownerDmRoomId":"!private:matrix.example.test",
+        "role":"coding","requestedTokens":100,"ratePerDay":null,"authVersion":1,
+        "sourceEventId":"$retirement_request","agentDefinition":{"name":"Worker","resourceId":resource().id()}
+    })).unwrap();
+    let room = |id: &str, members: Vec<String>| RoomObservation {
+        room_id: id.into(),
+        joined: BTreeSet::from_iter(members),
+        invite_only: true,
+        encryption: None,
+        powers: BTreeMap::new(),
+        default_power: 0,
+        invite_power: 0,
+        binding: None,
+        name: None,
+    };
+    let reception = room(
+        &request.source_room_id,
+        vec![
+            request.requester_mxid.clone(),
+            reg.representative_mxid.clone(),
+        ],
+    );
+    let mut project = room(
+        &request.target_room_id,
+        vec![request.owner_mxid.clone(), reg.representative_mxid.clone()],
+    );
+    project.powers.insert(request.owner_mxid.clone(), 100);
+    project.name = Some("Retirement fixture".into());
+    project.binding = Some(
+        json!({"v":1,"fleetId":FLEET,"purpose":"project","projectId":request.target_project_id,"ownerMxid":request.owner_mxid,"authVersion":1}),
+    );
+    let mut owner_room = room(
+        &request.owner_dm_room_id,
+        vec![request.owner_mxid.clone(), reg.approval_bot_mxid.clone()],
+    );
+    owner_room.encryption = Some("m.megolm.v1.aes-sha2".into());
+    let mut content = serde_json::to_value(&request).unwrap();
+    content.as_object_mut().unwrap().remove("ownerDmRoomId");
+    content.as_object_mut().unwrap().remove("sourceEventId");
+    let proof = verify_request(
+        &reg,
+        request.clone(),
+        RequestObservation {
+            registration_generation: reg.generation,
+            observed_at_ms: now(),
+            source: SourceObservation {
+                event_id: request.source_event_id,
+                room_id: request.source_room_id,
+                sender: request.requester_mxid,
+                event_type: "com.hagency.engagement.request.v1".into(),
+                content,
+            },
+            reception,
+            project,
+            owner_room,
+        },
+    )
+    .unwrap();
+    ctx.domain.put_resource(resource()).await.unwrap();
+    let id = ctx.domain.admit(proof.clone(), now()).await.unwrap().id;
+    ctx.domain
+        .approve("approve".into(), proof, now())
+        .await
+        .unwrap();
+    let effect = ctx.domain.claim_effect().await.unwrap().unwrap();
+    ctx.domain
+        .observe_effect(
+            effect.id,
+            effect.fence,
+            EffectOutcome::Applied {
+                receipt: "provisioned".into(),
+            },
+        )
+        .await
+        .unwrap();
+    ctx.domain
+        .observe_matrix_transport(MatrixTransportObservation {
+            engagement_id: id.clone(),
+            registration_generation: reg.generation,
+            generation: 1,
+            sender_mxid: format!("@{FLEET}_agent_recorded:matrix.example.test"),
+            device_id: "DEVICE".into(),
+        })
+        .await
+        .unwrap();
+    ctx.domain
+        .revoke("revoke".into(), id.clone())
+        .await
+        .unwrap();
+    let effect = ctx
+        .domain
+        .claim_effect_for(format!("retire_{id}"))
+        .await
+        .unwrap()
+        .unwrap();
+    ctx.domain
+        .observe_effect(
+            effect.id,
+            effect.fence,
+            EffectOutcome::Applied {
+                receipt: "left rooms and logged out".into(),
+            },
+        )
+        .await
+        .unwrap();
+    ctx.domain.palpo_retirement_target(reg, id).await.unwrap()
+}
+
+fn retirement_answer(target: &hagency_store::PalpoRetirementTarget) -> Value {
+    json!({"ok":true,"fleetId":target.fleet_id,"requestId":target.request_id,"agent":{
+        "mxid":target.agent_mxid,"state":"retired","matrixIdentity":"deactivated",
+        "appserviceAccess":"revoked","localTaskStop":"confirmed","joinedRooms":[]}})
+}
+
+#[tokio::test]
+async fn retirement_requires_exact_remote_facts_and_survives_lost_response_and_restart() {
+    let mut fake = Fake::start(true).await;
+    let ctx = Context::new(&fake.endpoint).await;
+    let target = retired_agent(&ctx).await;
+    let cancel = CancellationToken::new();
+    for field in [
+        "/ok",
+        "/fleetId",
+        "/requestId",
+        "/agent/mxid",
+        "/agent/state",
+        "/agent/matrixIdentity",
+        "/agent/appserviceAccess",
+        "/agent/localTaskStop",
+        "/agent/joinedRooms",
+    ] {
+        let (result, ()) = tokio::join!(
+            ctx.adapter
+                .retire_project_agent(target.engagement_id.clone(), &ctx.domain, &cancel),
+            async {
+                let request = fake.next().await;
+                assert!(request.target.ends_with("/retire-agent"));
+                assert_eq!(request.method, "POST");
+                assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
+                assert_eq!(request.headers["x-hagency-generation"], "31");
+                assert_eq!(
+                    request.value(),
+                    json!({"requestId":target.request_id,"agentMxid":target.agent_mxid,"endedAt":target.ended_at,"localStopped":true})
+                );
+                let mut answer = retirement_answer(&target);
+                *answer.pointer_mut(field).unwrap() = Value::Null;
+                request.json(200, answer);
+            }
+        );
+        assert_eq!(result, Err(Error::Wire), "{field}");
+        assert!(
+            !ctx.domain
+                .palpo_agent_lifecycle(domain_registration(), target.engagement_id.clone())
+                .await
+                .unwrap()
+                .matrix_retired
+        );
+    }
+    let mut body = Vec::new();
+    let (lost, ()) = tokio::join!(
+        ctx.adapter
+            .retire_project_agent(target.engagement_id.clone(), &ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            body = request.body.clone();
+            drop(request);
+        }
+    );
+    assert_eq!(lost, Err(Error::Transport));
+    let ctx = ctx.restart(&fake.endpoint).await;
+    assert!(
+        !ctx.domain
+            .palpo_agent_lifecycle(domain_registration(), target.engagement_id.clone())
+            .await
+            .unwrap()
+            .matrix_retired
+    );
+    let (retry, ()) = tokio::join!(
+        ctx.adapter
+            .retire_project_agent(target.engagement_id.clone(), &ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            assert_eq!(request.body, body);
+            request.json(200, retirement_answer(&target));
+        }
+    );
+    assert_eq!(retry, Ok(()));
+    let ctx = ctx.restart(&fake.endpoint).await;
+    assert!(
+        ctx.domain
+            .palpo_agent_lifecycle(domain_registration(), target.engagement_id)
+            .await
+            .unwrap()
+            .matrix_retired
+    );
+    ctx.close().await;
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn rotation_during_retirement_prevents_a_stale_confirmation() {
+    let mut fake = Fake::start(true).await;
+    let ctx = Context::new(&fake.endpoint).await;
+    let target = retired_agent(&ctx).await;
+    let cancel = CancellationToken::new();
+    let (result, ()) = tokio::join!(
+        ctx.adapter
+            .retire_project_agent(target.engagement_id.clone(), &ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            let mut registration = domain_registration();
+            registration.generation += 1;
+            ctx.domain.register(registration).await.unwrap();
+            request.json(200, retirement_answer(&target));
+        }
+    );
+    assert_eq!(result, Err(Error::Generation));
+    let sql =
+        rusqlite::Connection::open(ctx._domain_dir.path().join("private/domain.sqlite3")).unwrap();
+    assert_eq!(
+        sql.query_row("SELECT COUNT(*) FROM palpo_agent_retirements", [], |r| r
+            .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    ctx.close().await;
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn contribution_pages_resume_after_lost_ack_and_restart_without_skipping_rows() {
     use hagency_core::project_grants::{GrantLimits, ResourceDelegation};
