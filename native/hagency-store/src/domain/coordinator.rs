@@ -17,11 +17,13 @@ type StoredResourceGrant = (
 mod delegations;
 mod deliveries;
 mod lifecycle;
+mod project_setup;
 mod refusals;
 mod settlements;
 pub use delegations::{DelegationChange, DelegationCommand, DelegationState};
 pub use deliveries::terminal_reason as coordinator_refusal_reason;
 pub use lifecycle::{AgentControl, AgentOperation};
+pub use project_setup::{ProjectSetupCommand, ProjectSetupWork};
 pub use settlements::{FinalUsage, SettlementCommand};
 
 pub use contract::{

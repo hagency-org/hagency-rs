@@ -18,6 +18,15 @@ fn describe(fleet: &str, payload: &Value) -> Result<(String, String, Value), Err
                 canonical,
             )
         }
+        Some("coordinator_project_setup") => {
+            let command: ProjectSetupCommand = serde_json::from_value(payload["command"].clone())?;
+            let canonical = json!({"operation":"coordinator_project_setup","command":command});
+            (
+                command.context,
+                json!({"projectId":command.project_id,"operation":"project_setup"}),
+                canonical,
+            )
+        }
         Some("coordinator_token_top_up") => {
             let command: TokenTopUpApproval = serde_json::from_value(payload["command"].clone())?;
             if command.request.server_engagement_id.as_str() != fleet {

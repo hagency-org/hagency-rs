@@ -61,7 +61,7 @@ existing workflow until reconciled.
 
 ## Implemented integration boundary
 
-The current Rust slice adds schema version 66, typed coordinator commands,
+The current Rust slice adds schema version 67, typed coordinator commands,
 transactional reservations/top-ups, owner contribution HTTP routes, independent
 profile import/launch, native Matrix verification and outbound projections.
 `GET /console/api/server-engagements` and its `/{id}/resources` routes expose the
@@ -207,3 +207,19 @@ replay, scope denial and unchanged capacity pass store tests; the bounded HTTPS
 client test verifies custom-name replacement and rejects incorrect read-back.
 The native Rinx run `db6e9f0cfe45422c801846e432a3bdda` passed 21 fixture-backed
 checks. Console assets built into `target/coordinator-console-v66` (167 files).
+
+Schema 67 adds durable project setup attempts and status publications. The
+original coordinator decision is retained before any room operation. Failed
+joins/read-back are published as bounded setup failures; project/resource owners
+or the current coordinator may send a fresh `coordinatorProjectSetupV1` recovery
+command referencing the original approval. Every attempt binds the current
+registration, delegation and exact project revision. Old completed attempts
+replay without Matrix writes, and superseded attempts cannot publish readiness.
+No recovery creates another grant or capacity reservation. A real native-process
+test fails the first join, restarts, replays the original failure, then verifies
+both rooms through an owner retry with exactly one approval row. All eight
+`palpo_service` process cases pass, as do 17 coordinator and three schema tests.
+The 1,250 Rust spec bindings resolve and the caller inventory has no missing or
+ambiguous entries (the previously tracked G8 gap is unchanged). Native Rinx
+fixture run `0a97a9126f214590a91825d332085946` passed 22 checks with pinned binary
+hashes and inspected setup failure/ready captures.

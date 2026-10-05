@@ -1025,7 +1025,7 @@ fn scoped_agent_rename_preserves_identity_budget_and_newer_name_across_restart()
     // Upgrade a copied schema-65 database without changing its existing grant.
     drop(db);
     let sql = rusqlite::Connection::open(dir.path().join("state/domain.sqlite3")).unwrap();
-    sql.execute_batch("DROP TABLE coordinator_agent_profiles; PRAGMA user_version=65;")
+    sql.execute_batch("DROP TABLE coordinator_project_setup; DROP TABLE coordinator_project_setup_attempts; DROP TABLE coordinator_agent_profiles; PRAGMA user_version=65;")
         .unwrap();
     drop(sql);
     let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
@@ -1102,4 +1102,105 @@ fn scoped_agent_rename_preserves_identity_budget_and_newer_name_across_restart()
         db.control_coordinator_agent(&fleet, &rename("expired", "Expired"), 100001),
         Err(Error::Generation)
     ));
+}
+
+#[test]
+fn approved_project_setup_recovers_without_reapproval_and_fences_stale_attempts() {
+    let (dir, mut db) = setup();
+    let setup = |id: &str| {
+        serde_json::from_value::<ProjectSetupCommand>(json!({"context":context(id),"projectId":"project_one","projectRevision":1,"approvalCommandId":"project_decision"})).unwrap()
+    };
+    let initial = setup("project_decision");
+    let work = db.begin_project_setup(&initial, 1000).unwrap();
+    assert_eq!(work.definition.room_id, "!project:example.test");
+    assert!(work.completed.is_none());
+    assert!(
+        db.begin_project_setup(&initial, 1001)
+            .unwrap()
+            .completed
+            .is_none()
+    );
+    let failed = db
+        .finish_project_setup(&initial, Some("private_membership_pending"), 1002)
+        .unwrap();
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(
+        db.begin_project_setup(&initial, 100001)
+            .unwrap()
+            .completed
+            .unwrap(),
+        failed
+    );
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    let mut retry = setup("setup_retry");
+    retry.context.actor = "@owner:example.test".to_owned().try_into().unwrap();
+    let resumed = db.begin_project_setup(&retry, 1003).unwrap();
+    assert_eq!(resumed.definition.room_id, work.definition.room_id);
+    assert_eq!(
+        resumed.definition.owner_dm_room_id,
+        work.definition.owner_dm_room_id
+    );
+    assert!(db.validate_project_setup(&initial, 1004).is_err());
+    assert_eq!(
+        db.begin_project_setup(&initial, 1004)
+            .unwrap()
+            .completed
+            .unwrap(),
+        failed
+    );
+    let mut denied = setup("admin_bypass");
+    denied.context.actor = "@admin:example.test".to_owned().try_into().unwrap();
+    assert!(matches!(
+        db.begin_project_setup(&denied, 1004),
+        Err(Error::LocalAuthority)
+    ));
+    let mut wrong = setup("wrong_source");
+    wrong.approval_command_id = "nonexistent_decision".to_owned().try_into().unwrap();
+    assert!(matches!(
+        db.begin_project_setup(&wrong, 1004),
+        Err(Error::NotFound)
+    ));
+    let observation = observation(&request(
+        "unused",
+        "Unused",
+        &resource("pool", "seat", 1000),
+        100,
+    ));
+    db.coordinator_project_ready(
+        &ProjectReadiness {
+            registration: registration(),
+            project_id: "project_one".into(),
+            observed_at_ms: 1004,
+            project: observation.project,
+            owner_room: observation.owner_room,
+        },
+        1004,
+    )
+    .unwrap();
+    let ready = db.finish_project_setup(&retry, None, 1005).unwrap();
+    assert_eq!(ready["state"], "ready");
+    assert!(ready["revision"].as_u64() > failed["revision"].as_u64());
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    assert_eq!(
+        db.begin_project_setup(&retry, 100001)
+            .unwrap()
+            .completed
+            .unwrap(),
+        ready
+    );
+    assert_eq!(
+        db.server_engagement_resources(&registration().fleet_id, "", 50)
+            .unwrap()[0]["retainedTokens"],
+        0
+    );
+    let sql = rusqlite::Connection::open(dir.path().join("state/domain.sqlite3")).unwrap();
+    assert_eq!(
+        sql.query_row("SELECT count(*) FROM coordinator_commands", [], |r| r
+            .get::<_, u64>(0))
+            .unwrap(),
+        1,
+        "recovery cannot introduce another approval"
+    );
 }

@@ -23,6 +23,21 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Approved project recovery preserves its grant and fences superseded attempts
+  Test: approved_project_setup_recovers_without_reapproval_and_fences_stale_attempts
+  Given a failed room-setup attempt with a committed project approval
+  When the owner retries after restart or an old attempt is replayed
+  Then the original rooms and grant remain unchanged and only the current attempt may publish readiness
+
+Scenario: The actual native worker retries project room setup without another approval
+  Test: native_project_setup_failure_and_owner_retry_preserve_the_original_approval
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated Matrix HTTP and Palpo HTTPS peers
+  Production caller: hagency::bootstrap::palpo_work::run_project_setup
+  Given the original Matrix join fails and the runtime restarts
+  When an authenticated owner retries after the invitation is repaired
+  Then the original failure replays without a new join and the new attempt verifies both rooms without another grant
+
 Scenario: Scoped rename preserves identity and capacity across schema upgrade and restart
   Test: scoped_agent_rename_preserves_identity_budget_and_newer_name_across_restart
   Given a coordinated agent with an existing allocation

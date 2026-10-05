@@ -4396,6 +4396,34 @@ impl DomainStore {
         )
         .await
     }
+    pub async fn begin_project_setup(
+        &self,
+        command: crate::coordinator::ProjectSetupCommand,
+    ) -> Result<crate::coordinator::ProjectSetupWork, Error> {
+        self.call(weight(&command)?, move |db| {
+            db.begin_project_setup(&command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn validate_project_setup(
+        &self,
+        command: crate::coordinator::ProjectSetupCommand,
+    ) -> Result<(), Error> {
+        self.call(weight(&command)?, move |db| {
+            db.validate_project_setup(&command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn finish_project_setup(
+        &self,
+        command: crate::coordinator::ProjectSetupCommand,
+        reason: Option<String>,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&(&command, &reason))?, move |db| {
+            db.finish_project_setup(&command, reason.as_deref(), writer_time()?)
+        })
+        .await
+    }
     pub async fn coordinator_project_ready(
         &self,
         observed: crate::coordinator::ProjectReadiness,

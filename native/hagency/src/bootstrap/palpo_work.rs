@@ -485,6 +485,105 @@ impl From<hagency_store::Error> for AdmissionError {
         }
     }
 }
+/// Each attempt uses the original approved rooms. Matrix failures are durable
+/// setup results; another authenticated recovery can retry without a new grant.
+async fn run_project_setup(
+    reader: &Reader,
+    domain: &DomainStore,
+    command: hagency_store::coordinator::ProjectSetupCommand,
+) -> Result<Value, AdmissionError> {
+    let work = domain
+        .begin_project_setup(command.clone())
+        .await
+        .map_err(AdmissionError::from)?;
+    if let Some(done) = work.completed {
+        return Ok(done);
+    }
+    let result = async {
+        let fleet = command.context.server_engagement_id.as_str();
+        let registration = domain
+            .provisioning_registration(fleet.to_owned())
+            .await
+            .map_err(|_| "setup_unavailable")?;
+        for (user, room, reason) in [
+            (
+                &registration.representative_mxid,
+                &work.definition.room_id,
+                "project_membership_pending",
+            ),
+            (
+                &registration.approval_bot_mxid,
+                &work.definition.owner_dm_room_id,
+                "private_membership_pending",
+            ),
+        ] {
+            domain
+                .validate_project_setup(command.clone())
+                .await
+                .map_err(|_| "authority_changed")?;
+            reader
+                .call_as(
+                    user,
+                    reqwest::Method::POST,
+                    &["_matrix", "client", "v3", "join", room],
+                    &[],
+                    Some(json!({})),
+                )
+                .await
+                .map_err(|_| reason)?
+                .ok_or(reason)?;
+        }
+        domain
+            .validate_project_setup(command.clone())
+            .await
+            .map_err(|_| "authority_changed")?;
+        let project = reader
+            .observe(
+                &registration.representative_mxid,
+                &work.definition.room_id,
+                Some(fleet),
+            )
+            .await
+            .map_err(|_| "project_room_unreadable")?;
+        domain
+            .validate_project_setup(command.clone())
+            .await
+            .map_err(|_| "authority_changed")?;
+        let owner_room = reader
+            .observe(
+                &registration.approval_bot_mxid,
+                &work.definition.owner_dm_room_id,
+                None,
+            )
+            .await
+            .map_err(|_| "private_room_unreadable")?;
+        domain
+            .validate_project_setup(command.clone())
+            .await
+            .map_err(|_| "authority_changed")?;
+        let observed_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "setup_unavailable")?
+            .as_millis() as u64;
+        domain
+            .coordinator_project_ready(hagency_store::coordinator::ProjectReadiness {
+                registration,
+                project_id: command.project_id.as_str().into(),
+                observed_at_ms,
+                project,
+                owner_room,
+            })
+            .await
+            .map_err(|_| "room_authority_changed")?;
+        Ok::<(), &str>(())
+    }
+    .await;
+    domain
+        .finish_project_setup(command, result.err().map(String::from))
+        .await
+        .map_err(AdmissionError::from)
+}
+
 async fn admit_request(
     reader: &Reader,
     domain: &DomainStore,
@@ -768,105 +867,59 @@ async fn work_once(
                 }
             };
         }
-        if work.payload.get("operation").and_then(Value::as_str)
-            == Some("coordinator_project_approval")
-        {
+        if matches!(
+            work.payload["operation"].as_str(),
+            Some("coordinator_project_approval" | "coordinator_project_setup")
+        ) {
             let result = async {
-                let command: hagency_store::coordinator::ProjectApproval =
-                    serde_json::from_value(work.payload["command"].clone())
-                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
-                if command.context.server_engagement_id.as_str() != fleet {
-                    return Err(AdmissionError::Refused("invalid_request"));
-                }
-                let definition: hagency_store::coordinator::ProjectDefinition =
-                    serde_json::from_value(work.payload["definition"].clone())
-                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
-                let grant = domain
-                    .approve_coordinator_project(command, work.payload["definition"].clone())
-                    .await
-                    .map_err(AdmissionError::from)?;
-                let registration = domain
-                    .provisioning_registration(fleet.to_owned())
-                    .await
-                    .map_err(|_| "registration unavailable")?;
-                for (user, room) in [
-                    (&registration.representative_mxid, &definition.room_id),
-                    (
-                        &registration.approval_bot_mxid,
-                        &definition.owner_dm_room_id,
-                    ),
-                ] {
-                    reader
-                        .call_as(
-                            user,
-                            reqwest::Method::POST,
-                            &["_matrix", "client", "v3", "join", room],
-                            &[],
-                            Some(json!({})),
+                let setup = if work.payload["operation"] == "coordinator_project_approval" {
+                    let command: hagency_store::coordinator::ProjectApproval =
+                        serde_json::from_value(work.payload["command"].clone())
+                            .map_err(|_| AdmissionError::Refused("invalid_request"))?;
+                    if command.context.server_engagement_id.as_str() != fleet {
+                        return Err(AdmissionError::Refused("invalid_request"));
+                    }
+                    domain
+                        .approve_coordinator_project(
+                            command.clone(),
+                            work.payload["definition"].clone(),
                         )
                         .await
-                        .map_err(|_| "project membership pending")?;
+                        .map_err(AdmissionError::from)?;
+                    hagency_store::coordinator::ProjectSetupCommand {
+                        context: command.context.clone(),
+                        project_id: command.request.project_id,
+                        project_revision: command.request.revision,
+                        approval_command_id: command.context.command_id,
+                    }
+                } else {
+                    serde_json::from_value(work.payload["command"].clone())
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?
+                };
+                if setup.context.server_engagement_id.as_str() != fleet {
+                    return Err(AdmissionError::Refused("invalid_request"));
                 }
-                let project = reader
-                    .observe(
-                        &registration.representative_mxid,
-                        &definition.room_id,
-                        Some(fleet),
-                    )
-                    .await
-                    .map_err(|_| "project room unreadable")?;
-                let owner_room = reader
-                    .observe(
-                        &registration.approval_bot_mxid,
-                        &definition.owner_dm_room_id,
-                        None,
-                    )
-                    .await
-                    .map_err(|_| "private room unreadable")?;
-                let observed_at_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| "clock unavailable")?
-                    .as_millis() as u64;
-                let result = domain
-                    .coordinator_project_ready(hagency_store::coordinator::ProjectReadiness {
-                        registration,
-                        project_id: grant.project_id.as_str().into(),
-                        observed_at_ms,
-                        project,
-                        owner_room,
-                    })
-                    .await
-                    .map_err(|_| "project room authority refused")?;
-                Ok::<_, AdmissionError>(result)
+                run_project_setup(reader, domain, setup).await
             }
             .await;
             return match result {
-                Ok(grant) => match adapter
-                    .complete(work.ticket, json!({"coordinatorProject":grant}))
-                    .await
-                {
+                Ok(result) => match adapter.complete(work.ticket, result).await {
                     Ok(()) => Outcome::Done,
                     Err(_) => Outcome::Later,
                 },
-                Err(AdmissionError::Refused(reason)) => {
-                    match domain
-                        .refuse_coordinator_command(
-                            fleet.into(),
-                            work.payload.clone(),
-                            reason.into(),
-                        )
-                        .await
-                    {
-                        Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
-                            Ok(()) => Outcome::Done,
-                            Err(_) => Outcome::Later,
-                        },
-                        Err(_) => {
-                            let _ = adapter.retry_later(work.ticket).await;
-                            Outcome::Later
-                        }
+                Err(AdmissionError::Refused(reason)) => match domain
+                    .refuse_coordinator_command(fleet.into(), work.payload.clone(), reason.into())
+                    .await
+                {
+                    Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    },
+                    Err(_) => {
+                        let _ = adapter.retry_later(work.ticket).await;
+                        Outcome::Later
                     }
-                }
+                },
                 Err(reason) => {
                     eprintln!("palpo coordinator project: {reason}");
                     let _ = adapter.retry_later(work.ticket).await;

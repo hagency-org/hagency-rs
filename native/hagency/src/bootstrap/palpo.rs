@@ -323,7 +323,7 @@ impl Live {
         }
         let status = self.0.status.child(&registration.fleet_id);
         status.set("starting", None);
-        let started = Owner::start(
+        let started = crate::bootstrap::palpo::Owner::start(
             prepared,
             self.0.store.clone(),
             self.0.domain.clone(),
@@ -682,7 +682,7 @@ impl Owner {
                         let work_signal = signal.child_token();
                         let consumer = async {
                             if let Some(work) = &prepared.work {
-                                super::palpo_work::run(
+                                crate::bootstrap::palpo_work::run(
                                     &adapter,
                                     &work.probes,
                                     &domain,
