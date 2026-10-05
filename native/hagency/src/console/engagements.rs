@@ -31,7 +31,76 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("engagements/{id}/candidates").get(candidates))
         .push(Router::with_path("engagements/{id}/approve").post(approve))
         .push(Router::with_path("engagements/{id}/allocation").post(allocation))
+        .push(
+            Router::with_path("engagements/{id}/settlement")
+                .get(settlement)
+                .post(settle),
+        )
         .push(Router::with_path("engagements/audit").get(audit))
+}
+
+#[handler]
+async fn settlement(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    if query(req, &[], 0).is_err() {
+        failed(res, Error::Invalid);
+        return;
+    }
+    let id = req.param::<String>("id").unwrap_or_default();
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = store.coordinator_settlement(id).await;
+    if let Err(error) = recheck(depot) {
+        failed(res, error);
+        return;
+    }
+    match result {
+        Ok(value) => res.render(Json(value)),
+        Err(error) => store_error(res, error),
+    }
+}
+#[handler]
+async fn settle(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let prepared = async {
+        query(req, &[], 0)?;
+        let session = depot
+            .get_typed::<Session>()
+            .map_err(|_| Error::Unauthorized)?;
+        let access = console(depot)?;
+        if !access.0.authority.can_configure(session)? {
+            return Err(Error::ConfigurationForbidden);
+        }
+        let raw = body(req, 4096).await?;
+        let input: hagency_store::coordinator::FinalUsage =
+            serde_json::from_slice(&raw).map_err(|_| Error::Invalid)?;
+        if req.param::<String>("id").as_deref() != Some(input.agent_allocation_id.as_str()) {
+            return Err(Error::Invalid);
+        }
+        access.0.authority.settlement(session, input)
+    }
+    .await;
+    let command = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = store.settle_coordinator_agent(command).await;
+    if let Err(error) = recheck(depot) {
+        failed(res, error);
+        return;
+    }
+    match result {
+        Ok(mut value) => {
+            value.as_object_mut().unwrap().remove("evidenceReference");
+            res.render(Json(value));
+        }
+        Err(error) => store_error(res, error),
+    }
 }
 
 fn verdict_store_error(res: &mut Response, error: hagency_store::Error) {

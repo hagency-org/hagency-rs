@@ -4431,6 +4431,69 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn control_coordinator_agent(
+        &self,
+        fleet: String,
+        command: crate::coordinator::AgentControl,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&(&fleet, &command))?, move |db| {
+            db.control_coordinator_agent(&fleet, &command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn coordinator_agent_lifecycle(
+        &self,
+        agent: String,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&agent)?, move |db| {
+            db.coordinator_agent_lifecycle(&agent)
+        })
+        .await
+    }
+    pub async fn settle_coordinator_agent(
+        &self,
+        command: crate::coordinator::SettlementCommand,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(command.weight()?, move |db| {
+            db.settle_coordinator_agent(command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn coordinator_settlement(&self, agent: String) -> Result<serde_json::Value, Error> {
+        self.call(weight(&agent)?, move |db| db.coordinator_settlement(&agent))
+            .await
+    }
+    pub async fn coordinator_command_outcome(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.coordinator_command_outcome(&fleet, &payload)
+        })
+        .await
+    }
+    pub async fn receive_coordinator_command(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.receive_coordinator_command(&fleet, &payload, writer_time()?)
+        })
+        .await
+    }
+    pub async fn refuse_coordinator_command(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+        reason: String,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.refuse_coordinator_command(&fleet, &payload, &reason, writer_time()?)
+        })
+        .await
+    }
     pub async fn refuse_coordinator_agent(
         &self,
         id: String,

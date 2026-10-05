@@ -41,6 +41,14 @@ try {
   await page.getByText('RefusedVisible', { exact: false }).waitFor();
   await page.getByText('project_unavailable', { exact: true }).waitFor();
   await page.screenshot({ path: join(config.output, 'agent-delivered-refusal.png'), fullPage: true });
+  const settledRow=page.locator('tr[data-engagement-row]').filter({ hasText: 'SettlementVisible' });
+  await settledRow.getByText('Final usage settlement', { exact: true }).click();
+  await settledRow.getByLabel('Final consumed tokens').fill('0');
+  await settledRow.getByLabel('Accounting reference (no secrets)').fill('Never-started fixture reconciled');
+  await settledRow.getByRole('button', { name: 'Confirm final usage and release unused tokens', exact: true }).click();
+  await settledRow.locator('[data-settlement-result]').waitFor();
+  assert.match(await settledRow.locator('[data-settlement-result]').textContent(), /unused tokens returned 200/);
+  await page.screenshot({ path: join(config.output, 'owner-final-usage-settlement.png'), fullPage: true });
   await page.goto(`${config.base}/console/server-engagements/`);
   await page.getByRole('button', { name: 'Change delegation', exact: true }).click();
   await page.locator('[data-engagement-delegation]').getByRole('combobox').selectOption('suspended');
@@ -49,6 +57,6 @@ try {
   await page.screenshot({ path: join(config.output, 'owner-delegation-suspended.png'), fullPage: true });
   assert.deepEqual(failures, []);
   await writeFile(join(config.output, 'report.json'), JSON.stringify({ passed: true, scope: 'Real native console router and domain writer; seeded registration/resource/decision fixture',
-    checks: ['owner creates and increases one engagement resource allocation', 'Resources and Server engagements show the same ledger', 'delivered refusal is visible before agent admission', 'Agent allocations label is distinct from server engagements', 'owner suspends delegation through the real console and queues its revision'] }, null, 2));
+    checks: ['owner creates and increases one engagement resource allocation', 'Resources and Server engagements show the same ledger', 'delivered refusal is visible before agent admission', 'Agent allocations label is distinct from server engagements', 'owner reconciles final usage after cleanup and returns only unused tokens', 'owner suspends delegation through the real console and queues its revision'] }, null, 2));
   await context.close();
 } finally { await browser.close(); }

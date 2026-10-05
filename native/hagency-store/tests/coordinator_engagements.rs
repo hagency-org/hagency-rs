@@ -638,3 +638,366 @@ fn owner_delegation_changes_fence_old_commands_and_publish_before_resources() {
     access.revoke().unwrap();
     assert!(access.prepare_delegation(serde_json::from_value(json!({"serverEngagementId":registration().fleet_id,"expectedRevision":4,"coordinatorMxid":"@replacement:example.test","delegationExpiresAtMs":1000000,"allowSelfApproval":false,"state":"revoked","exportMxids":[]})).unwrap(),Instant::now()+Duration::from_secs(10)).is_err());
 }
+
+#[test]
+fn project_and_top_up_refusals_are_terminal_and_applied_commands_replay_after_expiry() {
+    let (dir, mut db) = setup();
+    let fleet = registration().fleet_id;
+    let (command, proof) = prepared(&mut db, "receipt_agent", "ReceiptAgent", 200);
+    let agent = db
+        .approve_coordinated_agent(&command, &proof, 1000)
+        .unwrap();
+    let increase = top_up(&agent.id, "increase_once", 200, 50);
+    let payload = json!({"operation":"coordinator_token_top_up","command":increase});
+    db.approve_coordinator_top_up(&increase, &proof, 1001)
+        .unwrap();
+    assert_eq!(
+        db.coordinator_command_outcome(&fleet, &payload)
+            .unwrap()
+            .unwrap()["state"],
+        "applied"
+    );
+    assert_eq!(
+        u64::from(
+            db.approve_coordinator_top_up(&increase, &proof, 100001)
+                .unwrap()
+                .allocation()
+        ),
+        250
+    );
+    let too_much = top_up(&agent.id, "increase_refused", 250, 100);
+    let failed_payload = json!({"operation":"coordinator_token_top_up","command":too_much});
+    assert!(matches!(
+        db.approve_coordinator_top_up(&too_much, &proof, 1001),
+        Err(Error::InsufficientCapacity)
+    ));
+    let receipt = db
+        .refuse_coordinator_command(&fleet, &failed_payload, "insufficient_capacity", 1001)
+        .unwrap();
+    assert_eq!(receipt["agentId"], agent.id);
+    assert_eq!(receipt["state"], "refused");
+    db.put_coordinator_resource(&resource_grant(500, 2), 1002)
+        .unwrap();
+    assert!(matches!(
+        db.approve_coordinator_top_up(&too_much, &proof, 1002),
+        Err(Error::State)
+    ));
+    let definition = json!({"name":"Blocked project","roomId":"!blocked:example.test","ownerDmRoomId":"!blocked_private:example.test"});
+    let project:ProjectApproval=serde_json::from_value(json!({"context":context("project_refused"),"request":{"id":"blocked_project","revision":1,"serverEngagementId":fleet,"projectId":"blocked","owner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":canonical::digest(&definition).unwrap(),"resourceAllocations":["missing_grant"]}})).unwrap();
+    let project_payload = json!({"operation":"coordinator_project_approval","command":project,"definition":definition});
+    assert!(matches!(
+        db.approve_coordinator_project(&project, &definition, 1002),
+        Err(Error::NotFound)
+    ));
+    let project_receipt = db
+        .refuse_coordinator_command(&fleet, &project_payload, "resource_unavailable", 1002)
+        .unwrap();
+    assert_eq!(project_receipt["projectId"], "blocked");
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    assert_eq!(
+        db.refuse_coordinator_command(&fleet, &failed_payload, "authority_changed", 1003)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        db.coordinator_command_outcome(&fleet, &project_payload)
+            .unwrap()
+            .unwrap(),
+        project_receipt
+    );
+    assert!(matches!(
+        db.approve_coordinator_project(&project, &definition, 1003),
+        Err(Error::State)
+    ));
+    let mut changed = failed_payload;
+    changed["command"]["additionalTokens"] = json!(99);
+    assert!(matches!(
+        db.coordinator_command_outcome(&fleet, &changed),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(u64::from(db.get(&agent.id).unwrap().allocation()), 250);
+    let updates = db.coordinator_updates(&publication_identity()).unwrap();
+    assert_eq!(
+        updates
+            .iter()
+            .filter(|u| u["payload"]["state"] == "refused")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn scoped_agent_controls_recheck_authority_and_preserve_cleanup_and_capacity_on_replay() {
+    let (dir, mut db) = setup();
+    let (approval, proof) = prepared(&mut db, "managed_agent", "Managed", 200);
+    let agent = db
+        .approve_coordinated_agent(&approval, &proof, 1000)
+        .unwrap();
+    let effect = db
+        .claim_effect_for(&format!("provision_{}", agent.id))
+        .unwrap()
+        .unwrap();
+    db.observe_effect(
+        &effect.id,
+        effect.fence,
+        &hagency_store::EffectOutcome::Applied {
+            receipt: "native-fixture".into(),
+        },
+    )
+    .unwrap();
+    let control = |id: &str, op: &str, actor: &str| {
+        let mut c = context(id);
+        c["actor"] = json!(actor);
+        serde_json::from_value::<AgentControl>(json!({"context":c,"agentAllocationId":agent.id,
+            "projectId":"project_one","projectRevision":1,"resourceAllocationId":"grant_one","operation":op})).unwrap()
+    };
+    let fleet = registration().fleet_id;
+    assert!(matches!(
+        db.control_coordinator_agent(
+            &fleet,
+            &control("unauthorized", "stop", "@stranger:example.test"),
+            1000
+        ),
+        Err(Error::LocalAuthority)
+    ));
+    let pause = control("pause_agent", "stop", "@owner:example.test");
+    let receipt = db.control_coordinator_agent(&fleet, &pause, 1000).unwrap();
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["paused"],
+        true
+    );
+    let resume = control("resume_agent", "start", "@coordinator:example.test");
+    db.control_coordinator_agent(&fleet, &resume, 1001).unwrap();
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["paused"],
+        false
+    );
+    // Replaying the old pause returns its receipt, it cannot undo the resume.
+    assert_eq!(
+        db.control_coordinator_agent(&fleet, &pause, 100001)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["paused"],
+        false
+    );
+    let retire = control("retire_agent", "retire", "@owner:example.test");
+    db.control_coordinator_agent(&fleet, &retire, 1002).unwrap();
+    let cleanup = db
+        .claim_effect_for(&format!("retire_{}", agent.id))
+        .unwrap()
+        .unwrap();
+    db.observe_effect(
+        &cleanup.id,
+        cleanup.fence,
+        &hagency_store::EffectOutcome::Unknown,
+    )
+    .unwrap();
+    let retry = control("retry_agent", "retry_cleanup", "@provider:example.test");
+    assert!(matches!(
+        db.control_coordinator_agent(&fleet, &retry, 1003),
+        Err(Error::State)
+    ));
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["cleanup"],
+        "uncertain"
+    );
+    db.observe_effect(
+        &cleanup.id,
+        cleanup.fence,
+        &hagency_store::EffectOutcome::NotApplied {
+            receipt: "refused".into(),
+        },
+    )
+    .unwrap();
+    db.control_coordinator_agent(&fleet, &retry, 1004).unwrap();
+    let retried = db.claim_effect_for(&cleanup.id).unwrap().unwrap();
+    assert!(retried.fence > cleanup.fence);
+    db.observe_effect(
+        &retried.id,
+        retried.fence,
+        &hagency_store::EffectOutcome::Applied {
+            receipt: "cleanup-complete".into(),
+        },
+    )
+    .unwrap();
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    db.control_coordinator_agent(&fleet, &retire, 100001)
+        .unwrap();
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["cleanup"],
+        "complete"
+    );
+    assert_eq!(
+        db.server_engagement_resources(&fleet, "", 50).unwrap()[0]["retainedTokens"],
+        200
+    );
+    let mut conflict = pause;
+    conflict.operation = AgentOperation::Retire;
+    assert!(matches!(
+        db.control_coordinator_agent(&fleet, &conflict, 100001),
+        Err(Error::Conflict)
+    ));
+}
+
+#[test]
+fn final_account_settlement_refunds_only_unused_capacity_and_late_usage_remains_charged() {
+    use hagency_core::tasks::*;
+    use hagency_store::{EffectOutcome, ResourceConfigurationAccess};
+    let (dir, mut db) = setup();
+    let (approval, proof) = prepared(&mut db, "settled_agent", "Settle", 200);
+    let agent = db
+        .approve_coordinated_agent(&approval, &proof, 1000)
+        .unwrap();
+    let effect = db
+        .claim_effect_for(&format!("provision_{}", agent.id))
+        .unwrap()
+        .unwrap();
+    db.observe_effect(
+        &effect.id,
+        effect.fence,
+        &EffectOutcome::Applied {
+            receipt: "fixture".into(),
+        },
+    )
+    .unwrap();
+    db.register_session(&SessionBinding {
+        id: "settlement_session".into(),
+        engagement_id: agent.id.clone(),
+        room_id: "!project:example.test".into(),
+        thread_root: Some("$settle".into()),
+    })
+    .unwrap();
+    db.create_canonical_task(
+        "settlement_task",
+        "settlement_session",
+        "Measure settlement",
+        1001,
+    )
+    .unwrap();
+    db.register_workspace("settlement_workspace").unwrap();
+    db.enqueue_dispatch(&DispatchInput {
+        id: "settlement_dispatch".into(),
+        session_id: "settlement_session".into(),
+        task_id: Some("settlement_task".into()),
+        resources: vec![ResourceLease {
+            id: "settlement_workspace".into(),
+            exclusive: true,
+        }],
+        payload: json!({}),
+    })
+    .unwrap();
+    let cap = db
+        .claim_dispatch("settlement_runner", 1002, 60000, 120000, 128)
+        .unwrap()
+        .unwrap();
+    let scope = db.owned_dispatch_scope(&cap, 1003).unwrap();
+    let started = db
+        .start_owned_dispatch(&cap, scope.fingerprint(), 1004)
+        .unwrap();
+    let source = db.bind_usage_source(&cap, &started, 1005).unwrap();
+    let observation = |n| {
+        hagency_metering::observation::UsageObservation::parse(hagency_metering::Framework::Codex,&json!({"payload":{"info":{"total_token_usage":{"input_tokens":n,"output_tokens":0,"cached_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":n}}}}).to_string()).unwrap()
+    };
+    db.record_usage_observation(&source, "first_usage", &observation(50), 1010)
+        .unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let access = ResourceConfigurationAccess::new(until, Default::default());
+    let mut usage:FinalUsage=serde_json::from_value(json!({"commandId":"settle_final","agentAllocationId":agent.id,"resourceAllocationId":"grant_one",
+        "expectedAllocatedTokens":200,"consumedTokens":50,"period":"monthly","periodKey":"1970-01","evidenceReference":"invoice-fixture-50"})).unwrap();
+    assert!(matches!(
+        db.settle_coordinator_agent(
+            access.prepare_settlement(usage.clone(), until).unwrap(),
+            1011
+        ),
+        Err(Error::State)
+    ));
+    db.complete_dispatch(&cap, &json!({"done":true}), 1012)
+        .unwrap();
+    db.revoke("retire_before_settle", &agent.id).unwrap();
+    assert!(matches!(
+        db.settle_coordinator_agent(
+            access.prepare_settlement(usage.clone(), until).unwrap(),
+            1013
+        ),
+        Err(Error::State)
+    ));
+    let cleanup = db
+        .claim_effect_for(&format!("retire_{}", agent.id))
+        .unwrap()
+        .unwrap();
+    db.observe_effect(
+        &cleanup.id,
+        cleanup.fence,
+        &EffectOutcome::Applied {
+            receipt: "cleanup-proven".into(),
+        },
+    )
+    .unwrap();
+    usage.consumed_tokens = 49.try_into().unwrap();
+    assert!(matches!(
+        db.settle_coordinator_agent(
+            access.prepare_settlement(usage.clone(), until).unwrap(),
+            1014
+        ),
+        Err(Error::Conflict)
+    ));
+    usage.consumed_tokens = 50.try_into().unwrap();
+    let receipt = db
+        .settle_coordinator_agent(
+            access.prepare_settlement(usage.clone(), until).unwrap(),
+            1015,
+        )
+        .unwrap();
+    assert_eq!(receipt["releasedTokens"], 150);
+    assert_eq!(
+        db.server_engagement_resources(&registration().fleet_id, "", 50)
+            .unwrap()[0]["remainingTokens"],
+        250
+    );
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    assert_eq!(
+        db.settle_coordinator_agent(
+            access.prepare_settlement(usage.clone(), until).unwrap(),
+            1016
+        )
+        .unwrap(),
+        receipt
+    );
+    db.record_usage_observation(&source, "late_usage", &observation(75), 1017)
+        .unwrap();
+    assert_eq!(
+        db.server_engagement_resources(&registration().fleet_id, "", 50)
+            .unwrap()[0]["remainingTokens"],
+        225
+    );
+    assert_eq!(
+        db.coordinator_settlement(&agent.id).unwrap()["state"],
+        "late_usage_charged"
+    );
+    assert_eq!(
+        db.coordinator_settlement(&agent.id).unwrap()["lateUsageTokens"],
+        25
+    );
+    assert!(
+        db.coordinator_settlement(&agent.id)
+            .unwrap()
+            .get("evidenceReference")
+            .is_none()
+    );
+    assert_eq!(
+        db.settle_coordinator_agent(access.prepare_settlement(usage, until).unwrap(), 1018)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        db.server_engagement_resources(&registration().fleet_id, "", 50)
+            .unwrap()[0]["remainingTokens"],
+        225
+    );
+    access.revoke().unwrap();
+}

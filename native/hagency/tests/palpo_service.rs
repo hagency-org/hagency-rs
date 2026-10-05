@@ -10,6 +10,129 @@ use serde_json::json;
 use std::{fs, time::Duration};
 
 #[tokio::test]
+async fn native_palpo_worker_publishes_terminal_project_and_top_up_refusals() {
+    use hagency_core::canonical;
+    use hagency_core::custody::Lane;
+    use hagency_store::{DomainRepository, private};
+    let mut f = Fixture::new(true, false).await;
+    let now = peer::now();
+    let fleet = peer::FLEET;
+    let mut db = DomainRepository::open(&f.state).unwrap();
+    db.configure_coordinator(
+        &serde_json::from_value(json!({
+            "id":fleet,"server":"matrix.example.test","owner":"@owner:matrix.example.test",
+            "coordinator":"@coordinator:matrix.example.test","registrationGeneration":7,
+            "delegationRevision":2,"delegationExpiresAtMs":now+3600000,"state":"verified",
+            "allowSelfApproval":false,"coordinatorApprovalV1":true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    drop(db);
+    // An unreachable Matrix origin proves that local authority refusals do not
+    // depend on a successful network read or an operator's second decision.
+    private::write_new(
+        &f.state.join("palpo-appservice.json"),
+        &serde_json::to_vec(&json!({
+            "homeserver":"http://127.0.0.1:9","as_token":"isolated-native-fixture-token",
+            "sender_localpart":format!("{fleet}_representative")
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let context = |id: &str, revision: u64| {
+        json!({
+            "version":1,"commandId":id,"serverEngagementId":fleet,"registrationGeneration":7,
+            "delegationRevision":revision,"actor":"@coordinator:matrix.example.test",
+            "issuedAtMs":now,"expiresAtMs":now+600000
+        })
+    };
+    let definition = json!({"name":"Stale project","roomId":"!project:matrix.example.test","ownerDmRoomId":"!dm:matrix.example.test"});
+    let project = json!({"operation":"coordinator_project_approval","definition":definition,
+        "command":{"context":context("stale_project",1),"request":{
+            "id":"project_request","revision":1,"serverEngagementId":fleet,"projectId":"project_one",
+            "owner":"@manager:matrix.example.test","requester":"@manager:matrix.example.test",
+            "definitionDigest":canonical::digest(&definition).unwrap(),"resourceAllocations":["grant_one"]}}});
+    let top_up = json!({"operation":"coordinator_token_top_up","command":{
+        "context":context("missing_project_topup",2),"request":{
+            "id":"topup_request","revision":1,"serverEngagementId":fleet,"projectId":"missing_project",
+            "projectRevision":1,"resourceAllocationId":"grant_one","agentAllocationId":"agent_one",
+            "projectOwner":"@manager:matrix.example.test","requester":"@manager:matrix.example.test",
+            "definitionDigest":"a".repeat(64),"expectedAllocatedTokens":200,"requestedAdditionalTokens":50},
+        "additionalTokens":50}});
+    let commands = [project, top_up];
+    let mut child = f.launch(true);
+    let mut sent = 0;
+    let mut refusals = std::collections::BTreeMap::new();
+    let until = tokio::time::Instant::now() + Duration::from_secs(45);
+    while refusals.len() < 2 {
+        assert!(
+            tokio::time::Instant::now() < until,
+            "native refusals were not published: {}",
+            fs::read_to_string(f.root.path().join("native.stderr")).unwrap()
+        );
+        let request = f.fake.next().await;
+        if request.target.contains("/poll?") {
+            if request.target.contains("lane=work") && sent < commands.len() {
+                let mut delivery =
+                    peer::delivery(&format!("decision_{sent}"), Lane::Work, 31, "private-lease");
+                delivery["delivery"]["payload"] = commands[sent].clone();
+                sent += 1;
+                request.json(200, delivery);
+            } else {
+                request.json(200, peer::empty(31));
+            }
+        } else if request.target.ends_with("/ack") {
+            request.json(200, json!({"ok":true}));
+        } else {
+            assert!(request.target.ends_with("/updates"));
+            if let Some(updates) = request.value()["coordinatorUpdates"].as_array() {
+                for update in updates {
+                    if update["payload"]["state"] == "refused" {
+                        assert_eq!(update["payload"]["delegationRevision"], 2);
+                        let receipt = &update["payload"];
+                        refusals.insert(
+                            receipt["commandId"].as_str().unwrap().to_owned(),
+                            receipt.clone(),
+                        );
+                    }
+                }
+            }
+            request.json(200, json!({"ok":true}));
+        }
+    }
+    assert_eq!(refusals["stale_project"]["reason"], "authority_changed");
+    assert_eq!(
+        refusals["missing_project_topup"]["reason"],
+        "project_unavailable"
+    );
+    #[cfg(unix)]
+    child.graceful().await;
+    drop(child);
+    let db = DomainRepository::open(&f.state).unwrap();
+    for command in &commands {
+        let id = command["command"]["context"]["commandId"].as_str().unwrap();
+        let mut published = refusals[id].clone();
+        published
+            .as_object_mut()
+            .unwrap()
+            .remove("registrationGeneration");
+        published
+            .as_object_mut()
+            .unwrap()
+            .remove("delegationRevision");
+        assert_eq!(
+            db.coordinator_command_outcome(fleet, command)
+                .unwrap()
+                .unwrap(),
+            published
+        );
+    }
+    f.no_runner();
+    f.fake.close().await;
+}
+
+#[tokio::test]
 async fn native_palpo_service_executable_catalog() {
     let mut f = Fixture::new(true, false).await;
     let mut child = f.launch(true);

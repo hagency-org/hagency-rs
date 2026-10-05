@@ -642,22 +642,85 @@ async fn work_once(
         }
     };
     if work.kind == Kind::Request {
+        if work.payload["operation"] == "coordinator_agent_control" {
+            let result = async {
+                let command: hagency_store::coordinator::AgentControl =
+                    serde_json::from_value(work.payload["command"].clone())
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
+                if let Some(outcome) = domain
+                    .coordinator_command_outcome(fleet.into(), work.payload.clone())
+                    .await
+                    .map_err(AdmissionError::from)?
+                {
+                    return Ok(outcome);
+                }
+                domain
+                    .control_coordinator_agent(fleet.into(), command)
+                    .await
+                    .map_err(AdmissionError::from)
+            }
+            .await;
+            let result = match result {
+                Ok(receipt) => Ok(receipt),
+                Err(AdmissionError::Refused(reason)) => domain
+                    .refuse_coordinator_command(fleet.into(), work.payload.clone(), reason.into())
+                    .await
+                    .map_err(AdmissionError::from),
+                Err(e) => Err(e),
+            };
+            return match result {
+                Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
+                    Ok(()) => Outcome::Done,
+                    Err(_) => Outcome::Later,
+                },
+                Err(error) => {
+                    eprintln!("palpo agent control: {error}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    Outcome::Later
+                }
+            };
+        }
+        if matches!(
+            work.payload["operation"].as_str(),
+            Some("coordinator_project_approval" | "coordinator_token_top_up")
+        ) {
+            match domain
+                .receive_coordinator_command(fleet.into(), work.payload.clone())
+                .await
+            {
+                Ok(Some(result))
+                    if result["state"] == "refused"
+                        || work.payload["operation"] == "coordinator_token_top_up" =>
+                {
+                    return match adapter.complete(work.ticket, result).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("palpo command binding refused: {error}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    return Outcome::Later;
+                }
+            }
+        }
         if work.payload["operation"] == "coordinator_token_top_up" {
             let result = async {
                 let command: hagency_store::coordinator::TokenTopUpApproval =
                     serde_json::from_value(work.payload["command"].clone())
-                        .map_err(|_| "invalid token decision".to_owned())?;
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
                 if command.context.server_engagement_id.as_str() != fleet {
-                    return Err("token decision targets another engagement".into());
+                    return Err(AdmissionError::Refused("invalid_request"));
                 }
                 let agent = domain
                     .engagement(command.request.agent_allocation_id.as_str().into())
                     .await
-                    .map_err(|_| "agent unavailable".to_owned())?;
+                    .map_err(AdmissionError::from)?;
                 let (context, _, _) = domain
                     .provisioning_request_evidence(fleet.into(), agent.request_id)
                     .await
-                    .map_err(|_| "agent evidence unavailable".to_owned())?
+                    .map_err(AdmissionError::from)?
                     .ok_or_else(|| "agent evidence missing".to_owned())?;
                 let request: Value = serde_json::from_str(&context)
                     .map_err(|_| "agent evidence invalid".to_owned())?;
@@ -665,7 +728,7 @@ async fn work_once(
                 domain
                     .approve_coordinator_top_up(command, proof)
                     .await
-                    .map_err(|e| format!("token decision refused: {e}"))
+                    .map_err(AdmissionError::from)
             }
             .await;
             return match result {
@@ -679,6 +742,25 @@ async fn work_once(
                     Ok(()) => Outcome::Done,
                     Err(_) => Outcome::Later,
                 },
+                Err(AdmissionError::Refused(reason)) => {
+                    match domain
+                        .refuse_coordinator_command(
+                            fleet.into(),
+                            work.payload.clone(),
+                            reason.into(),
+                        )
+                        .await
+                    {
+                        Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
+                            Ok(()) => Outcome::Done,
+                            Err(_) => Outcome::Later,
+                        },
+                        Err(_) => {
+                            let _ = adapter.retry_later(work.ticket).await;
+                            Outcome::Later
+                        }
+                    }
+                }
                 Err(reason) => {
                     eprintln!("palpo coordinator top-up: {reason}");
                     let _ = adapter.retry_later(work.ticket).await;
@@ -692,17 +774,17 @@ async fn work_once(
             let result = async {
                 let command: hagency_store::coordinator::ProjectApproval =
                     serde_json::from_value(work.payload["command"].clone())
-                        .map_err(|_| "invalid project decision")?;
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
                 if command.context.server_engagement_id.as_str() != fleet {
-                    return Err("project decision targets another engagement");
+                    return Err(AdmissionError::Refused("invalid_request"));
                 }
                 let definition: hagency_store::coordinator::ProjectDefinition =
                     serde_json::from_value(work.payload["definition"].clone())
-                        .map_err(|_| "invalid project definition")?;
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
                 let grant = domain
                     .approve_coordinator_project(command, work.payload["definition"].clone())
                     .await
-                    .map_err(|_| "project decision refused")?;
+                    .map_err(AdmissionError::from)?;
                 let registration = domain
                     .provisioning_registration(fleet.to_owned())
                     .await
@@ -755,7 +837,7 @@ async fn work_once(
                     })
                     .await
                     .map_err(|_| "project room authority refused")?;
-                Ok::<_, &str>(result)
+                Ok::<_, AdmissionError>(result)
             }
             .await;
             return match result {
@@ -766,6 +848,25 @@ async fn work_once(
                     Ok(()) => Outcome::Done,
                     Err(_) => Outcome::Later,
                 },
+                Err(AdmissionError::Refused(reason)) => {
+                    match domain
+                        .refuse_coordinator_command(
+                            fleet.into(),
+                            work.payload.clone(),
+                            reason.into(),
+                        )
+                        .await
+                    {
+                        Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
+                            Ok(()) => Outcome::Done,
+                            Err(_) => Outcome::Later,
+                        },
+                        Err(_) => {
+                            let _ = adapter.retry_later(work.ticket).await;
+                            Outcome::Later
+                        }
+                    }
+                }
                 Err(reason) => {
                     eprintln!("palpo coordinator project: {reason}");
                     let _ = adapter.retry_later(work.ticket).await;
@@ -1047,9 +1148,14 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         };
         // ADR-186 §A4/§C4: the granted amount, raised by any top-up; the
         // request when the operator granted it unchanged.
-        let allocated = matches!(e.state, S::Reserved | S::Active).then(|| json!(e.allocation()));
+        let allocated =
+            matches!(e.state, S::Reserved | S::Active | S::Revoked).then(|| json!(e.allocation()));
         let usage = domain
             .coordinator_agent_usage(e.id.clone())
+            .await
+            .unwrap_or(Value::Null);
+        let lifecycle = domain
+            .coordinator_agent_lifecycle(e.id.clone())
             .await
             .unwrap_or(Value::Null);
         // The serving identity is the fleet-namespaced account the App Service
@@ -1091,7 +1197,7 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
             "serving": resource.map(|r| json!({"framework": r.framework, "model": r.model,
                 "reasoning": r.reasoning})),
             "fulfillment": phase.map(|p| json!({"phase": p, "incomplete": false})),
-            "ready": joined, "decidedAt": null, "endedAt": null, "observedAt": observed,
+            "ready": joined, "lifecycle":lifecycle, "decidedAt": null, "endedAt": null, "observedAt": observed,
             "consumedTokens":usage["consumedTokens"],"usageObservedAtMs":usage["usageObservedAtMs"],
             "usageEvidence":usage["usageEvidence"],"usageComplete":usage["usageComplete"],"quotaPaused":usage["quotaPaused"],
         }));

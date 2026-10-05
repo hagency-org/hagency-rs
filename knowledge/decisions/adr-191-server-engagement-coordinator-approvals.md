@@ -61,7 +61,7 @@ existing workflow until reconciled.
 
 ## Implemented integration boundary
 
-The current Rust slice adds schema version 63, typed coordinator commands,
+The current Rust slice adds schema version 65, typed coordinator commands,
 transactional reservations/top-ups, owner contribution HTTP routes, independent
 profile import/launch, native Matrix verification and outbound projections.
 `GET /console/api/server-engagements` and its `/{id}/resources` routes expose the
@@ -134,3 +134,28 @@ grants. It cannot use this publication to assert connection proof or rotate
 registration identity. Reimport must match the locally accepted delegation;
 an old profile cannot restore a removed coordinator. Browser acceptance covers
 the owner suspension form, pending synchronization and unchanged allocation.
+
+Schema 64 persists project and top-up terminal refusals alongside successful command receipts. The native worker checks current delegation before Matrix reads, publishes a bound refusal, and completes transport custody only after the receipt is durable. Successful and refused retries retain their outcome after expiry and never reserve again.
+
+Scoped agent control accepts stop, start, retire and definitive cleanup retry from
+the project owner, resource owner or current coordinator. A stop does not clear
+an inspection fence; retirement receipt and verified cleanup remain separate.
+The native pause helper preserves unknown runner outcomes and resource holds.
+Rinx advertises the controls only with `coordinatorAgentControlV1` and checks the
+fresh server projection again for every intent.
+
+Schema 65 adds explicit final account reconciliation after verified retirement.
+The resource owner records consumed tokens and a private billing evidence
+reference. Unknown runner outcomes and unsettled cleanup block reconciliation;
+the entered value cannot undercut observed consumption. The transaction releases
+only unused reserved tokens. Late observations increase retained consumption,
+and command replay cannot release that capacity again. Agent history retains the
+original allocation. This is owner account reconciliation, not a claim that the
+runtime meter covers all provider charges.
+
+The real native console browser test also retires a never-started fixture agent,
+records its explicitly reconciled zero consumption and checks the released
+capacity. The store test exercises measured consumption, uncertain cleanup,
+restart/replay and later additional usage. Rinx's 18-check native instrument run
+uses Rust Palpo plus an authenticated provider fixture for pause/resume/removal;
+it does not establish real executor termination or live Matrix chat acceptance.

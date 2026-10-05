@@ -18,6 +18,7 @@
 import { useMemo, useState } from 'react';
 import PageHead from '@/components/PageHead';
 import NativeServerEngagements from '@/components/NativeServerEngagements';
+import NativeSettlement from '@/components/NativeSettlement';
 import NativeStatusStrip from '@/components/NativeStatusStrip';
 import { NativeAccessNotice } from '@/components/NativeUsage';
 import { useT } from '@/components/Prefs';
@@ -241,6 +242,7 @@ export default function NativeEngagements({ lead = null, pending = null, other =
                   <td>
                     {/* #44 item 10 — the row links to its own usage detail. */}
                     <a href={`/console/usage/?engagement_id=${encodeURIComponent(e.id)}`}>{t('ng.viewUsage')}</a>{' '}
+                    {e.coordinatorManaged && e.state === 'revoked' && <NativeSettlement agent={e} onSaved={data.refresh} />}
                     {/* Exile + confirm (AgentActions.jsx, lane apwait #45): the
                         confirmation names THIS row's id, so a slip on one row
                         can never retire another. Both fixes share the cell. */}

@@ -386,6 +386,32 @@ impl Authority {
                 _ => Error::Unavailable,
             })
     }
+    pub(super) fn settlement(
+        &self,
+        session: &Session,
+        change: hagency_store::coordinator::FinalUsage,
+    ) -> Result<hagency_store::coordinator::SettlementCommand, Error> {
+        let state = self.0.lock().map_err(|_| Error::Unavailable)?;
+        if state.retired {
+            return Err(Error::Unavailable);
+        }
+        let now = Instant::now();
+        let access = state
+            .sessions
+            .iter()
+            .find(|s| matches(s, &session.0, now))
+            .and_then(|s| s.access.as_ref())
+            .ok_or(Error::Unauthorized)?;
+        access
+            .configuration
+            .prepare_settlement(change, now + Duration::from_secs(15))
+            .map_err(|e| match e {
+                hagency_store::Error::Busy => Error::Busy,
+                hagency_store::Error::LocalAuthority => Error::Unauthorized,
+                hagency_store::Error::Invalid(_) => Error::Invalid,
+                _ => Error::Unavailable,
+            })
+    }
     pub(super) fn can_manage_accounts(&self, session: &Session) -> Result<bool, Error> {
         self.logged_in(session)
     }

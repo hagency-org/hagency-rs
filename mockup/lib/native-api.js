@@ -100,7 +100,7 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (!response.ok) {
       if (value?.code === 'console_busy' && response.status === 429) throw new Error('busy');
-      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503 };
+      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, invalid_engagement_id: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503 };
       if (known[value?.code] === response.status || RECOVERY_ERRORS[value?.code] === response.status) {
         // ADR-186 §A2: a refusal may carry the store's human explanation of
         // the binding limit beside its code; it rides the error as `detail`.
@@ -112,9 +112,9 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     }
     return value;
   } catch (error) {
-    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
+    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'invalid_engagement_id', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
     if (options.method === 'DELETE') throw new Error('logout_unknown');
-    if (['POST', 'PATCH'].includes(options.method) && (path.startsWith('/api/resources') || path.startsWith('/api/accounts') || path.startsWith('/api/agents/'))) throw new Error('outcome_unknown');
+    if (['POST', 'PATCH'].includes(options.method) && (path.startsWith('/api/resources') || path.startsWith('/api/accounts') || path.startsWith('/api/agents/') || path.startsWith('/api/engagements/'))) throw new Error('outcome_unknown');
     throw new Error('native_unavailable');
   } finally { clearTimeout(timer); }
 }
@@ -581,6 +581,21 @@ export async function refuseEngagement(engagementId, commandId) {
  * act — native has no sweeper or timer (engagements.rs:12). */
 export async function retireEngagement(engagementId, commandId) {
   return validateEngagementReceipt(await request(`/api/engagements/${encodeURIComponent(engagementId)}/retire`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commandId }) }));
+}
+function validateSettlement(v) {
+  if (!v || !['awaiting_final_usage', 'settled', 'late_usage_charged'].includes(v.state)
+    || !id(v.agentAllocationId) || !id(v.resourceAllocationId) || !Number.isSafeInteger(v.allocatedTokens)
+    || typeof v.period !== 'string' || typeof v.periodKey !== 'string'
+    || (v.state !== 'awaiting_final_usage' && (!Number.isSafeInteger(v.consumedTokens) || !Number.isSafeInteger(v.releasedTokens)))) throw new Error('invalid_native_response');
+  return v;
+}
+export async function fetchAgentSettlement(engagementId) {
+  return validateSettlement(await request(`/api/engagements/${encodeURIComponent(engagementId)}/settlement`));
+}
+export async function settleAgentUsage(body) {
+  return validateSettlement(await request(`/api/engagements/${encodeURIComponent(body.agentAllocationId)}/settlement`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }));
 }
 /* ADR-186 §C: add tokens to a reserved or active engagement's allocation.
  * Checked by the store like an approval; a refusal carries the store's

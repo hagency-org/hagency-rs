@@ -35,6 +35,20 @@ pub enum CeilingChange {
 /// The inner access supplies the original finite gate, not publication authority.
 pub struct ResourceConfigurationAccess(ResourcePublicationAccess);
 impl ResourceConfigurationAccess {
+    pub fn prepare_settlement(
+        &self,
+        usage: super::coordinator::FinalUsage,
+        deadline: Instant,
+    ) -> Result<super::coordinator::SettlementCommand, Error> {
+        let digest = hagency_core::canonical::digest(&serde_json::to_value(&usage)?)?;
+        let gate = self.0.prepare(
+            usage.agent_allocation_id.as_str().into(),
+            digest,
+            false,
+            deadline,
+        )?;
+        Ok(super::coordinator::SettlementCommand { usage, gate })
+    }
     pub fn prepare_delegation(
         &self,
         change: super::coordinator::DelegationChange,

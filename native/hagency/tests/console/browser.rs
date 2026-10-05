@@ -77,6 +77,55 @@ async fn native_coordinator_ledger_browser_shares_resource_allocation_and_shows_
             .unwrap()["state"],
         "refused"
     );
+    let settled_resource = native_resource("browser_settlement_resource");
+    f.domain
+        .put_resource(settled_resource.clone())
+        .await
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(90);
+    let access = hagency_store::ResourceConfigurationAccess::new(until, Default::default());
+    let grant=serde_json::from_value(json!({"id":"settlement_grant","serverEngagementId":fleet,"resourceId":settled_resource.id(),"revision":1,"allocatedTokens":500,"eligibleManagers":["@owner:example.test"]})).unwrap();
+    f.domain
+        .contribute_resource(access.prepare_contribution(grant, until).unwrap())
+        .await
+        .unwrap();
+    let context = |id: &str| json!({"version":1,"commandId":id,"serverEngagementId":fleet,"registrationGeneration":1,"delegationRevision":1,"actor":"@coordinator:example.test","issuedAtMs":now,"expiresAtMs":now+300000});
+    let definition = json!({"name":"Settlement project","roomId":"!project:example.test","ownerDmRoomId":"!private:example.test"});
+    let project=serde_json::from_value(json!({"context":context("settlement_project"),"request":{"id":"settlement_project_request","revision":1,"serverEngagementId":fleet,"projectId":"project_one","owner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":hagency_core::canonical::digest(&definition).unwrap(),"resourceAllocations":["settlement_grant"]}})).unwrap();
+    f.domain
+        .approve_coordinator_project(project, definition)
+        .await
+        .unwrap();
+    let request = common::request(
+        "settlement_browser",
+        "SettlementVisible",
+        &settled_resource,
+        200,
+    );
+    let mut observation = common::observation(&request);
+    observation.observed_at_ms = now;
+    let proof = hagency_core::authority::verify_request(
+        &common::registration(),
+        request.clone(),
+        observation,
+    )
+    .unwrap();
+    f.domain
+        .verify_coordinator_project(proof.clone())
+        .await
+        .unwrap();
+    f.domain.admit(proof.clone(), now).await.unwrap();
+    let command=serde_json::from_value(json!({"context":context("settlement_allocation"),"request":{"id":"settlement_browser","revision":1,"serverEngagementId":fleet,"projectId":"project_one","projectRevision":1,"resourceAllocationId":"settlement_grant","projectOwner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":hagency_core::canonical::digest(&serde_json::to_value(&request).unwrap()).unwrap(),"requestedTokens":200},"allocatedTokens":200})).unwrap();
+    let settled_agent = f
+        .domain
+        .approve_coordinated_agent(command, proof)
+        .await
+        .unwrap();
+    // This fixture never starts an execution; retirement cancels provisioning.
+    f.domain
+        .revoke("retire_settlement_fixture".into(), settled_agent.id.clone())
+        .await
+        .unwrap();
     let server = Server::new(TcpListener::new(address).try_bind().await.unwrap());
     let handle = server.handle();
     let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
@@ -110,9 +159,20 @@ async fn native_coordinator_ledger_browser_shares_resource_allocation_and_shows_
         .server_engagement_resources(fleet.clone(), String::new(), 50)
         .await
         .unwrap();
-    assert_eq!(grants.len(), 1);
-    assert_eq!(grants[0]["allocatedTokens"], 4000);
-    assert_eq!(grants[0]["revision"], 2);
+    assert_eq!(grants.len(), 2);
+    let edited = grants
+        .iter()
+        .find(|g| g["resourceId"] == resource.id())
+        .unwrap();
+    assert_eq!(edited["allocatedTokens"], 4000);
+    assert_eq!(edited["revision"], 2);
+    let settlement = f
+        .domain
+        .coordinator_settlement(settled_agent.id)
+        .await
+        .unwrap();
+    assert_eq!(settlement["state"], "settled");
+    assert_eq!(settlement["releasedTokens"], 200);
     let authority = f
         .domain
         .coordinator_authority(fleet)

@@ -134,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 63;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 65;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -1121,11 +1121,18 @@ impl DomainRepository {
                         63,
                         include_str!("migrations/063-coordinator-delegations.sql"),
                     ),
+                    (64, include_str!("migrations/064-coordinator-refusals.sql")),
+                    (
+                        65,
+                        include_str!("migrations/065-coordinator-settlements.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
                     "SELECT id,digest,command,definition,state,reason,agent_id,received_at,updated_at FROM coordinator_deliveries LIMIT 0",
                     "SELECT engagement_id,revision,digest,change,authority,accepted_at FROM coordinator_delegations LIMIT 0",
+                    "SELECT id,engagement_id,digest,receipt,refused_at FROM coordinator_refusals LIMIT 0",
+                    "SELECT agent_id,command_id,digest,receipt,accepted_at FROM coordinator_settlements LIMIT 0",
                     "SELECT allocated_tokens FROM engagements LIMIT 0",
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
@@ -1529,7 +1536,14 @@ impl DomainRepository {
             // Compare before the state moves into the label.
             let pending = engagement.state == EngagementState::Pending;
             let allocated_tokens = u64::from(engagement.allocation());
-            let spent_tokens = quota_holds::spend(&self.db, &engagement.id)?;
+            let observed_tokens = quota_holds::spend(&self.db, &engagement.id)?;
+            let accounted_tokens: Option<u64> = self.db.query_row(
+                "SELECT json_extract(receipt,'$.consumedTokens') FROM coordinator_settlements WHERE agent_id=?1",
+                [&engagement.id], |row| row.get(0)).optional()?;
+            let spent_tokens = match (observed_tokens, accounted_tokens) {
+                (Some(observed), Some(accounted)) => Some(observed.max(accounted)),
+                (observed, accounted) => observed.or(accounted),
+            };
             let quota_paused = quota_holds::paused(&self.db, &engagement.id)?;
             labels.push(EngagementLabel {
                 coordinator_managed:self.db.query_row("SELECT EXISTS(SELECT 1 FROM coordinator_engagements c JOIN engagements e ON e.fleet_id=c.id WHERE e.id=?1)",[&engagement.id],|r|r.get(0))?,
@@ -2441,59 +2455,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let digest = decision_digest(if revoke { "revoke" } else { "reject" }, id)?;
-        if let Some(value) = replay_decision(&tx, command_id, &digest)? {
-            return Ok(value);
-        }
-        let mut value = read_engagement(&tx, id)?;
-        if !matches!(
-            value.state,
-            EngagementState::Pending | EngagementState::Reserved | EngagementState::Active
-        ) || !revoke && value.state != EngagementState::Pending
-        {
-            return Err(Error::State);
-        }
-        let effect: Option<(String, String)> = tx
-            .query_row(
-                "SELECT state,payload FROM effects WHERE engagement_id=?1 AND kind='provision'",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((state, payload)) = effect {
-            tx.execute("UPDATE effects SET state='cancelled',fence=fence+1 WHERE engagement_id=?1 AND kind='provision'", [id])?;
-            if state != "pending" {
-                value.cleanup = CleanupState::Pending;
-                tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'retire','pending',?3)", params![format!("retire_{id}"),id,payload])?;
-            }
-        }
-        value.state = if revoke {
-            EngagementState::Revoked
-        } else {
-            EngagementState::Rejected
-        };
-        write_engagement(&tx, &value)?;
-        // ADR-095 Slice 6: the ended-at instant is advisory metadata on the
-        // side table (never a column here), read by the engagements phase's
-        // receipt payload. First terminal transition wins.
-        tx.execute(
-            "INSERT INTO engagement_ends(engagement_id,ended_at) VALUES(?1,?2) \
-             ON CONFLICT(engagement_id) DO NOTHING",
-            params![value.id, graphs::now_ms()?],
-        )?;
-        graphs::reconcile(&tx, graphs::now_ms()?)?;
-        matrix_routes::reconcile(&tx, graphs::now_ms()?)?;
-        record_decision(
-            &tx,
-            command_id,
-            &digest,
-            &value,
-            Some(if revoke {
-                "engagement.revoked"
-            } else {
-                "engagement.rejected"
-            }),
-        )?;
+        let value = end_in_transaction(&tx, command_id, id, revoke)?;
         tx.commit()?;
         Ok(value)
     }
@@ -2763,6 +2725,67 @@ fn observe_effect_transaction(
         params![id, state, digest],
     )?;
     write_engagement(tx, &value)?;
+    Ok(value)
+}
+pub(super) fn end_in_transaction(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    id: &str,
+    revoke: bool,
+) -> Result<Engagement, Error> {
+    let digest = decision_digest(if revoke { "revoke" } else { "reject" }, id)?;
+    if let Some(value) = replay_decision(tx, command_id, &digest)? {
+        return Ok(value);
+    }
+    let mut value = read_engagement(tx, id)?;
+    if !matches!(
+        value.state,
+        EngagementState::Pending | EngagementState::Reserved | EngagementState::Active
+    ) || !revoke && value.state != EngagementState::Pending
+    {
+        return Err(Error::State);
+    }
+    let effect: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state,payload FROM effects WHERE engagement_id=?1 AND kind='provision'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((state, payload)) = effect {
+        tx.execute("UPDATE effects SET state='cancelled',fence=fence+1 WHERE engagement_id=?1 AND kind='provision'", [id])?;
+        if state != "pending" {
+            value.cleanup = CleanupState::Pending;
+            tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'retire','pending',?3)", params![format!("retire_{id}"),id,payload])?;
+        }
+    }
+    value.state = if revoke {
+        EngagementState::Revoked
+    } else {
+        EngagementState::Rejected
+    };
+    write_engagement(tx, &value)?;
+    // ADR-095 Slice 6: the ended-at instant is advisory metadata on the
+    // side table (never a column here), read by the engagements phase's
+    // receipt payload. First terminal transition wins.
+    tx.execute(
+        "INSERT INTO engagement_ends(engagement_id,ended_at) VALUES(?1,?2) \
+             ON CONFLICT(engagement_id) DO NOTHING",
+        params![value.id, graphs::now_ms()?],
+    )?;
+    graphs::reconcile(tx, graphs::now_ms()?)?;
+    matrix_routes::reconcile(tx, graphs::now_ms()?)?;
+    record_decision(
+        tx,
+        command_id,
+        &digest,
+        &value,
+        Some(if revoke {
+            "engagement.revoked"
+        } else {
+            "engagement.rejected"
+        }),
+    )?;
     Ok(value)
 }
 fn read_effect(db: &Connection, id: &str) -> Result<Effect, Error> {

@@ -16,8 +16,13 @@ type StoredResourceGrant = (
 );
 mod delegations;
 mod deliveries;
+mod lifecycle;
+mod refusals;
+mod settlements;
 pub use delegations::{DelegationChange, DelegationCommand, DelegationState};
 pub use deliveries::terminal_reason as coordinator_refusal_reason;
+pub use lifecycle::{AgentControl, AgentOperation};
+pub use settlements::{FinalUsage, SettlementCommand};
 
 pub use contract::{
     AgentApproval, ProjectApproval, ProjectGrant, ServerEngagement, TokenTopUpApproval,
@@ -86,7 +91,11 @@ fn publish_project(db: &Connection, grant: &ProjectGrant) -> Result<(), Error> {
 fn policy(error: contract::Error) -> Error {
     match error {
         contract::Error::Forbidden | contract::Error::SelfApproval => Error::LocalAuthority,
-        contract::Error::BindingMismatch | contract::Error::Expired => Error::Generation,
+        contract::Error::BindingMismatch
+        | contract::Error::Expired
+        | contract::Error::EngagementUnavailable => Error::Generation,
+        contract::Error::ProjectUnavailable => Error::State,
+        contract::Error::ResourceNotGranted => Error::Unqualified,
         contract::Error::InsufficientCapacity | contract::Error::Unallocated => {
             Error::InsufficientCapacity
         }
@@ -455,6 +464,15 @@ impl DomainRepository {
     pub fn coordinator_agent_usage(&self, id: &str) -> Result<Value, Error> {
         let quota = self.quota_status(id)?;
         let observed:Option<u64>=self.db.query_row("SELECT MIN(observed_at) FROM usage_sources WHERE engagement_id=?1 AND observed_at IS NOT NULL",[id],|r|r.get(0))?;
+        if let Ok(settlement) = self.coordinator_settlement(id)
+            && let Some(final_tokens) = settlement["consumedTokens"].as_u64()
+        {
+            return Ok(
+                json!({"consumedTokens":final_tokens.max(quota.spent_tokens.unwrap_or(0)),
+                "usageObservedAtMs":settlement["observedAtMs"],"usageEvidence":"owner_account_reconciliation",
+                "usageComplete":settlement["state"]=="settled","quotaPaused":quota.paused}),
+            );
+        }
         Ok(
             json!({"consumedTokens":quota.spent_tokens,"usageObservedAtMs":observed,"usageEvidence":"host_attributed_lower_bound",
             "usageComplete":false,
@@ -475,6 +493,13 @@ impl DomainRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let r = &command.request;
         let fleet = r.server_engagement_id.as_str();
+        let fingerprint =
+            canonical::digest(&json!({"operation":"coordinator_token_top_up","command":command}))?;
+        if let Some(value) =
+            refusals::result(&tx, command.context.command_id.as_str(), &fingerprint)?
+        {
+            return Ok(serde_json::from_value(value)?);
+        }
         let current = current(&tx, fleet, now)?;
         authority(&tx, proof, now)?;
         project_authority(&tx, proof)?;
@@ -844,6 +869,14 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let fingerprint = canonical::digest(
+            &json!({"operation":"coordinator_project_approval","command":command,"definition":definition}),
+        )?;
+        if let Some(value) =
+            refusals::result(&tx, command.context.command_id.as_str(), &fingerprint)?
+        {
+            return Ok(serde_json::from_value(value)?);
+        }
         let authority = current(&tx, command.context.server_engagement_id.as_str(), now)?;
         contract::authorize_project_approval(
             command,

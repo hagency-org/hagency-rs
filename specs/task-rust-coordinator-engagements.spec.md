@@ -23,6 +23,32 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Scoped agent controls cannot bypass cleanup inspection or replay an old pause
+  Test: scoped_agent_controls_recheck_authority_and_preserve_cleanup_and_capacity_on_replay
+  Given a coordinated agent controlled by its project owner or current delegate
+  When pause, resume or retirement retries after a restart or an uncertain cleanup
+  Then the original result survives, unknown cleanup cannot be retried and capacity remains held
+
+Scenario: Final account reconciliation releases only unused capacity
+  Test: final_account_settlement_refunds_only_unused_capacity_and_late_usage_remains_charged
+  Given a retired agent with measured usage and completed runtime cleanup
+  When the resource owner records final account usage then a later usage observation arrives
+  Then only unused capacity is returned, late usage remains charged and replay cannot refund twice
+
+Scenario: Project and top-up terminal receipts cannot be revived by later capacity or expiry
+  Test: project_and_top_up_refusals_are_terminal_and_applied_commands_replay_after_expiry
+  Given an applied top-up and refused project and top-up commands
+  When capacity changes or the writer restarts after command expiry
+  Then their original outcomes survive without a second reservation
+
+Scenario: The actual native worker reports project and top-up refusals without Matrix availability
+  Test: native_palpo_worker_publishes_terminal_project_and_top_up_refusals
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated HTTPS Palpo peer and unreachable Matrix origin
+  Given a stale delegation decision and a top-up targeting a missing project
+  When the native worker receives their durable deliveries
+  Then it persists and publishes the terminal refusals before completing custody
+
 Scenario: Owner delegation revisions fence old commands and survive restart
   Test: owner_delegation_changes_fence_old_commands_and_publish_before_resources
   Given the owner changes the coordinator through a revocable configuration permission

@@ -1,0 +1,164 @@
+use super::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOperation {
+    Stop,
+    Start,
+    Retire,
+    RetryCleanup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentControl {
+    pub context: contract::CommandContext,
+    pub agent_allocation_id: contract::AgentAllocationId,
+    pub project_id: contract::ProjectId,
+    pub project_revision: contract::Revision,
+    pub resource_allocation_id: contract::ResourceAllocationId,
+    pub operation: AgentOperation,
+}
+
+pub(super) fn authorize(db: &Connection, command: &AgentControl, now: u64) -> Result<(), Error> {
+    let c = &command.context;
+    let authority = binding(db, c.server_engagement_id.as_str())?.ok_or(Error::NotFound)?;
+    let registration: String = db.query_row(
+        "SELECT config FROM registrations WHERE fleet_id=?1",
+        [c.server_engagement_id.as_str()],
+        |r| r.get(0),
+    )?;
+    let registration: Registration = serde_json::from_str(&registration)?;
+    if c.version != 1
+        || !authority.coordinator_approval_v1
+        || c.registration_generation != authority.registration_generation
+        || u64::from(c.registration_generation) != registration.generation
+        || c.delegation_revision != authority.delegation_revision
+        || c.issued_at_ms > now
+        || c.expires_at_ms <= now
+        || c.expires_at_ms > contract::MAX_EXACT_JSON_INTEGER
+        || !c.actor.belongs_to(&authority.server)
+    {
+        return Err(Error::Generation);
+    }
+    let (decision, grant_id): (String, String) = db
+        .query_row(
+            "SELECT decision,resource_allocation_id FROM coordinator_agents WHERE agent_id=?1",
+            [command.agent_allocation_id.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    let approved: AgentApproval = serde_json::from_str(&decision)?;
+    if approved.request.server_engagement_id != c.server_engagement_id
+        || approved.request.project_id != command.project_id
+        || approved.request.project_revision != command.project_revision
+        || grant_id != command.resource_allocation_id.as_str()
+    {
+        return Err(Error::Conflict);
+    }
+    let raw: String = db
+        .query_row(
+            "SELECT grant FROM coordinator_projects WHERE engagement_id=?1 AND id=?2",
+            params![c.server_engagement_id.as_str(), command.project_id.as_str()],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    let project: ProjectGrant = serde_json::from_str(&raw)?;
+    if project.revision != command.project_revision
+        || project.owner != approved.request.project_owner
+    {
+        return Err(Error::Generation);
+    }
+    let delegated = c.actor == authority.coordinator && authority.delegation_expires_at_ms > now;
+    if c.actor != authority.owner && c.actor != project.owner && !delegated {
+        return Err(Error::LocalAuthority);
+    }
+    // Ending work remains possible after suspension. Only a verified, current
+    // delegation/project may re-enable a serving allocation.
+    if command.operation == AgentOperation::Start {
+        current(db, c.server_engagement_id.as_str(), now)?;
+        if project.state != contract::ProjectState::Ready {
+            return Err(Error::State);
+        }
+    }
+    Ok(())
+}
+
+impl DomainRepository {
+    pub fn control_coordinator_agent(
+        &mut self,
+        fleet: &str,
+        command: &AgentControl,
+        now: u64,
+    ) -> Result<Value, Error> {
+        if command.context.server_engagement_id.as_str() != fleet {
+            return Err(Error::Conflict);
+        }
+        let payload = json!({"operation":"coordinator_agent_control","command":command});
+        let digest = canonical::digest(&payload)?;
+        let id = command.context.command_id.as_str();
+        let agent = command.agent_allocation_id.as_str();
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(receipt) = refusals::result(&tx, id, &digest)? {
+            return Ok(receipt);
+        }
+        authorize(&tx, command, now)?;
+        match command.operation {
+            AgentOperation::Retire => {
+                end_in_transaction(&tx, id, agent, true)?;
+            }
+            AgentOperation::RetryCleanup => {
+                if read_engagement(&tx, agent)?.state != EngagementState::Revoked {
+                    return Err(Error::State);
+                }
+                if tx.execute("UPDATE effects SET state='pending',outcome_digest=NULL WHERE engagement_id=?1 AND kind='retire' AND state='failed'",[agent])? != 1 { return Err(Error::State); }
+            }
+            AgentOperation::Stop => {
+                if read_engagement(&tx, agent)?.state != EngagementState::Active {
+                    return Err(Error::State);
+                }
+                agent_lifecycle::pause_in_transaction(
+                    &tx,
+                    agent,
+                    command.context.actor.as_str(),
+                    now,
+                )?;
+            }
+            AgentOperation::Start => {
+                if read_engagement(&tx, agent)?.state != EngagementState::Active {
+                    return Err(Error::State);
+                }
+                agent_lifecycle::start_in_transaction(&tx, agent, now)?;
+            }
+        }
+        let receipt = json!({"kind":"receipt","commandId":id,"commandDigest":digest,"agentId":agent,"operation":command.operation,"state":"applied"});
+        bounded_row(&tx, "coordinator_commands", "id", id, 10000)?;
+        tx.execute(
+            "INSERT INTO coordinator_commands(id,engagement_id,digest,receipt) VALUES(?1,?2,?3,?4)",
+            params![id, fleet, digest, serialize(&receipt)?],
+        )?;
+        publish(&tx, fleet, &format!("command_{id}"), receipt.clone())?;
+        tx.commit()?;
+        Ok(receipt)
+    }
+
+    pub fn coordinator_agent_lifecycle(&self, agent: &str) -> Result<Value, Error> {
+        let record = read_engagement(&self.db, agent)?;
+        let stopped: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM agent_lifecycle WHERE engagement_id=?1 AND started_at IS NULL)",[agent],|r|r.get(0))?;
+        let cleanup: Option<String> = self
+            .db
+            .query_row(
+                "SELECT state FROM effects WHERE engagement_id=?1 AND kind='retire'",
+                [agent],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(
+            json!({"paused":stopped,"runtimeState":record.state,"cleanup":record.cleanup,"cleanupEffect":cleanup,"settlement":self.coordinator_settlement(agent).ok()}),
+        )
+    }
+}
