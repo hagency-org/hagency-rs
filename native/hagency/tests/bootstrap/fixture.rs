@@ -26,6 +26,9 @@ impl Running {
     pub fn from_child(child: Child) -> Self {
         Self(child)
     }
+    pub fn still_owned(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
 }
 #[cfg(unix)]
 impl Running {
@@ -35,9 +38,6 @@ impl Running {
             .status()
             .unwrap();
         assert!(result.success());
-    }
-    pub fn still_owned(&mut self) -> bool {
-        self.0.try_wait().unwrap().is_none()
     }
     pub async fn exited(&mut self) {
         let until = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -93,6 +93,31 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 impl Fixture {
+    /// The readiness boundary's status code (`/ready`: 503 while any
+    /// component is not serving, 200 otherwise).
+    pub async fn ready(&self) -> u16 {
+        let mut stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /ready HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    self.address
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let head = String::from_utf8_lossy(&bytes);
+        head.split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status line in {head}"))
+    }
     pub async fn new(fenced: bool) -> Self {
         Self::with_account(fenced, false).await
     }
@@ -619,31 +644,6 @@ impl Fixture {
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {}
             }
         }
-    }
-    /// The readiness boundary's status code (`/ready`: 503 while any
-    /// component is not serving, 200 otherwise).
-    pub async fn ready(&self) -> u16 {
-        let mut stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
-        stream
-            .write_all(
-                format!(
-                    "GET /ready HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                    self.address
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut bytes = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
-        let head = String::from_utf8_lossy(&bytes);
-        head.split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .unwrap_or_else(|| panic!("no status line in {head}"))
     }
     /// Keep the worker served for a while: for asserting that nothing
     /// happened, which no predicate can wait for.
