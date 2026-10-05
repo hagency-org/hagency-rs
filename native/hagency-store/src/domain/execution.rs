@@ -20,6 +20,7 @@ fn load_session(db: &Connection, id: &str, allow_quarantine: bool) -> Result<Sto
         return Err(Error::Quarantined);
     }
     let binding: StoredSession = serde_json::from_str(&value)?;
+    super::project_grants::check_engagement(db, binding.engagement_id(), super::graphs::now_ms()?)?;
     binding.validate()?;
     if binding.id() != id || binding.engagement_id() != engagement_id {
         return Err(Error::RunnerAuthority);
@@ -325,6 +326,7 @@ pub(super) fn recover_all(tx: &Transaction<'_>, now: u64) -> Result<(), Error> {
     Ok(())
 }
 fn expire(tx: &Transaction<'_>, now: u64, writer: &'static str) -> Result<(), Error> {
+    super::project_grants::reconcile(tx, now)?;
     let ids=tx.prepare("SELECT id FROM runner_dispatches WHERE state IN ('leased','started','parked') AND (lease_until<=?1 OR capability_until<=?1)")?.query_map([now],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
     for id in ids {
         lose(tx, &id, now, writer)?;

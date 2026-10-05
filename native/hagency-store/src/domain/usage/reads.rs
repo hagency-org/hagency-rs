@@ -242,6 +242,9 @@ pub(crate) fn ceiling_report(
             params![resource_id],
             |r| r.get(0),
         )?;
+    let reserved = reserved
+        .checked_add(super::super::project_grants::unassigned(db, resource_id)?)
+        .ok_or(Error::Capacity)?;
     if reserved > JSON_SAFE_MAX {
         return Err(Error::Capacity);
     }

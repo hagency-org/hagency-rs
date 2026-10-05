@@ -48,6 +48,18 @@ fn verdict_store_error(res: &mut Response, error: hagency_store::Error) {
         hagency_store::Error::InsufficientCapacity => {
             refusal(res, StatusCode::CONFLICT, "insufficient_capacity")
         }
+        hagency_store::Error::GrantAuthority => refusal_explained(
+            res,
+            StatusCode::FORBIDDEN,
+            "project_admin_required",
+            "Use the assigned project administrator's Palpo mini app to approve this agent or its top-up.",
+        ),
+        hagency_store::Error::GrantExpired => {
+            refusal(res, StatusCode::CONFLICT, "project_grant_expired")
+        }
+        hagency_store::Error::GrantRevoked => {
+            refusal(res, StatusCode::CONFLICT, "project_grant_revoked")
+        }
         hagency_store::Error::NoCeiling => refusal(res, StatusCode::CONFLICT, "no_ceiling"),
         // ADR-186 §A2: the refusal carries the store's own explanation of
         // the binding limit, which the console shows beside the amount.

@@ -9,6 +9,7 @@ import { useT } from '@/components/Prefs';
 import { errorText } from '@/lib/i18n';
 import { Blank } from '@/components/Blank';
 import SearchSelect from '@/components/SearchSelect';
+import NativeResourceContributions from '@/components/NativeResourceContributions';
 import { labelFor } from '@/lib/labels';
 
 const label = (r) => [r.framework, r.model, r.reasoning].filter(Boolean).join(' · ');
@@ -92,6 +93,7 @@ export default function NativeResources() {
           <div className="btn-row"><button className="btn" onClick={data.refresh}>{t('nu.refresh')}</button><button className="btn" onClick={data.firstPage}>{t('nu.firstPage')}</button><button className="btn" disabled={!data.next_after} onClick={data.nextPage}>{t('nu.nextPage')}</button></div>
         </div>
       </section>
+      {resources.find(r => r.id === selected) && <NativeResourceContributions key={selected} resource={resources.find(r => r.id === selected)} allowed={data.permissions?.configureResource && phase === 'ready'} refreshResource={data.refresh} />}
       {budget && <section className="panel" data-resource-id={selected}><h2 className="sec" style={{ marginTop: 0 }}>{t('nr.budget')}</h2><p>{t('nr.budgetMeaning')}</p><div className="split even"><BudgetPart value={budget.pool} /><BudgetPart value={budget.seat} account /></div><p>{t('nr.effectiveRemaining')}: <b>{number(budget.remainingTokens)}</b></p>{budget.draw && <HeadroomPart draw={budget.draw} number={number} t={t} />}</section>}
       <section className="panel"><h2 className="sec" style={{ marginTop: 0 }}>{t('nr.roles')}</h2><div className="tbl-wrap"><table className="tbl"><thead><tr><th>{t('nr.role')}</th><th>{t('nr.choice')}</th><th>{t('nr.eligible')}</th><th>{t('nr.fillable')}</th><th>{t('nr.families')}</th><th>{t('nr.overTier')}</th><th>{t('nr.crossFamily')}</th></tr></thead><tbody>{roles.map((r) => <tr key={r.role} data-role-row={r.role}><td>{r.role}</td><td>{t(r.explicitPublication === null ? 'nr.automatic' : r.explicitPublication ? 'nr.enabled' : 'nr.disabled')}</td><td>{t(r.available ? 'nr.yes' : 'nr.no')}</td><td data-fillable={r.fillable}>{r.fillable}</td><td data-families={r.families.join(' ')}>{r.families.length ? r.families.join(', ') : <Blank why="rs.why.noTier" t={t} />}</td><td data-over-tier={r.overTier}>{r.overTier}</td><td>{t(r.crossFamily ? 'nr.yes' : 'nr.no')}</td></tr>)}</tbody></table></div></section>
     </div>}

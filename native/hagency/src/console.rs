@@ -18,6 +18,7 @@ mod offer_book;
 pub mod palpo_import;
 mod project_sides;
 mod resource_configuration;
+mod resource_contributions;
 mod resources;
 mod setup;
 mod side_budget;
@@ -138,6 +139,7 @@ pub(crate) fn router() -> Router {
                 .push(accounts::router())
                 .push(matrix_diag::router())
                 .push(resource_configuration::router())
+                .push(resource_contributions::router())
                 // Task #46: the operator-facing capability and framework reads
                 // (GET /api/capability, /api/frameworks, /api/frameworks/detect)
                 // are session-scoped reads, mounted under the console API so

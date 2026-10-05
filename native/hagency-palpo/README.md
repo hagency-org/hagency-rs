@@ -40,3 +40,11 @@ The script verifies the commit and relevant source cleanliness before importing
 it. The example accepts only literal loopback HTTP and uses fixed synthetic
 credentials. It must not be pointed at a deployed service. Normal Cargo tests
 need neither Node nor another checkout.
+
+The project-grant branch also has an opt-in check using the actual native host
+work consumer, current Palpo HTTP/session/workflow modules and both SQLite stores.
+It covers real command receipts, status publication, partial recovery and a lost
+publication response across a Hagency restart. Matrix is an explicit loopback
+fixture; model execution and live homeserver acceptance are not claimed. See the
+command and exact source pin in
+[the project-grants review](../../docs/reviews/2026-10-04-palpo-project-grants.md#actual-palpo-http--rust-worker-integration).

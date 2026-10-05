@@ -30,6 +30,10 @@ pub use agent_message_leftovers::{
 mod approvals;
 mod engagement_retention;
 mod engagement_terms;
+mod palpo_lifecycle;
+mod project_commands;
+pub use palpo_lifecycle::{PalpoAgentLifecycle, PalpoRetirementTarget};
+pub(crate) mod project_grants;
 pub use approvals::card::PrivateApprovalCard;
 mod attachments;
 mod attempt_events;
@@ -104,6 +108,7 @@ mod peers;
 pub(crate) mod received_files;
 mod replies;
 pub(crate) mod resource_configuration;
+pub(crate) mod resource_contributions;
 pub(crate) mod resource_publication;
 mod side_budget;
 pub use side_budget::{SideBudget, SideCommitment, UsageTotals};
@@ -133,7 +138,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 60;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 64;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -747,6 +752,26 @@ fn budget(
             fulfillment: None,
         });
     }
+    let mut reservations = db.prepare("SELECT DISTINCT r.id,r.preset_id,json_extract(r.config,'$.seatId') FROM resource_delegations d JOIN resources r ON r.id=d.resource_id WHERE r.preset_id=?1 OR json_extract(r.config,'$.seatId')=?2")?;
+    let roots = reservations.query_map(params![resource.preset_id, resource.seat_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for root in roots {
+        let (id, preset, seat) = root?;
+        let tokens = project_grants::unassigned(db, &id)?;
+        commitments.push(allocation::Commitment {
+            id: format!("delegation_{id}"),
+            preset_id: Some(preset),
+            seat_id: Some(seat),
+            allocated_tokens: Some(tokens.try_into()?),
+            state: "active".into(),
+            fulfillment: None,
+        });
+    }
     Ok(allocation::resource_budget(&allocation::Input {
         preset: allocation::Preset {
             id: resource.preset_id.clone(),
@@ -1066,9 +1091,18 @@ impl DomainRepository {
                     (59, include_str!("migrations/059-owner-anchors.sql")),
                     // ADR-188: rooms an agent joined by invitation.
                     (60, include_str!("migrations/074-joined-rooms.sql")),
+                    (61, include_str!("migrations/075-project-grants.sql")),
+                    (62, include_str!("migrations/076-project-commands.sql")),
+                    (63, include_str!("migrations/077-palpo-retirement.sql")),
+                    (64, include_str!("migrations/078-unused-project-release.sql")),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
+                    "SELECT id,config,revoked_at FROM resource_delegations LIMIT 0",
+                    "SELECT id,delegation_id,config,released_at FROM project_grants LIMIT 0",
+                    "SELECT engagement_id,grant_id,debited_tokens FROM project_grant_agents LIMIT 0",
+                    "SELECT id,digest,result,created_at FROM project_grant_decisions LIMIT 0",
+                    "SELECT fleet_id,generation,command_id,receipt FROM project_command_receipts LIMIT 0",
                     "SELECT allocated_tokens FROM engagements LIMIT 0",
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
@@ -1982,124 +2016,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        authority(&tx, proof, now)?;
-        project_authority(&tx, proof)?;
-        let request = proof.request();
-        let id = request.engagement_id()?;
-        let digest = request.digest()?;
-        let previous: Option<String> = tx
-            .query_row("SELECT digest FROM engagements WHERE id=?1", [&id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        if let Some(old) = previous {
-            if old != digest {
-                return Err(Error::Conflict);
-            }
-            return read_engagement(&tx, &id); // Exact replay survives withdrawal.
-        }
-        bounded_row(&tx, "engagements", "id", &id, 10_000)?;
-        let resource = read_resource(&tx, &request.agent_definition.resource_id)?;
-        self.accounts.check_resource(&tx, &resource)?;
-        if !resource.qualifies(&request.role)
-            || !role_available(&tx, &request.role, Some(&request.fleet_id))?
-        {
-            return Err(Error::Unqualified);
-        }
-        let collision: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engagements WHERE fleet_id=?1 AND project_id=?2 AND name=?3 AND state IN ('pending','reserved','active'))",
-            params![request.fleet_id,request.target_project_id,request.agent_definition.name.as_str()], |r| r.get(0))?;
-        if collision {
-            return Err(Error::Conflict);
-        }
-        /*
-         * Task #19 TS parity (lib/engagement-store.js:546-566): the routing
-         * verdict is RECORDED, never used to refuse — TS stores the request
-         * with its `route` and `autoJoined` so the queue can show why it did
-         * not auto-join. `remainingTokens` is computed exactly like the
-         * approve() check but with `for_auto_join=true` (the retained JS
-         * `remainingFor(agent, { forAutoJoin: true })`), and a seat period
-         * mismatch nulls the whole figure (backend-v2.js:14057) rather than
-         * erroring, because routing must name `overCeiling`, not refuse.
-         */
-        let whitelisted = tx
-            .query_row(
-                "SELECT 1 FROM room_whitelist WHERE project_room_id=?1",
-                [&request.target_room_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        let cross_family_ok = role_available(&tx, &request.role, Some(&request.fleet_id))?;
-        let offer = engagement_terms::read_offer(&tx, &request.role)?;
-        let report = usage::ceiling_report(&tx, &resource.id(), now)?;
-        let spent_budget = budget(&tx, &resource, None, true)?;
-        let seat_ok = spent_budget.seat.status != allocation::SeatStatus::PeriodMismatch;
-        let by_ceiling = report
-            .ceiling_tokens
-            .map(|c| c.saturating_sub(report.drawn));
-        let remaining = [
-            by_ceiling,
-            seat_ok
-                .then_some(spent_budget.seat.remaining)
-                .flatten()
-                .map(u64::from),
-            spent_budget.pool.remaining.map(u64::from),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
-        // TS holdsAllocation: an engagement that has a live allocation — in
-        // this store that is reserved/active with a non-failed provision.
-        // `role` lives in the context JSON, not a column.
-        let active_for_role: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM engagements e WHERE json_extract(e.context,'$.role')=?1 \
-             AND e.state IN ('reserved','active') \
-             AND NOT EXISTS(SELECT 1 FROM effects f WHERE f.engagement_id=e.id AND f.kind='provision' AND f.state='failed')",
-            [&request.role],
-            |r| r.get(0),
-        )?;
-        let (route, auto_joined) = engagement_terms::route_request(
-            whitelisted,
-            cross_family_ok,
-            offer.as_ref(),
-            u64::from(request.requested_tokens),
-            request.rate_per_day.map(u64::from),
-            remaining,
-            active_for_role,
-        );
-        let value = Engagement {
-            route: Some(route.to_owned()),
-            auto_joined,
-            allocated_tokens: None,
-            id,
-            request_id: request.request_id.clone(),
-            project_id: request.target_project_id.clone(),
-            project_room_id: request.target_room_id.clone(),
-            project_name: proof.project_name().map(str::to_owned),
-            agent_name: request.agent_definition.name.clone(),
-            runtime_name: request.agent_definition.runtime_name(
-                &request.fleet_id,
-                &request.target_project_id,
-                &request.request_id,
-            )?,
-            resource_id: resource.id(),
-            role: request.role.clone(),
-            requested_tokens: request.requested_tokens,
-            state: EngagementState::Pending,
-            cleanup: CleanupState::NotRequired,
-            workspace_mode: request
-                .agent_definition
-                .workspace_mode
-                .clone()
-                .unwrap_or_else(|| "shared".into()),
-            worktrees_dir: request.agent_definition.worktrees_dir.clone(),
-            worktree_bootstrap: request.agent_definition.worktree_bootstrap.clone(),
-        };
-        tx.execute("INSERT INTO projects(fleet_id,id,generation,room_id,owner_mxid,owner_room_id) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(fleet_id,id) DO NOTHING",
-            params![request.fleet_id,request.target_project_id,proof.registration().generation,request.target_room_id,request.owner_mxid,request.owner_dm_room_id])?;
-        // The request row itself is the domain inbox marker: same transaction and unique key.
-        tx.execute("INSERT INTO engagements(id,fleet_id,generation,request_id,digest,context,evidence,project_id,name,resource_id,tokens,state,projection) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',?12)",
-            params![value.id,request.fleet_id,proof.registration().generation,request.request_id,digest,serialize(request)?,serialize(proof.audit())?,request.target_project_id,request.agent_definition.name.as_str(),resource.id(),u64::from(request.requested_tokens),serialize(&value)?])?;
+        let value = admit_in_transaction(&tx, &self.accounts, proof, now)?;
         tx.commit()?;
         Ok(value)
     }
@@ -2127,79 +2044,53 @@ impl DomainRepository {
         now: u64,
         allocated: Option<u64>,
     ) -> Result<Engagement, Error> {
-        let allocated = allocated
-            .map(|value| {
-                if value == 0 {
-                    return Err(Error::from(InvalidInput(
-                        "allocated tokens must be positive",
-                    )));
-                }
-                Ok(Tokens::try_from(value)?)
-            })
-            .transpose()?;
+        self.approve_scoped(command_id, proof, || Ok(now), allocated, None)
+    }
+    /// An assigned Palpo project administrator's decision, executed within a
+    /// previously reserved provider grant. No second human Hagency verdict.
+    pub fn approve_project_agent(
+        &mut self,
+        command_id: &str,
+        proof: &VerifiedRequest,
+        now: u64,
+        allocated: u64,
+        scope: &project_grants::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.approve_project_agent_clock(command_id, proof, || Ok(now), allocated, scope)
+    }
+    pub(crate) fn approve_project_agent_clock(
+        &mut self,
+        command_id: &str,
+        proof: &VerifiedRequest,
+        clock: impl FnOnce() -> Result<u64, Error>,
+        allocated: u64,
+        scope: &project_grants::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.approve_scoped(command_id, proof, clock, Some(allocated), Some(scope))
+    }
+    fn approve_scoped(
+        &mut self,
+        command_id: &str,
+        proof: &VerifiedRequest,
+        clock: impl FnOnce() -> Result<u64, Error>,
+        allocated: Option<u64>,
+        scope: Option<&project_grants::ProjectAgentDecision>,
+    ) -> Result<Engagement, Error> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        authority(&tx, proof, now)?;
-        project_authority(&tx, proof)?;
-        let request = proof.request();
-        let id = request.engagement_id()?;
-        let (stored_digest, generation): (String, u64) = tx
-            .query_row(
-                "SELECT digest,generation FROM engagements WHERE id=?1",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or(Error::NotFound)?;
-        if stored_digest != request.digest()? {
-            return Err(Error::Conflict);
-        }
-        if generation != proof.registration().generation {
-            return Err(Error::Generation);
-        }
-        let digest = match allocated {
-            None => decision_digest("approve", &id)?,
-            Some(amount) => canonical::digest(&json!(["approve", id, u64::from(amount)]))?,
-        };
-        if let Some(value) = replay_decision(&tx, command_id, &digest)? {
-            return Ok(value);
-        }
-        let mut value = read_engagement(&tx, &id)?;
-        if value.state != EngagementState::Pending {
-            return Err(Error::State);
-        }
-        let resource = read_resource(&tx, &value.resource_id)?;
-        self.accounts.check_resource(&tx, &resource)?;
-        if !resource.qualifies(&value.role)
-            || !role_available(&tx, &value.role, Some(&request.fleet_id))?
-        {
-            return Err(Error::Unqualified);
-        }
-        let granted = u64::from(allocated.unwrap_or(value.requested_tokens));
-        // The engagement being decided is still pending, so it holds nothing
-        // yet and the headroom is exactly the retained decide() figure with
-        // `excludeEngagementId: id`.
-        check_grant(&tx, &resource, value.agent_name.as_str(), granted, now)?;
-        value.state = EngagementState::Reserved;
-        value.project_name = proof.project_name().map(str::to_owned);
-        value.allocated_tokens = allocated;
-        write_engagement(&tx, &value)?;
-        tx.execute(
-            "UPDATE engagements SET preset_id=?2,seat_id=?3 WHERE id=?1",
-            params![id, resource.preset_id, resource.seat_id],
-        )?;
-        let payload = json!({"request":request,"registrationGeneration":generation,"runtimeName":value.runtime_name,"resource":resource,"approvalEvidence":proof.audit()});
-        tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'provision','pending',?3)", params![format!("provision_{id}"),id,serialize(&payload)?])?;
-        record_decision(
+        let now = clock()?;
+        let result = approve_in_transaction(
             &tx,
+            &self.accounts,
             command_id,
-            &digest,
-            &value,
-            Some("engagement.approved"),
+            proof,
+            now,
+            allocated,
+            scope,
         )?;
         tx.commit()?;
-        Ok(value)
+        Ok(result)
     }
     /// ADR-186 §A3: what the engagement's resource can still give, as the
     /// smallest of the ceiling, seat and pool headroom — the very figure an
@@ -2227,48 +2118,43 @@ impl DomainRepository {
         add: u64,
         now: u64,
     ) -> Result<Engagement, Error> {
-        project::identifier(id, 128)?;
-        if add == 0 {
-            return Err(InvalidInput("added tokens must be positive").into());
-        }
-        let add = Tokens::try_from(add)?;
+        self.raise_allocation_scoped(command_id, id, add, || Ok(now), None)
+    }
+    pub fn raise_project_agent_allocation(
+        &mut self,
+        command_id: &str,
+        id: &str,
+        add: u64,
+        now: u64,
+        scope: &project_grants::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.raise_project_agent_allocation_clock(command_id, id, add, || Ok(now), scope)
+    }
+    pub(crate) fn raise_project_agent_allocation_clock(
+        &mut self,
+        command_id: &str,
+        id: &str,
+        add: u64,
+        clock: impl FnOnce() -> Result<u64, Error>,
+        scope: &project_grants::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.raise_allocation_scoped(command_id, id, add, clock, Some(scope))
+    }
+    fn raise_allocation_scoped(
+        &mut self,
+        command_id: &str,
+        id: &str,
+        add: u64,
+        clock: impl FnOnce() -> Result<u64, Error>,
+        scope: Option<&project_grants::ProjectAgentDecision>,
+    ) -> Result<Engagement, Error> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let digest = canonical::digest(&json!(["allocation", id, u64::from(add)]))?;
-        if let Some(value) = replay_decision(&tx, command_id, &digest)? {
-            return Ok(value);
-        }
-        let mut value = read_engagement(&tx, id)?;
-        if !matches!(
-            value.state,
-            EngagementState::Reserved | EngagementState::Active
-        ) {
-            return Err(Error::State);
-        }
-        let resource = read_resource(&tx, &value.resource_id)?;
-        check_grant(
-            &tx,
-            &resource,
-            value.agent_name.as_str(),
-            u64::from(add),
-            now,
-        )?;
-        let raised = u64::from(value.allocation())
-            .checked_add(u64::from(add))
-            .ok_or(InvalidInput("token count overflow"))?;
-        value.allocated_tokens = Some(Tokens::try_from(raised)?);
-        write_engagement(&tx, &value)?;
-        quota_holds::lift(&tx, id, now)?;
-        record_decision(
-            &tx,
-            command_id,
-            &digest,
-            &value,
-            Some("engagement.allocation_raised"),
-        )?;
+        let now = clock()?;
+        let result = raise_in_transaction(&tx, command_id, id, add, now, scope)?;
         tx.commit()?;
-        Ok(value)
+        Ok(result)
     }
     /// ADR-186 §B: the engagement's allocation, its known spend (`None`
     /// while unknown) and whether it holds an open quota hold.
@@ -2292,19 +2178,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let digest = decision_digest("retry_cleanup", id)?;
-        if let Some(value) = replay_decision(&tx, command_id, &digest)? {
-            return Ok(value);
-        }
-        let value = read_engagement(&tx, id)?;
-        if value.state != EngagementState::Revoked {
-            return Err(Error::State);
-        }
-        let changed=tx.execute("UPDATE effects SET state='pending',outcome_digest=NULL WHERE engagement_id=?1 AND kind='retire' AND state='failed'",[id])?;
-        if changed != 1 {
-            return Err(Error::State);
-        }
-        record_decision(&tx, command_id, &digest, &value, None)?;
+        let value = retry_cleanup_transaction(&tx, command_id, id)?;
         tx.commit()?;
         Ok(value)
     }
@@ -2312,59 +2186,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let digest = decision_digest(if revoke { "revoke" } else { "reject" }, id)?;
-        if let Some(value) = replay_decision(&tx, command_id, &digest)? {
-            return Ok(value);
-        }
-        let mut value = read_engagement(&tx, id)?;
-        if !matches!(
-            value.state,
-            EngagementState::Pending | EngagementState::Reserved | EngagementState::Active
-        ) || !revoke && value.state != EngagementState::Pending
-        {
-            return Err(Error::State);
-        }
-        let effect: Option<(String, String)> = tx
-            .query_row(
-                "SELECT state,payload FROM effects WHERE engagement_id=?1 AND kind='provision'",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((state, payload)) = effect {
-            tx.execute("UPDATE effects SET state='cancelled',fence=fence+1 WHERE engagement_id=?1 AND kind='provision'", [id])?;
-            if state != "pending" {
-                value.cleanup = CleanupState::Pending;
-                tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'retire','pending',?3)", params![format!("retire_{id}"),id,payload])?;
-            }
-        }
-        value.state = if revoke {
-            EngagementState::Revoked
-        } else {
-            EngagementState::Rejected
-        };
-        write_engagement(&tx, &value)?;
-        // ADR-095 Slice 6: the ended-at instant is advisory metadata on the
-        // side table (never a column here), read by the engagements phase's
-        // receipt payload. First terminal transition wins.
-        tx.execute(
-            "INSERT INTO engagement_ends(engagement_id,ended_at) VALUES(?1,?2) \
-             ON CONFLICT(engagement_id) DO NOTHING",
-            params![value.id, graphs::now_ms()?],
-        )?;
-        graphs::reconcile(&tx, graphs::now_ms()?)?;
-        matrix_routes::reconcile(&tx, graphs::now_ms()?)?;
-        record_decision(
-            &tx,
-            command_id,
-            &digest,
-            &value,
-            Some(if revoke {
-                "engagement.revoked"
-            } else {
-                "engagement.rejected"
-            }),
-        )?;
+        let value = end_transaction(&tx, command_id, id, revoke, graphs::now_ms()?)?;
         tx.commit()?;
         Ok(value)
     }
@@ -2372,13 +2194,13 @@ impl DomainRepository {
         read_effect(&self.db, id)
     }
     pub fn claim_effect(&mut self) -> Result<Option<Effect>, Error> {
-        self.claim_matching_effect(None)
+        self.claim_matching_effect(None, graphs::now_ms)
     }
     /// Host-only inline claim. Selecting first and filtering the returned ID
     /// afterwards would leave an unrelated engagement Started on mismatch.
     pub fn claim_effect_for(&mut self, id: &str) -> Result<Option<Effect>, Error> {
         project::identifier(id, 128)?;
-        self.claim_matching_effect(Some(id))
+        self.claim_matching_effect(Some(id), graphs::now_ms)
     }
     /// The engagements of `fleet_id` approved but never provisioned: a pending
     /// provision effect on a reserved engagement of the current registration
@@ -2525,12 +2347,24 @@ impl DomainRepository {
         let rows = statement.query_map([fleet_id], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
-    fn claim_matching_effect(&mut self, expected: Option<&str>) -> Result<Option<Effect>, Error> {
+    /// Trusted host clock, also used by deterministic recovery tests.
+    pub fn claim_effect_for_at(&mut self, id: &str, now: u64) -> Result<Option<Effect>, Error> {
+        project::identifier(id, 128)?;
+        self.claim_matching_effect(Some(id), || Ok(now))
+    }
+    fn claim_matching_effect(
+        &mut self,
+        expected: Option<&str>,
+        clock: impl FnOnce() -> Result<u64, Error>,
+    ) -> Result<Option<Effect>, Error> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = clock()?;
+        project_grants::reconcile(&tx, now)?;
         let id: Option<String> = tx.query_row("SELECT f.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE (?1 IS NULL OR f.id=?1) AND f.state='pending' AND e.generation=r.generation AND ((f.kind='provision' AND e.state='reserved') OR (f.kind='retire' AND e.state='revoked')) ORDER BY f.id LIMIT 1", [expected], |r| r.get(0)).optional()?;
         let Some(id) = id else {
+            tx.commit()?;
             return Ok(None);
         };
         tx.execute(
@@ -2550,6 +2384,24 @@ impl DomainRepository {
         fence: u64,
         outcome: &EffectOutcome,
     ) -> Result<Engagement, Error> {
+        self.observe_effect_clock(id, fence, outcome, graphs::now_ms)
+    }
+    pub fn observe_effect_at(
+        &mut self,
+        id: &str,
+        fence: u64,
+        outcome: &EffectOutcome,
+        now: u64,
+    ) -> Result<Engagement, Error> {
+        self.observe_effect_clock(id, fence, outcome, || Ok(now))
+    }
+    fn observe_effect_clock(
+        &mut self,
+        id: &str,
+        fence: u64,
+        outcome: &EffectOutcome,
+        clock: impl FnOnce() -> Result<u64, Error>,
+    ) -> Result<Engagement, Error> {
         match outcome {
             EffectOutcome::Applied { receipt } | EffectOutcome::NotApplied { receipt }
                 if receipt.is_empty()
@@ -2563,10 +2415,93 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let value = observe_effect_transaction(&tx, id, fence, outcome)?;
+        let value = observe_effect_transaction(&tx, id, fence, outcome, clock()?)?;
         tx.commit()?;
         Ok(value)
     }
+}
+// Both explicit engagement decisions and grant retirement use this transition.
+fn end_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    command_id: &str,
+    id: &str,
+    revoke: bool,
+    now: u64,
+) -> Result<Engagement, Error> {
+    let digest = decision_digest(if revoke { "revoke" } else { "reject" }, id)?;
+    if let Some(value) = replay_decision(tx, command_id, &digest)? {
+        return Ok(value);
+    }
+    let mut value = read_engagement(tx, id)?;
+    if !matches!(
+        value.state,
+        EngagementState::Pending | EngagementState::Reserved | EngagementState::Active
+    ) || !revoke && value.state != EngagementState::Pending
+    {
+        return Err(Error::State);
+    }
+    let effect: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state,payload FROM effects WHERE engagement_id=?1 AND kind='provision'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((state, payload)) = effect {
+        tx.execute("UPDATE effects SET state='cancelled',fence=fence+1 WHERE engagement_id=?1 AND kind='provision'", [id])?;
+        if state != "pending" {
+            value.cleanup = CleanupState::Pending;
+            tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'retire','pending',?3)", params![format!("retire_{id}"),id,payload])?;
+        }
+    }
+    value.state = if revoke {
+        EngagementState::Revoked
+    } else {
+        EngagementState::Rejected
+    };
+    write_engagement(tx, &value)?;
+    // ADR-095 Slice 6: the ended-at instant is advisory metadata on the
+    // side table (never a column here), read by the engagements phase's
+    // receipt payload. First terminal transition wins.
+    tx.execute(
+        "INSERT INTO engagement_ends(engagement_id,ended_at) VALUES(?1,?2) \
+             ON CONFLICT(engagement_id) DO NOTHING",
+        params![value.id, now],
+    )?;
+    graphs::reconcile(tx, now)?;
+    matrix_routes::reconcile(tx, now)?;
+    record_decision(
+        tx,
+        command_id,
+        &digest,
+        &value,
+        Some(if revoke {
+            "engagement.revoked"
+        } else {
+            "engagement.rejected"
+        }),
+    )?;
+    Ok(value)
+}
+fn retry_cleanup_transaction(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    id: &str,
+) -> Result<Engagement, Error> {
+    let digest = decision_digest("retry_cleanup", id)?;
+    if let Some(value) = replay_decision(tx, command_id, &digest)? {
+        return Ok(value);
+    }
+    let value = read_engagement(tx, id)?;
+    if value.state != EngagementState::Revoked {
+        return Err(Error::State);
+    }
+    let changed=tx.execute("UPDATE effects SET state='pending',outcome_digest=NULL WHERE engagement_id=?1 AND kind='retire' AND state='failed'",[id])?;
+    if changed != 1 {
+        return Err(Error::State);
+    }
+    record_decision(tx, command_id, &digest, &value, None)?;
+    Ok(value)
 }
 // Shared effect kernel: scoped factory activation and ordinary observations
 // differ in admission only, never in their durable transition implementation.
@@ -2575,8 +2510,12 @@ fn observe_effect_transaction(
     id: &str,
     fence: u64,
     outcome: &EffectOutcome,
+    now: u64,
 ) -> Result<Engagement, Error> {
     let effect = read_effect(tx, id)?;
+    if effect.kind == "provision" {
+        project_grants::check_engagement(tx, &effect.engagement_id, now)?;
+    }
     let digest = canonical::digest(&serde_json::to_value(outcome)?)?;
     if effect.fence != fence {
         return Err(Error::Generation);
@@ -2692,7 +2631,7 @@ fn prepare_resource_write(
             || old.provider != resource.provider
             || old.reasoning != resource.reasoning)
     {
-        let count:i64=tx.query_row("SELECT COUNT(*) FROM engagements WHERE resource_id=?1 AND state IN ('reserved','active')",[resource.id()],|r|r.get(0))?;
+        let count:i64=tx.query_row("SELECT (SELECT COUNT(*) FROM engagements WHERE resource_id=?1 AND state IN ('reserved','active')) + (SELECT COUNT(*) FROM resource_delegations WHERE resource_id=?1)",[resource.id()],|r|r.get(0))?;
         if count != 0 {
             return Err(Error::State);
         }
@@ -2714,4 +2653,304 @@ fn write_resource_configuration(
         tx.execute("INSERT INTO resources(id,preset_id,config) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET config=excluded.config", params![resource.id(),resource.preset_id,serialize(resource)?])?;
     }
     Ok(())
+}
+
+fn admit_in_transaction(
+    tx: &Transaction<'_>,
+    accounts: &accounts::Registry,
+    proof: &VerifiedRequest,
+    now: u64,
+) -> Result<Engagement, Error> {
+    authority(tx, proof, now)?;
+    project_authority(tx, proof)?;
+    let request = proof.request();
+    let id = request.engagement_id()?;
+    let digest = request.digest()?;
+    let previous: Option<String> = tx
+        .query_row("SELECT digest FROM engagements WHERE id=?1", [&id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(old) = previous {
+        if old != digest {
+            return Err(Error::Conflict);
+        }
+        return read_engagement(tx, &id); // Exact replay survives withdrawal.
+    }
+    bounded_row(tx, "engagements", "id", &id, 10_000)?;
+    let resource = read_resource(tx, &request.agent_definition.resource_id)?;
+    accounts.check_resource(tx, &resource)?;
+    if !resource.qualifies(&request.role)
+        || !role_available(tx, &request.role, Some(&request.fleet_id))?
+    {
+        return Err(Error::Unqualified);
+    }
+    let collision: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engagements WHERE fleet_id=?1 AND project_id=?2 AND name=?3 AND state IN ('pending','reserved','active'))",
+        params![request.fleet_id,request.target_project_id,request.agent_definition.name.as_str()], |r| r.get(0))?;
+    if collision {
+        return Err(Error::Conflict);
+    }
+    /*
+     * Task #19 TS parity (lib/engagement-store.js:546-566): the routing
+     * verdict is RECORDED, never used to refuse — TS stores the request
+     * with its `route` and `autoJoined` so the queue can show why it did
+     * not auto-join. `remainingTokens` is computed exactly like the
+     * approve() check but with `for_auto_join=true` (the retained JS
+     * `remainingFor(agent, { forAutoJoin: true })`), and a seat period
+     * mismatch nulls the whole figure (backend-v2.js:14057) rather than
+     * erroring, because routing must name `overCeiling`, not refuse.
+     */
+    let whitelisted = tx
+        .query_row(
+            "SELECT 1 FROM room_whitelist WHERE project_room_id=?1",
+            [&request.target_room_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let cross_family_ok = role_available(tx, &request.role, Some(&request.fleet_id))?;
+    let offer = engagement_terms::read_offer(tx, &request.role)?;
+    let report = usage::ceiling_report(tx, &resource.id(), now)?;
+    let spent_budget = budget(tx, &resource, None, true)?;
+    let seat_ok = spent_budget.seat.status != allocation::SeatStatus::PeriodMismatch;
+    let by_ceiling = report
+        .ceiling_tokens
+        .map(|c| c.saturating_sub(report.drawn));
+    let remaining = [
+        by_ceiling,
+        seat_ok
+            .then_some(spent_budget.seat.remaining)
+            .flatten()
+            .map(u64::from),
+        spent_budget.pool.remaining.map(u64::from),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    // TS holdsAllocation: an engagement that has a live allocation — in
+    // this store that is reserved/active with a non-failed provision.
+    // `role` lives in the context JSON, not a column.
+    let active_for_role: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM engagements e WHERE json_extract(e.context,'$.role')=?1 \
+         AND e.state IN ('reserved','active') \
+         AND NOT EXISTS(SELECT 1 FROM effects f WHERE f.engagement_id=e.id AND f.kind='provision' AND f.state='failed')",
+        [&request.role],
+        |r| r.get(0),
+    )?;
+    let (route, auto_joined) = engagement_terms::route_request(
+        whitelisted,
+        cross_family_ok,
+        offer.as_ref(),
+        u64::from(request.requested_tokens),
+        request.rate_per_day.map(u64::from),
+        remaining,
+        active_for_role,
+    );
+    let value = Engagement {
+        route: Some(route.to_owned()),
+        auto_joined,
+        allocated_tokens: None,
+        id,
+        request_id: request.request_id.clone(),
+        project_id: request.target_project_id.clone(),
+        project_room_id: request.target_room_id.clone(),
+        project_name: proof.project_name().map(str::to_owned),
+        agent_name: request.agent_definition.name.clone(),
+        runtime_name: request.agent_definition.runtime_name(
+            &request.fleet_id,
+            &request.target_project_id,
+            &request.request_id,
+        )?,
+        resource_id: resource.id(),
+        role: request.role.clone(),
+        requested_tokens: request.requested_tokens,
+        state: EngagementState::Pending,
+        cleanup: CleanupState::NotRequired,
+        workspace_mode: request
+            .agent_definition
+            .workspace_mode
+            .clone()
+            .unwrap_or_else(|| "shared".into()),
+        worktrees_dir: request.agent_definition.worktrees_dir.clone(),
+        worktree_bootstrap: request.agent_definition.worktree_bootstrap.clone(),
+    };
+    tx.execute("INSERT INTO projects(fleet_id,id,generation,room_id,owner_mxid,owner_room_id) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(fleet_id,id) DO NOTHING",
+        params![request.fleet_id,request.target_project_id,proof.registration().generation,request.target_room_id,request.owner_mxid,request.owner_dm_room_id])?;
+    // The request row itself is the domain inbox marker: same transaction and unique key.
+    tx.execute("INSERT INTO engagements(id,fleet_id,generation,request_id,digest,context,evidence,project_id,name,resource_id,tokens,state,projection) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',?12)",
+        params![value.id,request.fleet_id,proof.registration().generation,request.request_id,digest,serialize(request)?,serialize(proof.audit())?,request.target_project_id,request.agent_definition.name.as_str(),resource.id(),u64::from(request.requested_tokens),serialize(&value)?])?;
+    Ok(value)
+}
+
+fn approve_in_transaction(
+    tx: &Transaction<'_>,
+    accounts: &accounts::Registry,
+    command_id: &str,
+    proof: &VerifiedRequest,
+    now: u64,
+    allocated: Option<u64>,
+    scope: Option<&project_grants::ProjectAgentDecision>,
+) -> Result<Engagement, Error> {
+    let allocated = allocated
+        .map(|value| {
+            if value == 0 {
+                return Err(Error::from(InvalidInput(
+                    "allocated tokens must be positive",
+                )));
+            }
+            Ok(Tokens::try_from(value)?)
+        })
+        .transpose()?;
+    authority(tx, proof, now)?;
+    project_authority(tx, proof)?;
+    let request = proof.request();
+    let id = request.engagement_id()?;
+    let (stored_digest, generation): (String, u64) = tx
+        .query_row(
+            "SELECT digest,generation FROM engagements WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    if stored_digest != request.digest()? {
+        return Err(Error::Conflict);
+    }
+    if generation != proof.registration().generation {
+        return Err(Error::Generation);
+    }
+    if scope.is_none()
+        && tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_grants WHERE fleet_id=?1 AND project_id=?2)",
+            params![request.fleet_id, request.target_project_id],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err(Error::GrantAuthority);
+    }
+    let digest = if let Some(scope) = scope {
+        project_grants::validate_approval(tx, scope, proof, now)?;
+        canonical::digest(&json!([
+            "approve_in_project",
+            id,
+            allocated.map(u64::from),
+            scope
+        ]))?
+    } else {
+        match allocated {
+            None => decision_digest("approve", &id)?,
+            Some(amount) => canonical::digest(&json!(["approve", id, u64::from(amount)]))?,
+        }
+    };
+    if scope.is_some()
+        && let Some(value) = project_grants::replay(tx, command_id, &digest)?
+    {
+        return Ok(value);
+    }
+    if let Some(value) = replay_decision(tx, command_id, &digest)? {
+        return Ok(value);
+    }
+    let mut value = read_engagement(tx, &id)?;
+    if value.state != EngagementState::Pending {
+        return Err(Error::State);
+    }
+    let resource = read_resource(tx, &value.resource_id)?;
+    accounts.check_resource(tx, &resource)?;
+    if !resource.qualifies(&value.role)
+        || !role_available(tx, &value.role, Some(&request.fleet_id))?
+    {
+        return Err(Error::Unqualified);
+    }
+    let granted = u64::from(allocated.unwrap_or(value.requested_tokens));
+    // The engagement being decided is still pending, so it holds nothing
+    // yet and the headroom is exactly the retained decide() figure with
+    // `excludeEngagementId: id`.
+    if let Some(scope) = scope {
+        project_grants::debit_approval(tx, scope, proof, granted, now)?;
+    } else {
+        check_grant(tx, &resource, value.agent_name.as_str(), granted, now)?;
+    }
+    value.state = EngagementState::Reserved;
+    value.project_name = proof.project_name().map(str::to_owned);
+    value.allocated_tokens = allocated;
+    write_engagement(tx, &value)?;
+    tx.execute(
+        "UPDATE engagements SET preset_id=?2,seat_id=?3 WHERE id=?1",
+        params![id, resource.preset_id, resource.seat_id],
+    )?;
+    let payload = json!({"request":request,"registrationGeneration":generation,"runtimeName":value.runtime_name,"resource":resource,"approvalEvidence":proof.audit()});
+    tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'provision','pending',?3)", params![format!("provision_{id}"),id,serialize(&payload)?])?;
+    if scope.is_some() {
+        project_grants::record(tx, command_id, &digest, &value, now)?;
+    }
+    record_decision(tx, command_id, &digest, &value, Some("engagement.approved"))?;
+    Ok(value)
+}
+
+fn raise_in_transaction(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    id: &str,
+    add: u64,
+    now: u64,
+    scope: Option<&project_grants::ProjectAgentDecision>,
+) -> Result<Engagement, Error> {
+    project::identifier(id, 128)?;
+    if add == 0 {
+        return Err(InvalidInput("added tokens must be positive").into());
+    }
+    let add = Tokens::try_from(add)?;
+    let digest = if let Some(scope) = scope {
+        project_grants::validate_top_up(tx, scope, id, now)?;
+        canonical::digest(&json!(["project_allocation", id, u64::from(add), scope]))?
+    } else {
+        if project_grants::is_delegated(tx, id)? {
+            return Err(Error::GrantAuthority);
+        }
+        canonical::digest(&json!(["allocation", id, u64::from(add)]))?
+    };
+    if scope.is_some()
+        && let Some(value) = project_grants::replay(tx, command_id, &digest)?
+    {
+        return Ok(value);
+    }
+    if let Some(value) = replay_decision(tx, command_id, &digest)? {
+        return Ok(value);
+    }
+    let mut value = read_engagement(tx, id)?;
+    if !matches!(
+        value.state,
+        EngagementState::Reserved | EngagementState::Active
+    ) {
+        return Err(Error::State);
+    }
+    let resource = read_resource(tx, &value.resource_id)?;
+    if let Some(scope) = scope {
+        project_grants::debit_top_up(tx, scope, id, u64::from(add), now)?;
+    } else {
+        check_grant(
+            tx,
+            &resource,
+            value.agent_name.as_str(),
+            u64::from(add),
+            now,
+        )?;
+    }
+    let raised = u64::from(value.allocation())
+        .checked_add(u64::from(add))
+        .ok_or(InvalidInput("token count overflow"))?;
+    value.allocated_tokens = Some(Tokens::try_from(raised)?);
+    write_engagement(tx, &value)?;
+    quota_holds::lift(tx, id, now)?;
+    if scope.is_some() {
+        project_grants::record(tx, command_id, &digest, &value, now)?;
+    }
+    record_decision(
+        tx,
+        command_id,
+        &digest,
+        &value,
+        Some("engagement.allocation_raised"),
+    )?;
+    Ok(value)
 }

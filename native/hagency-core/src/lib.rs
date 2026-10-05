@@ -13,6 +13,8 @@ pub mod graphs;
 pub mod messages;
 pub mod peers;
 pub mod project;
+pub mod project_commands;
+pub mod project_grants;
 pub mod qualification;
 pub mod replies;
 pub mod task_intents;

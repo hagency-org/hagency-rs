@@ -336,6 +336,11 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::project_grants::check_engagement(
+            &tx,
+            &expected.engagement_id,
+            super::graphs::now_ms()?,
+        )?;
         let actual = super::read_effect(&tx, &expected.id)?;
         let required = if active {
             super::EffectState::Complete

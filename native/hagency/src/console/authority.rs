@@ -2,8 +2,9 @@
 use super::Error;
 use hagency_core::allocation::Ceiling;
 use hagency_store::{
-    AccountEnrollmentAccess, AccountEnrollmentCommand, ManagedAccount, ResourceConfigurationAccess,
-    ResourceConfigurationCommand, ResourcePublicationAccess, ResourcePublicationCommand,
+    AccountEnrollmentAccess, AccountEnrollmentCommand, ContributionMutation, ManagedAccount,
+    ResourceConfigurationAccess, ResourceConfigurationCommand, ResourceContributionAccess,
+    ResourceContributionCommand, ResourcePublicationAccess, ResourcePublicationCommand,
     ResourcePublicationRetirement,
 };
 use sha2::{Digest, Sha256};
@@ -32,12 +33,14 @@ pub(super) const COOKIE: &str = "hagency_console";
 struct Access {
     publication: ResourcePublicationAccess,
     configuration: ResourceConfigurationAccess,
+    contribution: ResourceContributionAccess,
     account: AccountEnrollmentAccess,
 }
 impl Access {
     fn revoke(&self) -> Result<(), hagency_store::Error> {
         self.publication.revoke()?;
         self.configuration.revoke()?;
+        self.contribution.revoke()?;
         self.account.revoke()
     }
 }
@@ -154,6 +157,7 @@ impl Authority {
                 access: Some(Access {
                     publication: ResourcePublicationAccess::new(until, retirement.clone()),
                     configuration: ResourceConfigurationAccess::new(until, retirement.clone()),
+                    contribution: ResourceContributionAccess::new(until, retirement.clone()),
                     account: AccountEnrollmentAccess::new(until, retirement.clone()),
                 }),
             })
@@ -259,6 +263,7 @@ impl Authority {
             access: Some(Access {
                 publication: ResourcePublicationAccess::new(until, self.1.clone()),
                 configuration: ResourceConfigurationAccess::new(until, self.1.clone()),
+                contribution: ResourceContributionAccess::new(until, self.1.clone()),
                 account: AccountEnrollmentAccess::new(until, self.1.clone()),
             }),
         });
@@ -401,6 +406,35 @@ impl Authority {
                 input.ceiling,
                 deadline,
             )
+            .map_err(|e| match e {
+                hagency_store::Error::Busy => Error::Busy,
+                hagency_store::Error::LocalAuthority => Error::Unauthorized,
+                hagency_store::Error::Invalid(_) => Error::Invalid,
+                _ => Error::Unavailable,
+            })
+    }
+    pub(super) fn contribution(
+        &self,
+        session: &Session,
+        resource: String,
+        revision: String,
+        mutation: ContributionMutation,
+        deadline: Instant,
+    ) -> Result<ResourceContributionCommand, Error> {
+        let state = self.0.lock().map_err(|_| Error::Unavailable)?;
+        if state.retired {
+            return Err(Error::Unavailable);
+        }
+        let now = Instant::now();
+        let access = state
+            .sessions
+            .iter()
+            .find(|s| matches(s, &session.0, now))
+            .and_then(|s| s.access.as_ref())
+            .ok_or(Error::Unauthorized)?;
+        access
+            .contribution
+            .prepare(resource, revision, mutation, deadline)
             .map_err(|e| match e {
                 hagency_store::Error::Busy => Error::Busy,
                 hagency_store::Error::LocalAuthority => Error::Unauthorized,

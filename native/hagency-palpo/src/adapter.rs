@@ -32,6 +32,9 @@ pub trait ProbeReceipts: Send + Sync {
     fn statuses(&self) -> Vec<Value> {
         Vec::new()
     }
+    /// Acknowledge only observations in the exact frozen publication, including
+    /// retries after restart. A producer may then advance its bounded page.
+    fn statuses_published(&self, _statuses: &[Value]) {}
 }
 
 /// One host transport instance. At most one active request per Matrix/work/
@@ -44,10 +47,81 @@ pub struct Adapter {
     limits: Limits,
     matrix: Mutex<()>,
     work: Mutex<()>,
-    publication: Mutex<()>,
+    // Guard the publication lane and its acknowledged contribution-page cursor.
+    publication: Mutex<String>,
     receipts: Option<std::sync::Arc<dyn ProbeReceipts>>,
 }
 impl Adapter {
+    /// Revoke the exact observed Matrix identity only after local retirement
+    /// and process custody are settled. No script-supplied MXID is accepted.
+    pub async fn retire_project_agent(
+        &self,
+        id: String,
+        domain: &hagency_store::DomainStore,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        let issuer = domain
+            .provisioning_registration(self.registration.fleet_id.clone())
+            .await?;
+        let target = domain.palpo_retirement_target(issuer.clone(), id).await?;
+        let body =
+            serde_json::json!({"requestId": target.request_id, "agentMxid": target.agent_mxid,
+            "endedAt": target.ended_at, "localStopped": true})
+            .to_string();
+        let answer = self
+            .http
+            .request("retire-agent", None, Some(body), cancel)
+            .await?
+            .success()?;
+        let agent = &answer["agent"];
+        if answer["ok"] != true
+            || answer["fleetId"] != target.fleet_id
+            || answer["requestId"] != target.request_id
+            || agent["mxid"] != target.agent_mxid
+            || agent["state"] != "retired"
+            || agent["matrixIdentity"] != "deactivated"
+            || agent["appserviceAccess"] != "revoked"
+            || agent["localTaskStop"] != "confirmed"
+            || agent["joinedRooms"] != serde_json::json!([])
+        {
+            return Err(Error::Wire);
+        }
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        domain.confirm_palpo_retirement(issuer, target).await?;
+        Ok(())
+    }
+    /// Read fresh business authority from the configured machine endpoint.
+    /// A queued delivery alone cannot preserve a demoted administrator's rights.
+    pub async fn authorize_project_command(
+        &self,
+        command: &hagency_core::project_commands::ProjectCommand,
+        domain: &hagency_store::DomainStore,
+        cancel: &CancellationToken,
+    ) -> Result<hagency_core::project_commands::ProjectAuthorization, Error> {
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        let body = serde_json::json!({"commandId": command.command_id, "commandDigest": command.digest().map_err(|_| Error::Wire)?}).to_string();
+        let value = self
+            .http
+            .request("authorize-command", None, Some(body), cancel)
+            .await?
+            .success()?;
+        let authorization: hagency_core::project_commands::ProjectAuthorization =
+            serde_json::from_value(value).map_err(|_| Error::Wire)?;
+        authorization
+            .validate(command, now()?)
+            .map_err(|_| Error::Wire)?;
+        domain
+            .check_publication_registration(self.registration.clone())
+            .await?;
+        Ok(authorization)
+    }
     /// Carry the host's pending connection-probe receipts in resource updates.
     pub fn with_probe_receipts(mut self, receipts: std::sync::Arc<dyn ProbeReceipts>) -> Self {
         self.receipts = Some(receipts);
@@ -143,7 +217,7 @@ impl Adapter {
             limits: config.limits,
             matrix: Mutex::new(()),
             work: Mutex::new(()),
-            publication: Mutex::new(()),
+            publication: Mutex::new(String::new()),
             receipts: None,
         })
     }

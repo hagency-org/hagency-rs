@@ -53,6 +53,8 @@ mod rail;
 mod real_agent;
 #[path = "console/registration.rs"]
 mod registration;
+#[path = "console/resource_contributions.rs"]
+mod resource_contributions;
 #[path = "console/resources.rs"]
 mod resources;
 #[path = "console/setup_page.rs"]

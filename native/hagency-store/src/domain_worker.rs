@@ -2898,6 +2898,42 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn update_project_administrators(
+        &self,
+        id: String,
+        expected_revision: u64,
+        administrators: Vec<String>,
+        allow_self_approval: bool,
+        issuer: Registration,
+    ) -> Result<hagency_core::project_grants::ProjectGrant, Error> {
+        self.call(weight(&(&id, &administrators, &issuer))?, move |db| {
+            db.update_project_administrators_clock(
+                &id,
+                expected_revision,
+                &administrators,
+                allow_self_approval,
+                &issuer,
+                writer_time,
+            )
+        })
+        .await
+    }
+    pub async fn revoke_project_grant(
+        &self,
+        id: String,
+        expected_revision: u64,
+        issuer: Registration,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&id, &issuer))?, move |db| {
+            db.revoke_project_grant(&id, expected_revision, &issuer, now)
+        })
+        .await
+    }
+    pub async fn reconcile_project_grants(&self, now: u64) -> Result<(), Error> {
+        self.call(1, move |db| db.reconcile_project_grants(now))
+            .await
+    }
     pub async fn reconcile_dispatches(&self, now: u64) -> Result<(), Error> {
         self.call(1, move |db| db.reconcile_dispatches(now)).await
     }
@@ -4048,6 +4084,46 @@ impl DomainStore {
         self.call(command.weight(), move |db| db.configure_resource(command))
             .await
     }
+    pub async fn resource_contributions(
+        &self,
+        resource: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<crate::ContributionStatus>, Error> {
+        self.call(weight(&(&resource, &after))?, move |db| {
+            db.resource_contributions(&resource, &after, limit, writer_time()?)
+        })
+        .await
+    }
+    pub async fn contribution_targets(
+        &self,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<crate::ContributionTarget>, Error> {
+        self.call(weight(&after)?, move |db| {
+            db.contribution_targets(&after, limit)
+        })
+        .await
+    }
+    pub async fn contribution_page(
+        &self,
+        identity: crate::outbound::RegistrationIdentity,
+        after: String,
+    ) -> Result<crate::ContributionPage, Error> {
+        self.call(weight(&(&identity, &after))?, move |db| {
+            db.contribution_page(&identity, &after, writer_time()?)
+        })
+        .await
+    }
+    pub async fn contribute_resource(
+        &self,
+        command: crate::ResourceContributionCommand,
+    ) -> Result<crate::ContributionStatus, Error> {
+        self.call(command.weight(), move |db| {
+            db.contribute_resource_clock(command, writer_time, std::time::Instant::now)
+        })
+        .await
+    }
     pub async fn publish_resource(
         &self,
         command: crate::ResourcePublicationCommand,
@@ -4289,6 +4365,181 @@ impl DomainStore {
             ))?,
             move |db| db.approve_allocating(&command, &proof, now, allocated),
         )
+        .await
+    }
+    pub async fn project_command_receipt(
+        &self,
+        command: hagency_core::project_commands::ProjectCommand,
+        issuer: Registration,
+    ) -> Result<Option<hagency_core::project_commands::ProjectReceipt>, Error> {
+        self.call(weight(&(&command, &issuer))?, move |db| {
+            db.project_command_receipt(&command, &issuer)
+        })
+        .await
+    }
+    pub async fn apply_project_command(
+        &self,
+        command: hagency_core::project_commands::ProjectCommand,
+        issuer: Registration,
+        authorization: hagency_core::project_commands::ProjectAuthorization,
+        proof: Option<VerifiedRequest>,
+    ) -> Result<hagency_core::project_commands::ProjectReceipt, Error> {
+        let proof_weight = proof
+            .as_ref()
+            .map(|p| (p.request(), p.registration(), p.project_name(), p.audit()));
+        self.call(
+            weight(&(&command, &issuer, &authorization, proof_weight))?,
+            move |db| {
+                db.apply_project_command_clock(
+                    &command,
+                    &issuer,
+                    &authorization,
+                    proof.as_ref(),
+                    writer_time,
+                )
+            },
+        )
+        .await
+    }
+    pub async fn is_project_command_agent(
+        &self,
+        issuer: Registration,
+        id: String,
+    ) -> Result<bool, Error> {
+        self.call(weight(&(&issuer, &id))?, move |db| {
+            db.is_project_command_agent(&issuer, &id)
+        })
+        .await
+    }
+    pub async fn palpo_status_page(
+        &self,
+        issuer: Registration,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<Engagement>, Error> {
+        self.call(weight(&(&issuer, &after))?, move |db| {
+            db.palpo_status_page(&issuer, &after, limit)
+        })
+        .await
+    }
+    pub async fn palpo_agent_lifecycle(
+        &self,
+        issuer: Registration,
+        id: String,
+    ) -> Result<crate::PalpoAgentLifecycle, Error> {
+        self.call(weight(&(&issuer, &id))?, move |db| {
+            db.palpo_agent_lifecycle(&issuer, &id)
+        })
+        .await
+    }
+    pub async fn palpo_retirement_target(
+        &self,
+        issuer: Registration,
+        id: String,
+    ) -> Result<crate::PalpoRetirementTarget, Error> {
+        self.call(weight(&(&issuer, &id))?, move |db| {
+            db.palpo_retirement_target(&issuer, &id)
+        })
+        .await
+    }
+    pub async fn confirm_palpo_retirement(
+        &self,
+        issuer: Registration,
+        target: crate::PalpoRetirementTarget,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&issuer, &target))?, move |db| {
+            db.confirm_palpo_retirement(&issuer, &target, writer_time()?)
+        })
+        .await
+    }
+    pub async fn pending_project_receipts(
+        &self,
+        issuer: Registration,
+    ) -> Result<Vec<hagency_core::project_commands::ProjectReceipt>, Error> {
+        self.call(weight(&issuer)?, move |db| {
+            db.pending_project_receipts(&issuer)
+        })
+        .await
+    }
+    pub async fn mark_project_receipts_published(
+        &self,
+        issuer: Registration,
+        receipts: Vec<hagency_core::project_commands::ProjectReceipt>,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&issuer, &receipts))?, move |db| {
+            db.mark_project_receipts_published(&issuer, &receipts)
+        })
+        .await
+    }
+    pub async fn delegate_resource(
+        &self,
+        grant: hagency_core::project_grants::ResourceDelegation,
+    ) -> Result<hagency_core::project_grants::ResourceDelegation, Error> {
+        self.call(weight(&grant)?, move |db| {
+            db.delegate_resource_clock(&grant, writer_time)
+        })
+        .await
+    }
+    pub async fn reserve_project_grant(
+        &self,
+        grant: hagency_core::project_grants::ProjectGrant,
+        issuer: Registration,
+    ) -> Result<hagency_core::project_grants::ProjectGrant, Error> {
+        self.call(weight(&(&grant, &issuer))?, move |db| {
+            db.reserve_project_grant_clock(&grant, &issuer, writer_time)
+        })
+        .await
+    }
+    pub async fn project_grant(
+        &self,
+        id: String,
+        now: u64,
+    ) -> Result<hagency_core::project_grants::ProjectGrant, Error> {
+        self.call(weight(&id)?, move |db| db.project_grant(&id, now))
+            .await
+    }
+    pub async fn revoke_resource_delegation(
+        &self,
+        id: String,
+        expected_revision: u64,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.call(weight(&id)?, move |db| {
+            db.revoke_resource_delegation(&id, expected_revision, now)
+        })
+        .await
+    }
+    pub async fn approve_project_agent(
+        &self,
+        command: String,
+        proof: VerifiedRequest,
+        allocated: u64,
+        scope: crate::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.call(
+            weight(&(
+                &command,
+                proof.request(),
+                proof.registration(),
+                proof.audit(),
+                &scope,
+            ))?,
+            move |db| {
+                db.approve_project_agent_clock(&command, &proof, writer_time, allocated, &scope)
+            },
+        )
+        .await
+    }
+    pub async fn raise_project_agent_allocation(
+        &self,
+        command: String,
+        id: String,
+        add: u64,
+        scope: crate::ProjectAgentDecision,
+    ) -> Result<Engagement, Error> {
+        self.call(weight(&(&command, &id, &scope))?, move |db| {
+            db.raise_project_agent_allocation_clock(&command, &id, add, writer_time, &scope)
+        })
         .await
     }
     /// ADR-186 §A3: the smallest of ceiling, seat and pool headroom behind
