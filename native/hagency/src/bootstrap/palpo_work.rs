@@ -13,8 +13,8 @@
 //!   coordinator decisions reserve capacity and queue normal provisioning;
 //!   legacy requests retain their explicitly configured console workflow.
 //!
-//! A failure is retried later, never turned into a terminal refusal: the bridge
-//! does not decide the connection is dead.
+//! Transport/read failures retry. A deterministic coordinator admission refusal
+//! has a durable receipt; it does not assert that the connection is dead.
 use super::probe::{PROBE_EVENT, ProbeError, ProbeReceipt, decide};
 use hagency_core::custody::{Kind, Lane};
 use hagency_palpo::{Adapter, CancellationToken, ProbeReceipts};
@@ -35,7 +35,7 @@ pub(super) struct Appservice {
 }
 impl Appservice {
     pub(super) fn load(state: &Path, server_name: &str) -> Option<Self> {
-        let raw = private::read_secret(&state.join("palpo-appservice.json")).ok()?;
+        let raw = private_json(&state.join("palpo-appservice.json"), 65536)?;
         let value: Value = serde_json::from_slice(&raw).ok()?;
         let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
         Some(Self {
@@ -44,6 +44,35 @@ impl Appservice {
             representative: format!("@{}:{server_name}", text("sender_localpart")?),
         })
     }
+}
+
+fn private_json(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = private::open(path, false).ok()?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= limit).then_some(bytes)
+}
+
+pub(super) async fn verify_coordinator_account(state: &Path, server: &str, user: &str) -> bool {
+    if !user.starts_with('@')
+        || user.starts_with("@hf_")
+        || user.split_once(':').map(|(_, s)| s) != Some(server)
+    {
+        return false;
+    }
+    let Some(aservice) = Appservice::load(state, server) else {
+        return false;
+    };
+    let Some(reader) = Reader::new(&aservice) else {
+        return false;
+    };
+    matches!(
+        reader
+            .get(&["_matrix", "client", "v3", "profile", user])
+            .await,
+        Ok(Some(_))
+    )
 }
 
 /// Durable probe bookkeeping: push receipts seen on the Matrix lane and the
@@ -71,8 +100,7 @@ impl Probes {
         })
     }
     fn read(path: &Path) -> Vec<Value> {
-        private::read_secret(path)
-            .ok()
+        private_json(path, 1024 * 1024)
             .and_then(|raw| serde_json::from_slice::<Vec<Value>>(&raw).ok())
             .unwrap_or_default()
     }
@@ -1130,6 +1158,31 @@ pub(super) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_palpo_private_observation_files_survive_beyond_secret_token_size() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("private");
+        private::directory(&state).unwrap();
+        let probes = Probes::new(&state);
+        for i in 0..25 {
+            probes.remember_request(&format!("request_{i:040}"));
+            probes.record_event(json!({"sourceEventId":format!("event_{i}"),"challenge":"bound-challenge","receivedAt":"2026-10-04T00:00:00Z"}));
+        }
+        drop(probes);
+        let probes = Probes::new(&state);
+        assert!(probes.palpo_request("request_0000000000000000000000000000000000000000"));
+        assert!(probes.palpo_request("request_0000000000000000000000000000000000000024"));
+        assert!(probes.event("event_0").is_some());
+        assert!(probes.event("event_24").is_some());
+        let configuration = json!({"homeserver":"https://matrix.example.test","as_token":"x".repeat(1024),"sender_localpart":"representative"});
+        private::replace(
+            &state.join("palpo-appservice.json"),
+            &serde_json::to_vec(&configuration).unwrap(),
+        )
+        .unwrap();
+        assert!(Appservice::load(&state, "example.test").is_some());
+    }
 
     #[test]
     fn native_palpo_status_pages_wait_for_their_exact_publication_receipt() {

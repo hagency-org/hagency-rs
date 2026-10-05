@@ -239,7 +239,12 @@ pub async fn run(args: Args) -> Result<Value, Error> {
 
 /// Old downloads remain importable; versioned association profiles must match a
 /// durable request from this installation, including its chosen homeserver.
-pub(crate) fn validate_import(state: &Path, raw: &str, homeserver: &str) -> Result<(), Error> {
+pub(crate) fn validate_import(
+    state: &Path,
+    raw: &str,
+    homeserver: &str,
+    accepted: Option<&hagency_store::coordinator::ServerEngagement>,
+) -> Result<(), Error> {
     let profile: Value = serde_json::from_str(raw).map_err(|_| Error::Invalid("profile"))?;
     if profile.get("schemaVersion").is_none() && profile.get("runtimeId").is_none() {
         return Ok(());
@@ -259,16 +264,30 @@ pub(crate) fn validate_import(state: &Path, raw: &str, homeserver: &str) -> Resu
             .join(format!("{fleet}.json")),
     )?;
     let runtime = read(&state.join("association-runtime.json"))?;
+    let policy = if let Some(accepted) = accepted {
+        if matches!(
+            serde_json::to_value(accepted.state)
+                .map_err(|_| Error::Invalid("accepted delegation"))?
+                .as_str(),
+            Some("suspended" | "revoked")
+        ) {
+            return Err(Error::Invalid("delegation is suspended or revoked"));
+        }
+        serde_json::to_value(accepted).map_err(|_| Error::Invalid("accepted delegation"))?
+    } else {
+        json!({"coordinator":pending["intent"]["coordinatorMxid"],"allowSelfApproval":pending["intent"]["allowSelfApproval"],
+            "delegationExpiresAtMs":pending["intent"]["delegationExpiresAtMs"],"delegationRevision":1})
+    };
     if profile["runtimeId"] != runtime["runtimeId"]
         || profile["runtimeId"] != pending["intent"]["runtimeId"]
         || profile["serverName"] != pending["serverName"]
         || profile["serverOrigin"] != pending["serverOrigin"]
         || profile["engagement"]["id"] != fleet
         || profile["engagement"]["owner"] != pending["ownerMxid"]
-        || profile["engagement"]["coordinator"] != pending["intent"]["coordinatorMxid"]
-        || profile["engagement"]["allowSelfApproval"] != pending["intent"]["allowSelfApproval"]
-        || profile["engagement"]["delegationExpiresAtMs"]
-            != pending["intent"]["delegationExpiresAtMs"]
+        || profile["engagement"]["coordinator"] != policy["coordinator"]
+        || profile["engagement"]["allowSelfApproval"] != policy["allowSelfApproval"]
+        || profile["engagement"]["delegationExpiresAtMs"] != policy["delegationExpiresAtMs"]
+        || profile["engagement"]["delegationRevision"] != policy["delegationRevision"]
         || origin(homeserver)?.origin().ascii_serialization() != pending["homeserver"]
     {
         return Err(Error::Invalid(
@@ -379,17 +398,27 @@ mod tests {
         .unwrap();
         assert!(!saved.to_string().contains("fixture-owner-token"));
         let profile = json!({"schemaVersion":1,"fleetId":fleet,"serverName":"example.test","serverOrigin":origin,"runtimeId":saved["intent"]["runtimeId"],
-            "engagement":{"id":fleet,"owner":"@owner:example.test","coordinator":"@coordinator:example.test","allowSelfApproval":false,"delegationExpiresAtMs":1900000000000_u64}});
-        validate_import(&state, &profile.to_string(), &origin).unwrap();
+            "engagement":{"id":fleet,"owner":"@owner:example.test","coordinator":"@coordinator:example.test","allowSelfApproval":false,"delegationRevision":1,"delegationExpiresAtMs":1900000000000_u64}});
+        validate_import(&state, &profile.to_string(), &origin, None).unwrap();
         assert!(
-            validate_import(&state, &profile.to_string(), "https://another-server.test").is_err()
+            validate_import(
+                &state,
+                &profile.to_string(),
+                "https://another-server.test",
+                None
+            )
+            .is_err()
         );
         let other = root.path().join("other");
         crate::setup::init_state(&other).unwrap();
-        assert!(validate_import(&other, &profile.to_string(), &origin).is_err());
-        let mut forged = profile;
+        assert!(validate_import(&other, &profile.to_string(), &origin, None).is_err());
+        let mut forged = profile.clone();
         forged["engagement"]["coordinator"] = json!("@other:example.test");
-        assert!(validate_import(&state, &forged.to_string(), &origin).is_err());
+        assert!(validate_import(&state, &forged.to_string(), &origin, None).is_err());
+        let accepted: hagency_store::coordinator::ServerEngagement = serde_json::from_value(json!({"id":fleet,"server":"example.test","owner":"@owner:example.test","coordinator":"@other:example.test","registrationGeneration":1,"delegationRevision":2,"delegationExpiresAtMs":1900000000000_u64,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true})).unwrap();
+        forged["engagement"]["delegationRevision"] = json!(2);
+        validate_import(&state, &forged.to_string(), &origin, Some(&accepted)).unwrap();
+        assert!(validate_import(&state, &profile.to_string(), &origin, Some(&accepted)).is_err());
         server.abort();
     }
 }

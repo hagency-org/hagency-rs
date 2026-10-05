@@ -361,18 +361,19 @@ pub fn run(
         self::homeserver(homeserver).map_err(|_| Error::Invalid("--homeserver must be https"))?;
     private::read_secret(&state.join("operator.token"))?;
     let raw = std::fs::read_to_string(file).map_err(|_| Error::Invalid("file unreadable"))?;
-    super::association::validate_import(state, &raw, &origin)
-        .map_err(|_| Error::Invalid("association binding"))?;
     let (registration, mut appservice, machine, endpoint, generation) = parse(&raw)?;
     appservice["homeserver"] = json!(origin);
     let _custody = Repository::open(state)?;
     let mut domain = DomainRepository::open(state)?;
+    let accepted = domain.coordinator_authority(&registration.fleet_id)?;
+    super::association::validate_import(state, &raw, &origin, accepted.as_ref())
+        .map_err(|_| Error::Invalid("association binding"))?;
     // A re-import of the same fleet keeps a reception an earlier probe bound.
     let current = domain
         .provisioning_registration(&registration.fleet_id)
         .ok();
     let mut registration = registration;
-    if let Some(current) = current {
+    if let Some(current) = current.filter(|r| r.generation == registration.generation) {
         registration.reception_room_id = current.reception_room_id;
     } else if let Some(room) = reception {
         registration.reception_room_id = room.to_owned();

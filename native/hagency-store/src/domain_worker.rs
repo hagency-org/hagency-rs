@@ -4352,6 +4352,24 @@ impl DomainStore {
         })
         .await
     }
+
+    pub async fn coordinator_authority(
+        &self,
+        fleet: String,
+    ) -> Result<Option<crate::coordinator::ServerEngagement>, Error> {
+        self.call(weight(&fleet)?, move |db| db.coordinator_authority(&fleet))
+            .await
+    }
+
+    pub async fn change_coordinator(
+        &self,
+        command: crate::coordinator::DelegationCommand,
+    ) -> Result<crate::coordinator::ServerEngagement, Error> {
+        self.call(command.weight()?, move |db| {
+            db.change_coordinator(command, writer_time()?)
+        })
+        .await
+    }
     pub async fn put_coordinator_resource(
         &self,
         grant: crate::coordinator::ResourceGrant,

@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useData } from './Data';
 import { useT } from './Prefs';
-import { fetchServerEngagements, fetchEngagementResources, fetchCoordinatorDecisions, fetchAllocationResources, contributeEngagementResource } from '@/lib/native-api';
+import { fetchServerEngagements, fetchEngagementResources, fetchCoordinatorDecisions, fetchAllocationResources, contributeEngagementResource, changeEngagementDelegation } from '@/lib/native-api';
 
 const amount = value => Number.isSafeInteger(value) ? value.toLocaleString() : '—';
 const instant = value => Number.isSafeInteger(value) ? new Date(value).toLocaleString() : '—';
@@ -34,10 +34,10 @@ function EngagementList({ resourceId = null, decisionsOnly = false }) {
     </select></label>
     {next && <button className="btn" disabled={busy} onClick={more}>{t('se.moreEngagements')}</button>}
     {!rows.length && <p>{t('se.empty')}</p>}
-    {selected && <Engagement key={selected} row={rows.find(r => r.id === selected)} resourceId={resourceId} decisionsOnly={decisionsOnly} />}
+    {selected && <Engagement key={selected} row={rows.find(r => r.id === selected)} onChanged={v => setRows(old => old.map(r => r.id === v.id ? v : r))} resourceId={resourceId} decisionsOnly={decisionsOnly} />}
   </section>;
 }
-function Engagement({ row, resourceId, decisionsOnly }) {
+function Engagement({ row, onChanged, resourceId, decisionsOnly }) {
   const t = useT();
   const [grants, setGrants] = useState([]), [decisions, setDecisions] = useState([]), [choices, setChoices] = useState([]);
   const [grantNext, setGrantNext] = useState(null), [decisionNext, setDecisionNext] = useState(null), [resourceNext, setResourceNext] = useState(null);
@@ -80,6 +80,7 @@ function Engagement({ row, resourceId, decisionsOnly }) {
     <p>{t('se.expires')} {instant(row.delegationExpiresAtMs)}</p>
     <p role="status">{note}</p>
     {!decisionsOnly && <>
+      {!resourceId && <Delegation row={row} onChanged={onChanged} />}
       <h3>{t('se.capacity')}</h3><p>{t('se.capacityHelp')}</p>
       <div className="btn-row"><button className="btn" disabled={busy} onClick={() => load('grants', true)}>{t('common.refresh')}</button>
         <button className="btn primary" disabled={busy || row.state !== 'verified' || !choices.length} onClick={() => edit(null)}>{t('se.allocate')}</button></div>
@@ -105,4 +106,44 @@ function Engagement({ row, resourceId, decisionsOnly }) {
     {!decisions.length && <p>{t('se.noDecisions')}</p>}
     {decisionNext && <button className="btn" disabled={busy} onClick={() => load('decisions')}>{t('se.more')}</button>}
   </div>;
+}
+
+function Delegation({ row, onChanged }) {
+  const t = useT();
+  const [form, setForm] = useState(null), [busy, setBusy] = useState(false), [note, setNote] = useState('');
+  function edit() {
+    setForm({ coordinator: row.coordinatorMxid, expires: new Date(row.delegationExpiresAtMs).toISOString().slice(0, 16),
+      state: row.state === 'verified' ? 'active' : row.state, self: row.allowSelfApproval,
+      ownerExport: row.exportMxids.includes(row.ownerMxid), coordinatorExport: row.exportMxids.includes(row.coordinatorMxid) });
+    setNote('');
+  }
+  async function save(event) {
+    event.preventDefault(); if (busy) return; setBusy(true); setNote('');
+    try {
+      const exports = [...new Set([...(form.ownerExport ? [row.ownerMxid] : []), ...(form.coordinatorExport ? [form.coordinator.trim()] : [])])];
+      const change = { serverEngagementId: row.id, expectedRevision: row.delegationRevision, coordinatorMxid: form.coordinator.trim(),
+        delegationExpiresAtMs: Date.parse(form.expires + 'Z'), allowSelfApproval: form.self, state: form.state, exportMxids: exports };
+      const value = await changeEngagementDelegation(change), e = value.engagement;
+      onChanged({ ...row, coordinatorMxid: e.coordinator, delegationRevision: e.delegationRevision, delegationExpiresAtMs: e.delegationExpiresAtMs,
+        state: e.state, allowSelfApproval: e.allowSelfApproval, exportMxids: exports, delegationPublication: value.publication });
+      setForm(null); setNote(t('se.delegationSaved'));
+    } catch (e) { setNote(e.message); } finally { setBusy(false); }
+  }
+  return <section data-engagement-delegation>
+    <h3>{t('se.delegation')}</h3><p>{t('se.delegationHelp')}</p>
+    <p>{t('se.delegationRevision')} {row.delegationRevision} · {row.delegationPublication}</p>
+    <p role="status">{note}</p>
+    <button className="btn" disabled={busy || !['verified', 'suspended'].includes(row.state)} onClick={edit}>{t('se.editDelegation')}</button>
+    {form && <form onSubmit={save} className="panel">
+      <label>{t('se.coordinator')} <input required disabled={busy} value={form.coordinator} onChange={e => setForm({ ...form, coordinator: e.target.value })} /></label>
+      <label>{t('se.expiresUtc')} <input type="datetime-local" required disabled={busy} value={form.expires} onChange={e => setForm({ ...form, expires: e.target.value })} /></label>
+      <label>{t('col.state')} <select value={form.state} disabled={busy} onChange={e => setForm({ ...form, state: e.target.value })}>
+        <option value="active">{t('se.active')}</option><option value="suspended">{t('se.suspended')}</option><option value="revoked">{t('se.revoked')}</option>
+      </select></label>
+      <label><input type="checkbox" checked={form.self} disabled={busy} onChange={e => setForm({ ...form, self: e.target.checked })} /> {t('se.selfApproval')}</label>
+      <label><input type="checkbox" checked={form.ownerExport} disabled={busy} onChange={e => setForm({ ...form, ownerExport: e.target.checked })} /> {t('se.ownerExport')}</label>
+      <label><input type="checkbox" checked={form.coordinatorExport} disabled={busy} onChange={e => setForm({ ...form, coordinatorExport: e.target.checked })} /> {t('se.coordinatorExport')}</label>
+      <button className="btn primary" disabled={busy}>{t('se.saveDelegation')}</button><button type="button" className="btn" disabled={busy} onClick={() => setForm(null)}>{t('common.cancel')}</button>
+    </form>}
+  </section>;
 }

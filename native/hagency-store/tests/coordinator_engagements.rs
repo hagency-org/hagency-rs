@@ -554,3 +554,87 @@ fn profile_import_is_atomic_and_native_probe_is_required_before_contribution() {
     db.put_coordinator_resource(&resource_grant(200, 2), 1000)
         .unwrap();
 }
+
+#[test]
+fn owner_delegation_changes_fence_old_commands_and_publish_before_resources() {
+    use std::time::{Duration, Instant};
+    let (dir, mut db) = setup();
+    let access = hagency_store::ResourceConfigurationAccess::new(
+        Instant::now() + Duration::from_secs(60),
+        Default::default(),
+    );
+    let change: DelegationChange = serde_json::from_value(json!({
+        "serverEngagementId":registration().fleet_id,"expectedRevision":1,"coordinatorMxid":"@replacement:example.test",
+        "delegationExpiresAtMs":1000000,"allowSelfApproval":false,"state":"active","exportMxids":["@replacement:example.test"]
+    })).unwrap();
+    let prepare = |change: DelegationChange| {
+        access
+            .prepare_delegation(change, Instant::now() + Duration::from_secs(10))
+            .unwrap()
+    };
+    let result = db
+        .change_coordinator(prepare(change.clone()), 1001)
+        .unwrap();
+    assert_eq!(u64::from(result.delegation_revision), 2);
+    assert_eq!(result.coordinator.as_str(), "@replacement:example.test");
+    assert_eq!(
+        db.change_coordinator(prepare(change.clone()), 1002)
+            .unwrap(),
+        result
+    );
+    let mut conflict = change.clone();
+    conflict.allow_self_approval = true;
+    assert!(matches!(
+        db.change_coordinator(prepare(conflict), 1002),
+        Err(Error::Conflict)
+    ));
+    let identity = publication_identity();
+    let updates = db.coordinator_updates(&identity).unwrap();
+    assert_eq!(updates[0]["id"], "engagement_authority");
+    assert_eq!(
+        updates[0]["payload"]["exportMxids"],
+        json!(["@replacement:example.test"])
+    );
+    let (old, proof) = prepared(&mut db, "stale", "Stale", 100);
+    assert!(db.approve_coordinated_agent(&old, &proof, 1002).is_err());
+    let mut suspended = change.clone();
+    suspended.expected_revision = 2.try_into().unwrap();
+    suspended.state = DelegationState::Suspended;
+    let paused = db
+        .change_coordinator(prepare(suspended.clone()), 1003)
+        .unwrap();
+    assert_eq!(paused.state, contract::EngagementState::Suspended);
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    assert_eq!(
+        db.coordinator_authority(&registration().fleet_id)
+            .unwrap()
+            .unwrap(),
+        paused
+    );
+    assert_eq!(
+        db.change_coordinator(prepare(change), 1004).unwrap(),
+        result
+    );
+    assert_eq!(
+        db.coordinator_authority(&registration().fleet_id)
+            .unwrap()
+            .unwrap(),
+        paused,
+        "old replay cannot restore authority"
+    );
+    suspended.expected_revision = 3.try_into().unwrap();
+    suspended.state = DelegationState::Revoked;
+    let revoked = db
+        .change_coordinator(prepare(suspended.clone()), 1005)
+        .unwrap();
+    suspended.expected_revision = 4.try_into().unwrap();
+    suspended.state = DelegationState::Active;
+    assert!(matches!(
+        db.change_coordinator(prepare(suspended), 1006),
+        Err(Error::Generation)
+    ));
+    assert_eq!(revoked.state, contract::EngagementState::Revoked);
+    access.revoke().unwrap();
+    assert!(access.prepare_delegation(serde_json::from_value(json!({"serverEngagementId":registration().fleet_id,"expectedRevision":4,"coordinatorMxid":"@replacement:example.test","delegationExpiresAtMs":1000000,"allowSelfApproval":false,"state":"revoked","exportMxids":[]})).unwrap(),Instant::now()+Duration::from_secs(10)).is_err());
+}

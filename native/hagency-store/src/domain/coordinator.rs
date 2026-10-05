@@ -14,7 +14,9 @@ type StoredResourceGrant = (
     String,
     String,
 );
+mod delegations;
 mod deliveries;
+pub use delegations::{DelegationChange, DelegationCommand, DelegationState};
 pub use deliveries::terminal_reason as coordinator_refusal_reason;
 
 pub use contract::{
@@ -397,9 +399,15 @@ impl DomainRepository {
         let mut result = Vec::new();
         for row in query.query_map(params![after, limit], |r| r.get::<_, String>(0))? {
             let policy: ServerEngagement = serde_json::from_str(&row?)?;
+            let exports: Option<String> = self.db.query_row("SELECT change FROM coordinator_delegations WHERE engagement_id=?1 ORDER BY revision DESC LIMIT 1", [policy.id.as_str()], |r| r.get(0)).optional()?;
+            let exports: Value = exports
+                .map(|s| serde_json::from_str::<Value>(&s))
+                .transpose()?
+                .map_or(json!([]), |v| v["exportMxids"].clone());
+            let queued: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM coordinator_publications WHERE engagement_id=?1 AND id='engagement_authority')",[policy.id.as_str()],|r|r.get(0))?;
             result.push(json!({"id":policy.id,"serverName":policy.server,"ownerMxid":policy.owner,"coordinatorMxid":policy.coordinator,
                 "state":policy.state,"registrationGeneration":policy.registration_generation,"delegationRevision":policy.delegation_revision,
-                "delegationExpiresAtMs":policy.delegation_expires_at_ms}));
+                "delegationExpiresAtMs":policy.delegation_expires_at_ms,"allowSelfApproval":policy.allow_self_approval,"exportMxids":exports,"delegationPublication":if queued {"queued"}else{"acknowledged"}}));
         }
         Ok(result)
     }
@@ -590,7 +598,7 @@ impl DomainRepository {
         identity: &crate::outbound::RegistrationIdentity,
     ) -> Result<Vec<Value>, Error> {
         self.check_publication_registration(identity)?;
-        let mut rows = self.db.prepare("SELECT id,digest,payload FROM coordinator_publications WHERE engagement_id=?1 ORDER BY CASE WHEN id LIKE 'resource_%' THEN 0 WHEN id LIKE 'project_%' THEN 1 ELSE 2 END,id LIMIT 100")?;
+        let mut rows = self.db.prepare("SELECT id,digest,payload FROM coordinator_publications WHERE engagement_id=?1 ORDER BY CASE WHEN id='engagement_authority' THEN 0 WHEN id LIKE 'resource_%' THEN 1 WHEN id LIKE 'project_%' THEN 2 ELSE 3 END,id LIMIT 100")?;
         let mut result = Vec::new();
         let mut bytes = 0usize;
         for row in rows.query_map([&identity.fleet_id], |r| {

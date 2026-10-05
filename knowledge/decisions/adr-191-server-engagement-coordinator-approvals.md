@@ -61,7 +61,7 @@ existing workflow until reconciled.
 
 ## Implemented integration boundary
 
-The current Rust slice adds schema version 62, typed coordinator commands,
+The current Rust slice adds schema version 63, typed coordinator commands,
 transactional reservations/top-ups, owner contribution HTTP routes, independent
 profile import/launch, native Matrix verification and outbound projections.
 `GET /console/api/server-engagements` and its `/{id}/resources` routes expose the
@@ -107,7 +107,7 @@ It does not claim live Matrix, agent execution or native save-dialog acceptance.
 
 ## Remaining acceptance work
 
-- Owner delegation changes and semantic legacy reconciliation.
+- Semantic legacy reconciliation and production cutover.
 - Live Matrix notification acceptance and final command outcomes
   for authority expiry or permanently invalid room bindings.
 - Isolated combined Palpo/Rinx/Hagency tests, real Makepad instrumentation and
@@ -122,3 +122,15 @@ The delivered-decision registry precedes Matrix admission, preserves refusals an
 replays after restart, and exposes no private agent instructions. The Chrome
 acceptance test operates the actual native console, edits one allocation twice,
 checks the shared resource view and observes a refused delivered approval.
+
+The owner can now change the coordinator, expiry, self-approval policy and explicit
+profile recipients, or suspend/revoke the delegation. The console checks a new
+active coordinator against Matrix; suspension/revocation also work while Matrix
+is offline. A finite owner permission survives queueing through the commit.
+The authority revision and publication commit together, fencing old commands
+locally immediately. Palpo accepts that revision only from the engagement's
+authenticated transport, refreshes reviewers/notices and preserves existing
+grants. It cannot use this publication to assert connection proof or rotate
+registration identity. Reimport must match the locally accepted delegation;
+an old profile cannot restore a removed coordinator. Browser acceptance covers
+the owner suspension form, pending synchronization and unchanged allocation.

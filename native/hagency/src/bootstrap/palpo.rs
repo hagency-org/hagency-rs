@@ -227,6 +227,16 @@ impl From<super::palpo_import::Error> for ImportError {
     }
 }
 impl Live {
+    pub(crate) async fn verify_coordinator(&self, fleet: &str, user: &str) -> bool {
+        let Ok(registration) = self.0.domain.provisioning_registration(fleet.into()).await else {
+            return false;
+        };
+        let Ok(profile) = super::palpo_import::profile_directory(&self.0.state, fleet) else {
+            return false;
+        };
+        super::palpo_work::verify_coordinator_account(&profile, &registration.server_name, user)
+            .await
+    }
     pub(crate) fn new(
         state: std::path::PathBuf,
         store: Store,
@@ -348,18 +358,23 @@ impl Live {
             return Err(ImportError::Closed);
         }
         let homeserver = super::palpo_import::homeserver(homeserver)?;
-        super::association::validate_import(&self.0.state, raw, &homeserver)
-            .map_err(|_| ImportError::Invalid("association binding"))?;
         let (mut registration, mut appservice, machine, endpoint, generation) =
             super::palpo_import::parse(raw)?;
         appservice["homeserver"] = serde_json::json!(homeserver);
         let profile =
             super::palpo_import::profile_directory(&self.0.state, &registration.fleet_id)?;
         let domain = &self.0.domain;
+        let accepted = domain
+            .coordinator_authority(registration.fleet_id.clone())
+            .await
+            .map_err(ImportError::Store)?;
+        super::association::validate_import(&self.0.state, raw, &homeserver, accepted.as_ref())
+            .map_err(|_| ImportError::Invalid("association binding"))?;
         // A re-import of the same fleet keeps a reception an earlier probe bound.
         if let Ok(current) = domain
             .provisioning_registration(registration.fleet_id.clone())
             .await
+            && current.generation == registration.generation
         {
             registration.reception_room_id = current.reception_room_id;
         }

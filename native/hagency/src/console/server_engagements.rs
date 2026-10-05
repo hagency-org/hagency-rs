@@ -10,11 +10,74 @@ pub(super) fn router() -> Router {
     Router::with_path("server-engagements")
         .get(list)
         .push(Router::with_path("{id}/decisions").get(decisions))
+        .push(Router::with_path("{id}/delegation").put(delegation))
         .push(
             Router::with_path("{id}/resources")
                 .get(resources)
                 .put(contribute),
         )
+}
+#[handler]
+async fn delegation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let prepared = async {
+        query(req, &[], 0)?;
+        let session = depot
+            .get_typed::<Session>()
+            .map_err(|_| Error::Unauthorized)?;
+        let access = console(depot)?;
+        if !access.0.authority.can_configure(session)? {
+            return Err(Error::ConfigurationForbidden);
+        }
+        let raw = body(req, 8192).await?;
+        let change: hagency_store::coordinator::DelegationChange =
+            serde_json::from_slice(&raw).map_err(|_| Error::Invalid)?;
+        if req.param::<String>("id").as_deref() != Some(change.server_engagement_id.as_str()) {
+            return Err(Error::Invalid);
+        }
+        // Suspension and revocation must remain possible while Matrix is down.
+        if matches!(
+            change.state,
+            hagency_store::coordinator::DelegationState::Active
+        ) {
+            let live = depot
+                .get_typed::<crate::App>()
+                .ok()
+                .and_then(|app| app.palpo_live())
+                .ok_or(Error::Unavailable)?;
+            if !live
+                .verify_coordinator(
+                    change.server_engagement_id.as_str(),
+                    change.coordinator_mxid.as_str(),
+                )
+                .await
+            {
+                return Err(Error::Invalid);
+            }
+        }
+        access.0.authority.delegation(session, change)
+    }
+    .await;
+    let command = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = store.change_coordinator(command).await;
+    if let Err(e) = recheck(depot) {
+        failed(res, e);
+        return;
+    }
+    match result {
+        Ok(value) => res.render(Json(
+            json!({"ok":true,"engagement":value,"publication":"queued"}),
+        )),
+        Err(e) => failure(res, e),
+    }
 }
 #[handler]
 async fn decisions(req: &mut Request, depot: &mut Depot, res: &mut Response) {

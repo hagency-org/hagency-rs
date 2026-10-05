@@ -23,6 +23,26 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Owner delegation revisions fence old commands and survive restart
+  Test: owner_delegation_changes_fence_old_commands_and_publish_before_resources
+  Given the owner changes the coordinator through a revocable configuration permission
+  When an old decision or changed retry arrives
+  Then the new revision remains authoritative and is durably published before resource changes
+
+Scenario: Native owner suspension requires authentication and retains contributed capacity
+  Test: native_console_delegation_suspend_is_authorized_idempotent_and_does_not_release_capacity
+  Level: integration
+  Test Double: real native console router and domain writer; isolated registration
+  Given a verified association with an engagement resource allocation
+  When the owner suspends delegation and retries the same revision
+  Then anonymous or conflicting changes are refused and capacity is not released
+
+Scenario: Private protocol JSON is not truncated at the bearer-token file limit
+  Test: native_palpo_private_observation_files_survive_beyond_secret_token_size
+  Given enough recorded request and probe IDs to exceed 512 bytes
+  When the native process reloads its private observation files
+  Then old and recent request/probe bindings and a longer appservice credential survive
+
 Scenario: Delivered approvals remain visible before Matrix admission
   Test: delivered_approval_is_visible_before_matrix_admission_and_terminal_refusal_survives_restart
   Given a delivered command whose Matrix admission has not completed

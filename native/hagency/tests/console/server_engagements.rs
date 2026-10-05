@@ -99,3 +99,70 @@ async fn native_console_engagement_contribution_reserves_capacity_and_rejects_cr
     );
     f.close().await;
 }
+
+#[tokio::test]
+async fn native_console_delegation_suspend_is_authorized_idempotent_and_does_not_release_capacity()
+{
+    let f = Fixture::new("127.0.0.1:13300".parse().unwrap(), None);
+    let fleet = common::registration().fleet_id;
+    f.domain.configure_coordinator(serde_json::from_value(json!({"id":fleet,"server":"example.test","owner":"@provider:example.test","coordinator":"@coordinator:example.test","registrationGeneration":1,"delegationRevision":1,"delegationExpiresAtMs":now()+3600000,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true})).unwrap()).await.unwrap();
+    let parent = native_resource("suspension_parent");
+    f.domain.put_resource(parent.clone()).await.unwrap();
+    let service = f.service();
+    let path = format!("/console/api/server-engagements/{fleet}/delegation");
+    let change = json!({"serverEngagementId":fleet,"expectedRevision":1,"coordinatorMxid":"@coordinator:example.test","delegationExpiresAtMs":now()+3600000,"allowSelfApproval":false,"state":"suspended","exportMxids":[]});
+    assert_eq!(
+        contribute(&path, "")
+            .json(&change)
+            .send(&service)
+            .await
+            .status_code,
+        Some(StatusCode::UNAUTHORIZED)
+    );
+    let cookie = session(&service).await;
+    let resources = format!("/console/api/server-engagements/{fleet}/resources");
+    let grant = json!({"id":"suspension_grant","serverEngagementId":fleet,"resourceId":parent.id(),"revision":1,"allocatedTokens":3000,"eligibleManagers":["@owner:example.test"]});
+    assert_eq!(
+        contribute(&resources, &cookie)
+            .json(&grant)
+            .send(&service)
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
+    for _ in 0..2 {
+        let mut response = contribute(&path, &cookie)
+            .json(&change)
+            .send(&service)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let value = response.take_json::<Value>().await.unwrap();
+        assert_eq!(value["engagement"]["delegationRevision"], 2);
+        assert_eq!(value["publication"], "queued");
+    }
+    let mut conflict = change.clone();
+    conflict["state"] = json!("revoked");
+    assert_eq!(
+        contribute(&path, &cookie)
+            .json(&conflict)
+            .send(&service)
+            .await
+            .status_code,
+        Some(StatusCode::CONFLICT)
+    );
+    assert_eq!(
+        f.domain
+            .coordinator_authority(fleet)
+            .await
+            .unwrap()
+            .unwrap()
+            .delegation_revision,
+        2.try_into().unwrap()
+    );
+    let mut response = get(&resources, &cookie).send(&service).await;
+    assert_eq!(
+        response.take_json::<Value>().await.unwrap()["resources"][0]["allocatedTokens"],
+        3000
+    );
+    f.close().await;
+}

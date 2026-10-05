@@ -107,12 +107,23 @@ async fn native_coordinator_ledger_browser_shares_resource_allocation_and_shows_
     );
     let grants = f
         .domain
-        .server_engagement_resources(fleet, String::new(), 50)
+        .server_engagement_resources(fleet.clone(), String::new(), 50)
         .await
         .unwrap();
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0]["allocatedTokens"], 4000);
     assert_eq!(grants[0]["revision"], 2);
+    let authority = f
+        .domain
+        .coordinator_authority(fleet)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&authority).unwrap()["state"],
+        "suspended"
+    );
+    assert_eq!(u64::from(authority.delegation_revision), 2);
     handle.stop_graceful(Some(Duration::from_secs(2)));
     serving.await.unwrap().unwrap();
     f.close().await;

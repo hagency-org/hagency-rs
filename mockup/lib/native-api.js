@@ -1200,7 +1200,15 @@ function engagementPage(value, key, fields) {
 export async function fetchServerEngagements(after = '') {
   if (after && !id(after)) throw new Error('invalid_selection');
   return engagementPage(await request(`/api/server-engagements?limit=50${after ? `&after=${after}` : ''}`), 'engagements',
-    ['id', 'serverName', 'ownerMxid', 'coordinatorMxid', 'state', 'registrationGeneration', 'delegationRevision', 'delegationExpiresAtMs']);
+    ['id', 'serverName', 'ownerMxid', 'coordinatorMxid', 'state', 'registrationGeneration', 'delegationRevision', 'delegationExpiresAtMs', 'allowSelfApproval', 'exportMxids', 'delegationPublication']);
+}
+export async function changeEngagementDelegation(change) {
+  if (!id(change.serverEngagementId) || !number(change.expectedRevision) || change.expectedRevision < 1) throw new Error('invalid_selection');
+  const value = await request(`/api/server-engagements/${change.serverEngagementId}/delegation`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
+  });
+  if (!object(value, ['ok', 'engagement', 'publication']) || value.ok !== true || !value.engagement || value.engagement.id !== change.serverEngagementId) throw new Error('invalid_native_response');
+  return value;
 }
 export async function fetchEngagementResources(fleet, after = '') {
   if (!id(fleet) || after && !id(after)) throw new Error('invalid_selection');
