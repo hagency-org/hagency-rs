@@ -658,6 +658,11 @@ impl Owner {
                     return Ok(());
                 }
                 // Preserve the original activation future through its receipt.
+                let retirement = if prepared.work.is_some() {
+                    Some(hagency_palpo::RetirementClient::new(&prepared.host)?)
+                } else {
+                    None
+                };
                 let mut adapter = Adapter::attach(prepared.host, store).await?;
                 if let Some(work) = &prepared.work {
                     adapter = adapter.with_probe_receipts(work.probes.clone());
@@ -671,28 +676,67 @@ impl Owner {
                 // ADR109 rechecks domain identity after custody waits before
                 // HTTP admission; already admitted bytes cannot be recalled.
                 // The custody consumer runs beside it and stops with it.
-                let consumer = async {
-                    if let Some(work) = &prepared.work {
-                        super::palpo_work::run(
-                            &adapter,
-                            &work.probes,
-                            &domain,
-                            &work.appservice,
-                            &work.fleet,
-                            work.generation,
-                            &signal,
-                        )
-                        .await;
+                let delivery = async {
+                    loop {
+                        completion.status.set("running", None);
+                        let work_signal = signal.child_token();
+                        let consumer = async {
+                            if let Some(work) = &prepared.work {
+                                super::palpo_work::run(
+                                    &adapter,
+                                    &work.probes,
+                                    &domain,
+                                    &work.appservice,
+                                    &work.fleet,
+                                    work.generation,
+                                    &work_signal,
+                                )
+                                .await;
+                            }
+                        };
+                        let (result, ()) = tokio::join!(
+                            async {
+                                let result =
+                                    adapter.run_with_resources(&domain, &work_signal).await;
+                                work_signal.cancel();
+                                result
+                            },
+                            consumer
+                        );
+                        if signal.is_cancelled() {
+                            return Ok(());
+                        }
+                        match result {
+                            Err(Error::Unauthorized) if retirement.is_some() => {
+                                // A resumed registration can reuse its current
+                                // credentials. Restart both original lanes and
+                                // their consumer after the bounded backoff.
+                                completion.status.set("unavailable", Some("unauthorized"));
+                                tokio::select! {
+                                    _ = signal.cancelled() => return Ok(()),
+                                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                                }
+                            }
+                            Err(error) if retirement.is_some() => {
+                                completion
+                                    .status
+                                    .set("unavailable", Some(error_label(error)));
+                                signal.cancelled().await;
+                                return Err(error);
+                            }
+                            result => {
+                                signal.cancel();
+                                return result;
+                            }
+                        }
                     }
                 };
-                let (result, ()) = tokio::join!(
-                    async {
-                        let result = adapter.run_with_resources(&domain, &signal).await;
-                        signal.cancel();
-                        result
-                    },
-                    consumer
-                );
+                let cleanup = async {
+                    if let (Some(client), Some(work)) = (&retirement, &prepared.work) {
+                        super::palpo_retirement::run(client, &domain, &work.fleet, &signal).await;
+                    }
+                };
+                let (result, ()) = tokio::join!(delivery, cleanup);
                 result
             }
             .await;

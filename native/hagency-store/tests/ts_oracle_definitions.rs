@@ -74,24 +74,10 @@ fn ts_oracle_a_live_allocation_prevents_retirement() {
     );
 }
 
-/// TS `palpo-agent-retirement.test.js:11` `retirement requires the exact identity
-/// and every remote verification result`: the outbound call must come back with
-/// the SAME `requestId`/`fleetId`/`mxid`, `state: 'retired'`,
-/// `matrixIdentity: 'deactivated'`, `appserviceAccess: 'revoked'` and an EMPTY
-/// `joinedRooms`, or it throws `not fully verified`.
-///
-/// Native owns the *local* half (the retire fence and the leave-then-logout
-/// sequence: `hagency-matrix/tests/retire.rs`), but there is no native outbound
-/// `retire-agent` call to verify: `grep` finds no `/retire-agent` request in
-/// `native/*/src`.
-#[ignore = "parity gap: no native outbound /retire-agent call with the remote verification assertions"]
-#[test]
-fn ts_oracle_retirement_verifies_remote_identity() {
-    panic!(
-        "TS asserts retirePalpoAgent throws unless every remote field matches; native has no \
-         outbound retire-agent call (the local leave+logout half is `hagency-matrix/src/retire.rs`)"
-    );
-}
+// The remote-identity oracle now runs in hagency-palpo's
+// native_retirement_requires_every_exact_remote_identity_field and
+// native_retirement_http_retries_exact_identity_and_refuses_redirected_or_incomplete_proof.
+// Whole-process restart/retry evidence is native_palpo_retirement_reconciles_lost_reply_after_restart_without_a_runtime.
 
 /* ─────────── resource-agent-definitions.test.js (5) — all route gaps ─────────── */
 
@@ -200,33 +186,10 @@ fn ts_oracle_palpo_labels_populate_metadata() {
     panic!("TS asserts fleet project labels populate console metadata; native has no such route");
 }
 
-/// TS `palpo-agent-definitions.test.js:91` `last Palpo allocation retirement
-/// fences admission and verifies remote removal`.
-///
-/// Native owns the FENCE half (`agent_fences`, `dispatch_stops`) and the local
-/// leave+logout (`hagency-matrix/src/retire.rs`), but the outbound remote
-/// removal verification has no native call.
-#[ignore = "parity gap: no native outbound remote-removal verification (the local fence exists: agent_fences/retire.rs)"]
-#[test]
-fn ts_oracle_last_palpo_allocation_retirement_fences_admission() {
-    panic!(
-        "TS asserts the retirement fences admission AND verifies remote removal; native has the fence but no remote verification call"
-    );
-}
-
-/// TS `palpo-agent-definitions.test.js:104` `incomplete Palpo retirement stays
-/// fenced and retries the original identity`.
-///
-/// The native fence that "stays fenced" is `agent_fences` with reason
-/// `cleanup_unproven`/`cleanup_unknown` (`hagency-store/tests/agent_fences.rs`).
-/// Cited; the retry-the-original-identity remote half is a gap.
-#[ignore = "parity gap: no native outbound retirement retry (fence half is agent_fences.rs, cited)"]
-#[test]
-fn ts_oracle_incomplete_palpo_retirement_stays_fenced() {
-    panic!(
-        "TS asserts the retirement stays fenced and retries the original identity; native's fence exists (agent_fences) but no outbound retry call"
-    );
-}
+// The last-allocation remote cleanup and original-identity retry oracles are
+// exercised by native_remote_retirement_inspects_the_original_uncertain_effect_after_restart
+// and the actual native Palpo retirement process test cited above. Local runner
+// custody remains separately fenced; remote cleanup does not settle usage.
 
 /// TS `palpo-agent-definitions.test.js:118` `revoking one of two allocations
 /// keeps the Agent on Matrix`.

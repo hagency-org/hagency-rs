@@ -12,6 +12,7 @@ pub mod intake_refusal;
 pub mod invites;
 pub(crate) mod palpo;
 pub mod palpo_import;
+mod palpo_retirement;
 mod palpo_work;
 pub mod probe;
 pub mod provision;

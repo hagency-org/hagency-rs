@@ -2609,12 +2609,27 @@ impl DomainRepository {
         Ok(result)
     }
     pub fn pending_unattached_retirements(&self, fleet_id: &str) -> Result<Vec<String>, Error> {
+        self.pending_retirements(fleet_id, true)
+    }
+    /// Appservice identity cleanup also survives a lost live worker or restart.
+    /// Completing it never settles runner custody or refunds unknown usage.
+    pub fn pending_identity_retirements(&self, fleet_id: &str) -> Result<Vec<String>, Error> {
+        self.pending_retirements(fleet_id, false)
+    }
+    fn pending_retirements(&self, fleet_id: &str, unattached: bool) -> Result<Vec<String>, Error> {
         project::identifier(fleet_id, 128)?;
         let mut statement = self.db.prepare(
-            "SELECT e.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.fleet_id=?1 AND f.kind='retire' AND f.state='pending' AND e.state='revoked' AND e.generation=r.generation AND NOT EXISTS(SELECT 1 FROM matrix_transports t WHERE t.engagement_id=e.id) ORDER BY f.id LIMIT 16",
+            "SELECT e.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.fleet_id=?1 AND f.kind='retire' AND (f.state='pending' OR (?2=0 AND f.state='uncertain')) AND e.state='revoked' AND e.generation=r.generation AND (?2=0 OR NOT EXISTS(SELECT 1 FROM matrix_transports t WHERE t.engagement_id=e.id)) ORDER BY f.id LIMIT 16",
         )?;
-        let rows = statement.query_map([fleet_id], |r| r.get(0))?;
+        let rows = statement.query_map(params![fleet_id, unattached], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+    /// Inspect the original uncertain retirement for an idempotent remote
+    /// identity check. This cannot rearm provisioning, execution or local IO.
+    pub fn inspect_retirement_effect(&self, id: &str) -> Result<Option<Effect>, Error> {
+        project::identifier(id, 128)?;
+        let effect: Option<String> = self.db.query_row("SELECT f.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.id=?1 AND e.state='revoked' AND f.kind='retire' AND f.state='uncertain' AND e.generation=r.generation",[id],|r|r.get(0)).optional()?;
+        effect.map(|id| read_effect(&self.db, &id)).transpose()
     }
     fn claim_matching_effect(&mut self, expected: Option<&str>) -> Result<Option<Effect>, Error> {
         let tx = self

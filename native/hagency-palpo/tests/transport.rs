@@ -6,6 +6,63 @@ use hagency_store::outbound::{Command, Reply};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
+#[tokio::test]
+async fn native_retirement_http_retries_exact_identity_and_refuses_redirected_or_incomplete_proof()
+{
+    let mut fake = Fake::start(true).await;
+    let config = config(&fake.endpoint, 31)
+        .with_root_pem(include_bytes!("fixtures/ca.pem"))
+        .unwrap();
+    let client = hagency_palpo::RetirementClient::new(&config).unwrap();
+    let mxid = format!("@{FLEET}_en_{}:matrix.example.test", "a".repeat(32));
+    let cancel = CancellationToken::new();
+    let valid = json!({"ok":true,"fleetId":FLEET,"requestId":"retire_original","agent":{"mxid":mxid,"state":"retired","matrixIdentity":"deactivated","appserviceAccess":"revoked","joinedRooms":[]}});
+    let mut frozen = None;
+    for (status, body, expected) in [
+        (502, json!({}), Some(Error::Remote(502))),
+        (200, json!({"ok":true}), Some(Error::Wire)),
+        (200, valid, None),
+    ] {
+        let (result, ()) = tokio::join!(client.retire("retire_original", &mxid, &cancel), async {
+            let request = fake.next().await;
+            assert_eq!(request.method, "POST");
+            assert_eq!(
+                request.target,
+                format!("/api/fleet/v2/{FLEET}/retire-agent")
+            );
+            assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
+            assert_eq!(request.headers["x-hagency-generation"], "31");
+            assert_eq!(
+                request.value(),
+                json!({"requestId":"retire_original","agentMxid":mxid})
+            );
+            if let Some(previous) = &frozen {
+                assert_eq!(&request.body, previous);
+            } else {
+                frozen = Some(request.body.clone());
+            }
+            request.json(status, body);
+        });
+        if let Some(expected) = expected {
+            assert_eq!(result, Err(expected));
+        } else {
+            let receipt = result.unwrap();
+            assert!(receipt.contains(&mxid));
+            assert!(!receipt.contains(TOKEN));
+        }
+    }
+    let (result, ()) = tokio::join!(client.retire("retire_original", &mxid, &cancel), async {
+        fake.next().await.raw(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://other.test/steal\r\nContent-Length: 0\r\n\r\n".to_vec());
+    });
+    assert_eq!(result, Err(Error::Redirect));
+    cancel.cancel();
+    assert_eq!(
+        client.retire("retire_original", &mxid, &cancel).await,
+        Err(Error::Cancelled)
+    );
+    fake.close().await;
+}
+
 #[test]
 fn native_outbound_http_authority_configuration() {
     let path = format!("/api/fleet/v2/{FLEET}");

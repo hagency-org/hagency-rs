@@ -23,6 +23,42 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Whole Matrix identity retirement requires every original remote proof field
+  Test: native_retirement_requires_every_exact_remote_identity_field
+  Given the original fleet, request and Matrix identity
+  When any binding or deactivation, appservice denial or room-removal proof is missing
+  Then cleanup does not complete
+
+Scenario: Remote retirement retries only the original bounded authenticated request
+  Test: native_retirement_http_retries_exact_identity_and_refuses_redirected_or_incomplete_proof
+  Level: integration
+  Test Double: real bounded HTTPS client with an isolated TLS peer
+  Given a failed remote retirement response
+  When the same operation retries or the peer redirects
+  Then original identity bytes and generation remain fixed and credentials never follow a redirect
+
+Scenario: Cleanup inspects its original uncertain effect after restart
+  Test: native_remote_retirement_inspects_the_original_uncertain_effect_after_restart
+  Given a revoked allocation with uncertain remote cleanup
+  When the store restarts and the exact remote identity is verified
+  Then the original effect and fence settle without rearming provisioning or execution
+
+Scenario: The native Palpo profile completes identity cleanup without an agent runtime
+  Test: native_palpo_retirement_reconciles_lost_reply_after_restart_without_a_runtime
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated HTTPS Palpo peer
+  Given a lost retirement reply and unavailable ordinary delivery after restart
+  When the profile retries cleanup and receives incomplete then exact proof
+  Then it keeps the original identity fenced until verified and does not change capacity
+
+Scenario: Cancelling a profile records its uncertain identity cleanup before the store closes
+  Test: native_palpo_retirement_cancellation_persists_uncertainty_before_store_reopen
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated HTTPS Palpo peer
+  Given the profile is cancelled after its retirement request is sent
+  When the remote response has not arrived
+  Then its original effect is uncertain before reopening and a replacement worker can reconcile it
+
 Scenario: Credential rotation fences older imports and repairs an interrupted file replacement
   Test: native_palpo_profile_rotation_refuses_stale_generation_and_recovers_partial_files
   Given a newer private transport generation was only partly written

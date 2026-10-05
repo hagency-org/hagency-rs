@@ -4597,6 +4597,19 @@ impl DomainStore {
         self.call(weight(&id)?, move |db| db.claim_effect_for(&id))
             .await
     }
+    pub async fn inspect_retirement_effect(&self, id: String) -> Result<Option<Effect>, Error> {
+        self.call(weight(&id)?, move |db| db.inspect_retirement_effect(&id))
+            .await
+    }
+    pub async fn pending_identity_retirements(
+        &self,
+        fleet_id: String,
+    ) -> Result<Vec<String>, Error> {
+        self.call(weight(&fleet_id)?, move |db| {
+            db.pending_identity_retirements(&fleet_id)
+        })
+        .await
+    }
     /// Approved-but-unprovisioned engagements of one fleet (read-only).
     pub async fn pending_provisions(&self, fleet_id: String) -> Result<Vec<String>, Error> {
         self.call(weight(&fleet_id)?, move |db| {

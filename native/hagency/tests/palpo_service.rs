@@ -10,6 +10,137 @@ use serde_json::json;
 use std::{fs, time::Duration};
 
 #[tokio::test]
+async fn native_palpo_retirement_reconciles_lost_reply_after_restart_without_a_runtime() {
+    retirement_recovery(false).await;
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn native_palpo_retirement_cancellation_persists_uncertainty_before_store_reopen() {
+    retirement_recovery(true).await;
+}
+async fn retirement_recovery(cancel_reply: bool) {
+    use hagency_core::project::CleanupState;
+    use hagency_store::{DomainRepository, private};
+    let mut f = Fixture::new(true, true).await;
+    let id = retiring_agent(&f.state);
+    let reserved_before = DomainRepository::open(&f.state)
+        .unwrap()
+        .resource_budget(&resource().id())
+        .unwrap()
+        .pool
+        .committed;
+    private::write_new(&f.state.join("palpo-appservice.json"),&serde_json::to_vec(&json!({"homeserver":"http://127.0.0.1:9","as_token":"isolated-native-fixture-token","sender_localpart":format!("{}_representative",peer::FLEET)})).unwrap()).unwrap();
+    let mxid = format!("@{}_{}:matrix.example.test", peer::FLEET, id);
+    let expected = json!({"requestId":"remote_retirement","agentMxid":mxid});
+    let mut original = None;
+    for restart in [false, true] {
+        if restart {
+            fs::rename(
+                f.root.path().join("native.stderr"),
+                f.root.path().join("native.before-restart.stderr"),
+            )
+            .unwrap();
+        }
+        let mut child = f.launch(true);
+        let mut stopped = false;
+        let until = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut identity_calls = 0;
+        loop {
+            assert!(
+                tokio::time::Instant::now() < until,
+                "identity cleanup did not finish: {}",
+                fs::read_to_string(f.root.path().join("native.stderr")).unwrap()
+            );
+            let request = f.fake.next_with_timeout(Duration::from_secs(10)).await;
+            if request.target.ends_with("/retire-agent") {
+                assert_eq!(request.value(), expected);
+                assert_eq!(request.headers["x-hagency-generation"], "31");
+                assert_eq!(
+                    request.headers["authorization"],
+                    format!("Bearer {}", peer::TOKEN)
+                );
+                if let Some(previous) = &original {
+                    assert_eq!(&request.body, previous);
+                } else {
+                    original = Some(request.body.clone());
+                }
+                identity_calls += 1;
+                if !restart {
+                    if cancel_reply {
+                        #[cfg(unix)]
+                        child.graceful().await;
+                        stopped = true;
+                        drop(request);
+                    } else {
+                        request.json(502, json!({}));
+                    }
+                    break;
+                }
+                if identity_calls == 1 {
+                    request.json(200, json!({"ok":true}));
+                    continue;
+                }
+                request.json(200,json!({"ok":true,"fleetId":peer::FLEET,"requestId":"remote_retirement","agent":{"mxid":mxid,"state":"retired","matrixIdentity":"deactivated","appserviceAccess":"revoked","joinedRooms":[]}}));
+                break;
+            } else if request.target.contains("/poll?") {
+                if restart {
+                    request.json(401, json!({"code":"transport_unauthorized"}));
+                } else {
+                    request.json(200, peer::empty(31));
+                }
+            } else {
+                assert!(request.target.ends_with("/updates") || request.target.ends_with("/ack"));
+                request.json(200, json!({"ok":true}));
+            }
+        }
+        let target = if restart { "complete" } else { "uncertain" };
+        for attempt in 0..200 {
+            let state: String = f
+                .sql("domain.sqlite3")
+                .query_row(
+                    "SELECT state FROM effects WHERE id=?1",
+                    [format!("retire_{id}")],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if state == target {
+                break;
+            }
+            assert!(
+                attempt < 199,
+                "effect stayed {state}; expected {target} before reopening the store"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        #[cfg(unix)]
+        if !stopped {
+            child.graceful().await;
+        }
+        drop(child);
+        let db = DomainRepository::open(&f.state).unwrap();
+        let effect = db.effect(&format!("retire_{id}")).unwrap();
+        assert_eq!(
+            effect.fence, 1,
+            "inspection must retain the original effect fence"
+        );
+        assert_eq!(
+            db.get(&id).unwrap().cleanup,
+            if restart {
+                CleanupState::Complete
+            } else {
+                CleanupState::Uncertain
+            }
+        );
+        assert_eq!(
+            db.resource_budget(&resource().id()).unwrap().pool.committed,
+            reserved_before,
+            "remote retirement must not invent a usage refund"
+        );
+    }
+    f.fake.close().await;
+}
+
+#[tokio::test]
 async fn native_palpo_worker_publishes_terminal_project_and_top_up_refusals() {
     use hagency_core::canonical;
     use hagency_core::custody::Lane;

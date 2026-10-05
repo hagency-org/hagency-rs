@@ -242,7 +242,10 @@ impl Fake {
         }
     }
     pub async fn next(&mut self) -> Request {
-        timeout(Duration::from_secs(3), self.requests.recv())
+        self.next_with_timeout(Duration::from_secs(3)).await
+    }
+    pub async fn next_with_timeout(&mut self, duration: Duration) -> Request {
+        timeout(duration, self.requests.recv())
             .await
             .unwrap()
             .unwrap()

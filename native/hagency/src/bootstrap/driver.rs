@@ -321,8 +321,10 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
         // retained executor's own shape (`lib/matrix-work-executor.js:13-49`):
         // the agent uses the credential it already holds, then clears it. The
         // worker IS the executor, so no timer and no separate sweeper exists.
-        if retire_requested(&input, &engagement).await? {
-            return Ok(None);
+        match retire_requested(&input, &engagement).await? {
+            Some(true) => return Ok(None),
+            Some(false) => continue,
+            None => {}
         }
         // A fenced agent claims nothing (the store's gate); say so and wait.
         if custody(&input, &engagement).await {
@@ -422,8 +424,10 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
             // and nothing restarts it for a revoked engagement, so a revoke
             // that lands while it is failing is still carried out first.
             Err(error) => {
-                if retire_requested(&input, &engagement).await.unwrap_or(false) {
-                    return Ok(None);
+                match retire_requested(&input, &engagement).await {
+                    Ok(Some(true)) => return Ok(None),
+                    Ok(Some(false)) => continue,
+                    _ => {}
                 }
                 return Err(error);
             }
@@ -520,7 +524,28 @@ const LAUNCH_RETRY: Duration = Duration::from_millis(LAUNCH_RETRY_MS);
 /// logout verdicts, `NotApplied` is a definitive refusal (a `matrix_http_<s>`
 /// answer), and `Unknown` leaves the effect retryable for the operator's
 /// `cleanup-retry` — the bridge never invents a completion it did not observe.
-async fn retire_requested(input: &Attempt<'_>, engagement: &str) -> Result<bool, Failure> {
+async fn retire_requested(input: &Attempt<'_>, engagement: &str) -> Result<Option<bool>, Failure> {
+    if matches!(&*input.owner,RuntimeOwner::Factory(agent) if agent.requires_identity_retirement())
+    {
+        let state = input
+            .domain
+            .engagement(engagement.to_owned())
+            .await
+            .map_err(|_| Failure::OutcomeUnknown)?;
+        if state.state != hagency_core::project::EngagementState::Revoked {
+            return Ok(None);
+        }
+        input.status.phase("retiring");
+        if matches!(
+            state.cleanup,
+            hagency_core::project::CleanupState::Complete
+                | hagency_core::project::CleanupState::NotRequired
+        ) {
+            return Ok(Some(true));
+        }
+        tokio::select! {_=input.cancel.cancelled()=>return Err(Failure::Cancelled),_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+        return Ok(Some(false));
+    }
     let effect_id = format!("retire_{engagement}");
     let claimed = input
         .domain
@@ -528,7 +553,7 @@ async fn retire_requested(input: &Attempt<'_>, engagement: &str) -> Result<bool,
         .await
         .map_err(|_| Failure::OutcomeUnknown)?;
     let Some(effect) = claimed else {
-        return Ok(false);
+        return Ok(None);
     };
     if effect.kind != "retire" {
         return Err(Failure::OutcomeUnknown);
@@ -546,7 +571,7 @@ async fn retire_requested(input: &Attempt<'_>, engagement: &str) -> Result<bool,
                 .observe_effect(effect.id, effect.fence, EffectOutcome::Unknown)
                 .await
                 .map_err(|_| Failure::OutcomeUnknown)?;
-            return Ok(true);
+            return Ok(Some(true));
         }
     };
     let outcome = if retirement.complete() {
@@ -564,7 +589,7 @@ async fn retire_requested(input: &Attempt<'_>, engagement: &str) -> Result<bool,
         .observe_effect(effect.id, effect.fence, outcome)
         .await
         .map_err(|_| Failure::OutcomeUnknown)?;
-    Ok(true)
+    Ok(Some(true))
 }
 
 /// What the store holds against this agent (ADR-182): its unresolved

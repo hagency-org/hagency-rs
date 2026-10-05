@@ -94,6 +94,72 @@ fn native_revoked_unattached_agent_lists_its_retirement_until_settled() {
     );
 }
 
+#[test]
+fn native_remote_retirement_inspects_the_original_uncertain_effect_after_restart() {
+    let (dir, mut db) = setup();
+    let pool = resource("remote_account", "remote_seat", 100);
+    db.put_resource(&pool).unwrap();
+    let request = request("remote_one", "Remote", &pool, 40);
+    let proof = proof(&request);
+    let id = request.engagement_id().unwrap();
+    db.admit(&proof, 1000).unwrap();
+    db.approve("remote_approve", &proof, 1000).unwrap();
+    let provision = db
+        .claim_effect_for(&format!("provision_{id}"))
+        .unwrap()
+        .unwrap();
+    assert!(db.inspect_retirement_effect(&id).unwrap().is_none());
+    db.observe_effect(
+        &provision.id,
+        provision.fence,
+        &EffectOutcome::Applied {
+            receipt: "provisioned".into(),
+        },
+    )
+    .unwrap();
+    db.revoke("remote_revoke", &id).unwrap();
+    let effect = db
+        .claim_effect_for(&format!("retire_{id}"))
+        .unwrap()
+        .unwrap();
+    db.observe_effect(&effect.id, effect.fence, &EffectOutcome::Unknown)
+        .unwrap();
+    drop(db);
+    let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
+    let inspected = db.inspect_retirement_effect(&id).unwrap().unwrap();
+    assert_eq!(inspected.id, effect.id);
+    assert_eq!(inspected.fence, effect.fence);
+    assert_eq!(inspected.payload, effect.payload);
+    assert!(db.claim_effect_for(&effect.id).unwrap().is_none());
+    assert_eq!(
+        db.pending_identity_retirements(&registration().fleet_id)
+            .unwrap(),
+        vec![id.clone()]
+    );
+    assert!(
+        db.pending_identity_retirements("hf_other")
+            .unwrap()
+            .is_empty()
+    );
+    let outcome = EffectOutcome::Applied {
+        receipt: "verified original identity".into(),
+    };
+    assert_eq!(
+        db.observe_effect(&effect.id, effect.fence, &outcome)
+            .unwrap()
+            .cleanup,
+        CleanupState::Complete
+    );
+    assert!(db.inspect_retirement_effect(&id).unwrap().is_none());
+    assert!(
+        db.pending_identity_retirements(&registration().fleet_id)
+            .unwrap()
+            .is_empty()
+    );
+    db.observe_effect(&effect.id, effect.fence, &outcome)
+        .unwrap();
+}
+
 /// A console verdict reserves the engagement and queues its provision effect
 /// without claiming it; the host reads that backlog on its next turn and it
 /// leaves the list the moment the effect is claimed.

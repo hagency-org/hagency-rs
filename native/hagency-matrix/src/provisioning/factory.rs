@@ -165,8 +165,14 @@ pub struct ProvisionedAgent {
     collector: Arc<Collector>,
     binding: SessionBinding,
     workspace: String,
+    appservice_identity: bool,
 }
 impl ProvisionedAgent {
+    /// Whole-identity cleanup belongs to the profile's authenticated Palpo
+    /// worker. A device logout cannot settle an appservice identity.
+    pub fn requires_identity_retirement(&self) -> bool {
+        self.appservice_identity
+    }
     pub fn collector(&self) -> &Collector {
         &self.collector
     }
@@ -977,6 +983,7 @@ impl TokenProvisioningHost {
             collector: Arc::new(collector),
             binding,
             workspace: format!("work_{engagement}"),
+            appservice_identity: self.as_namespace.is_some(),
         })
     }
     /// Discovery of a NEW agent. An agent a restart brings back enters through

@@ -611,6 +611,11 @@ impl TokenProvisioningHost {
         &self,
         domain: &DomainStore,
     ) -> Result<usize, Error> {
+        // The independently supervised Palpo profile verifies full identity
+        // removal, including an account created before local credential save.
+        if self.as_namespace.is_some() {
+            return Ok(0);
+        }
         let pending = domain
             .pending_unattached_retirements(self.registration.fleet_id.clone())
             .await

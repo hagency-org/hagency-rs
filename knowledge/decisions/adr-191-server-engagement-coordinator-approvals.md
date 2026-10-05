@@ -172,3 +172,27 @@ spec bindings passed. Rinx's combined 16-check native association run
 `7a2dc86faa514493888fba9425eefc35` verified two simultaneous same-server profiles,
 rotation, restart and stale-export refusal with pinned executable hashes. Matrix
 is an HTTP fixture in that run; it is not live agent/device acceptance.
+
+Whole appservice identity cleanup now runs in the original supervised Palpo
+profile, independently of the agent runtime. It requires an exact authenticated
+receipt for the fleet/request/Matrix identity, deactivation, denied appservice
+authentication and empty joined rooms. Device logout and absent local credentials
+cannot complete this cleanup. An uncertain reply retains the original effect
+fence; restart inspects the same idempotent remote operation. The agent worker
+stops admitting work and waits for that proof. Ordinary delivery refusal cancels
+its work consumer while cleanup remains available; resumed credentials retry
+their original delivery lanes. Remote identity proof never refunds capacity or
+resolves unknown runner custody.
+
+The native-process retirement test exercises an unavailable runtime, lost reply,
+restart, refused ordinary delivery, incomplete proof and eventual exact proof
+against a bounded HTTPS peer. Palpo separately verifies the real Matrix endpoint
+sequence with HTTP fixtures. Live homeserver and executor acceptance remains a
+separate gate.
+
+Retirement validation passed: four Palpo HTTP scenarios, the exact-proof unit
+test and HTTPS transport test, all 14 domain tests, six native Palpo service
+tests followed by both focused recovery/cancellation tests, library clippy and
+all 1,246 Rust spec bindings. The production-caller check reports no missing or
+ambiguous caller. Cancellation is verified in SQLite before reopening the store,
+so recovery does not depend on startup converting an abandoned Started effect.
