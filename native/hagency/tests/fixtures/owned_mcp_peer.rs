@@ -294,18 +294,20 @@ fn helper(
     let task = if let Some(reference) = context_reference()? {
         // The actual helper has already cached its private original context.
         // Invalidating the startup record cannot retarget that context later.
-        if !["retained", "warm"].contains(&mode) {
+        if !["retained", "warm", "acceptance"].contains(&mode) {
             return Err(invalid());
         }
-        let mut file =
-            hagency_store::private::open(&reference.path, false).map_err(|_| invalid())?;
-        file.set_len(0)?;
-        file.write_all(b"invalid after native helper initialize")?;
-        file.sync_all()?;
-        receipt(
-            "context-cached",
-            json!({"cached_before_record_change":true}),
-        )?;
+        if mode != "acceptance" {
+            let mut file =
+                hagency_store::private::open(&reference.path, false).map_err(|_| invalid())?;
+            file.set_len(0)?;
+            file.write_all(b"invalid after native helper initialize")?;
+            file.sync_all()?;
+            receipt(
+                "context-cached",
+                json!({"cached_before_record_change":true}),
+            )?;
+        }
         params["developerInstructions"]
             .as_str()
             .and_then(|v| v.strip_prefix("The assigned canonical task ID is "))
@@ -566,7 +568,7 @@ fn helper(
         }
     }
     let done = mode == "done";
-    let after = if mode == "finish" || fleet_finish {
+    let after = if ["finish", "acceptance"].contains(&mode) || fleet_finish {
         let response = rpc(
             &mut input,
             &mut output,
@@ -641,7 +643,7 @@ fn helper(
     if !diagnostic.is_empty() {
         return Err(invalid());
     }
-    if mode == "finish" || fleet_finish {
+    if ["finish", "acceptance"].contains(&mode) || fleet_finish {
         receipt(
             "finish-exit",
             json!({"completion":after,"helper_exit":true}),
@@ -653,13 +655,26 @@ fn helper(
 }
 fn fake() -> io::Result<()> {
     let mode = std::env::var("HAGENCY_OFFLINE_MODE").unwrap_or_else(|_| {
-        if Path::new("projects/factory_project/configured-fleet-probe").is_file() {
+        if Path::new("owned-mcp.acceptance").is_file() {
+            // Explicit disposable live-Matrix acceptance: use the real task
+            // helper and reply completion, without corrupting its context.
+            "acceptance".into()
+        } else if Path::new("projects/factory_project/configured-fleet-probe").is_file() {
             "warm".into()
         } else {
             "heartbeat".into()
         }
     });
-    if !["heartbeat", "done", "finish", "retained", "warm"].contains(&mode.as_str()) {
+    if ![
+        "heartbeat",
+        "done",
+        "finish",
+        "retained",
+        "warm",
+        "acceptance",
+    ]
+    .contains(&mode.as_str())
+    {
         return Err(invalid());
     }
     let mut log = fs::OpenOptions::new()
