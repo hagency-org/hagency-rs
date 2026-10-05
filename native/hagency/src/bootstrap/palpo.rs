@@ -282,7 +282,12 @@ impl Live {
     pub(crate) fn is_imported(&self) -> bool {
         imported(&self.0.state).unwrap_or(false)
     }
-    async fn start_fleet(&self, registration: &Registration, state: &Path) -> Result<(), Failure> {
+    async fn start_fleet(
+        &self,
+        registration: &Registration,
+        state: &Path,
+        probes: Option<Arc<super::palpo_work::Probes>>,
+    ) -> Result<(), Failure> {
         let Some(fleet) = &self.0.fleet else {
             return Ok(());
         };
@@ -300,6 +305,7 @@ impl Live {
                     self.0.domain.clone(),
                     registration.fleet_id.clone(),
                     registration.server_name.clone(),
+                    probes,
                 ),
             );
         }
@@ -312,6 +318,7 @@ impl Live {
     async fn replace(&self, prepared: Prepared) -> Result<(), Failure> {
         let registration = prepared.registration.clone();
         let profile = prepared.state.clone();
+        let probes = prepared.work.as_ref().map(|work| work.probes.clone());
         let mut owner = self.0.owner.lock().await;
         if let Some(old) = owner.get_mut(&registration.fleet_id) {
             // A previous transport that does not acknowledge its close keeps
@@ -343,7 +350,7 @@ impl Live {
             .provisioning_registration(registration.fleet_id.clone())
             .await
         {
-            self.start_fleet(&registration, &profile).await?;
+            self.start_fleet(&registration, &profile, probes).await?;
         }
         Ok(())
     }

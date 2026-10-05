@@ -43,7 +43,7 @@ impl Appservice {
             homeserver: text("homeserver")?,
             as_token: text("as_token")?,
             representative: format!("@{}:{server_name}", text("sender_localpart")?),
-            matrix_root: super::config::matrix_root(state).ok()?,
+            matrix_root: crate::bootstrap::config::matrix_root(state).ok()?,
         })
     }
 }
@@ -89,6 +89,7 @@ pub(super) struct Probes {
     lock: Mutex<()>,
     statuses: Mutex<Vec<Value>>,
     status_cursor: Mutex<String>,
+    runtime: Mutex<Option<super::fleet::Routes>>,
 }
 impl Probes {
     pub(super) fn new(state: &Path) -> Arc<Self> {
@@ -99,7 +100,19 @@ impl Probes {
             lock: Mutex::new(()),
             statuses: Mutex::new(Vec::new()),
             status_cursor: Mutex::new(String::new()),
+            runtime: Mutex::new(None),
         })
+    }
+    pub(super) fn attach_runtime(&self, routes: super::fleet::Routes) {
+        *self.runtime.lock().unwrap_or_else(|e| e.into_inner()) = Some(routes);
+    }
+    fn runtime_availability(&self, agent: &str) -> &'static str {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|runtime| runtime.agent_availability(agent))
+            .unwrap_or("not_attached")
     }
     fn read(path: &Path) -> Vec<Value> {
         private_json(path, 1024 * 1024)
@@ -1211,10 +1224,14 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
             .coordinator_agent_usage(e.id.clone())
             .await
             .unwrap_or(Value::Null);
-        let lifecycle = domain
+        let mut lifecycle = domain
             .coordinator_agent_lifecycle(e.id.clone())
             .await
             .unwrap_or(Value::Null);
+        let runtime_available = probes.runtime_availability(&e.id);
+        if lifecycle.is_object() {
+            lifecycle["runtimeAvailability"] = json!(runtime_available);
+        }
         // The serving identity is the fleet-namespaced account the App Service
         // factory created for this engagement; `ready` is TS's rule (active and
         // bound) plus the observed fact the agent is joined in the target room.
@@ -1226,6 +1243,8 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         let agent = format!("@{fleet}_{}:{server}", e.id);
         let target = c["targetRoomId"].as_str().unwrap_or_default().to_owned();
         let joined = bound
+            && runtime_available == "available"
+            && lifecycle["matrixReady"] == true
             && reader
                 .get(&[
                     "_matrix",

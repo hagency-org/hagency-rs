@@ -152,8 +152,8 @@ pub async fn run(args: Args) -> Result<Value, Error> {
     let mut client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20));
-    if let Some(pem) =
-        super::config::matrix_root(&args.state_dir).map_err(|_| Error::Invalid("matrix.ca.pem"))?
+    if let Some(pem) = crate::bootstrap::config::matrix_root(&args.state_dir)
+        .map_err(|_| Error::Invalid("matrix.ca.pem"))?
     {
         client = client.add_root_certificate(
             reqwest::Certificate::from_pem(&pem).map_err(|_| Error::Invalid("matrix.ca.pem"))?,

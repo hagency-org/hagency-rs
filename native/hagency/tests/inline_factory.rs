@@ -683,6 +683,40 @@ async fn native_provisioning_session_route() {
     }
 }
 #[tokio::test]
+async fn native_factory_readiness_requires_current_dm_and_project_routes() {
+    let mut f = Fixture::new(true).await;
+    f.provision().await;
+    let id = f.engagement();
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    let profile = agent.claim_profile().await.unwrap();
+    agent.inboxes(profile).await.unwrap();
+    let lifecycle = f
+        .base
+        .store
+        .coordinator_agent_lifecycle(id.clone())
+        .await
+        .unwrap();
+    assert_eq!(lifecycle["provisionEffect"], "complete");
+    assert_eq!(lifecycle["matrixReady"], true);
+    f.base
+        .store
+        .invalidate_matrix_room(hagency_core::replies::MatrixRoomInvalidation {
+            engagement_id: id.clone(),
+            registration_generation: 1,
+            transport_generation: 1,
+            room_id: DM.into(),
+            generation: 2,
+            reason: "Recipient proof changed".into(),
+        })
+        .await
+        .unwrap();
+    let lifecycle = f.base.store.coordinator_agent_lifecycle(id).await.unwrap();
+    assert_eq!(lifecycle["provisionEffect"], "complete");
+    assert_eq!(lifecycle["matrixReady"], false);
+    agent.close().await.unwrap();
+    f.close().await;
+}
+#[tokio::test]
 async fn native_provisioning_factory_first_dispatch() {
     for application_service in [false, true] {
         factory_first_dispatch(application_service).await;

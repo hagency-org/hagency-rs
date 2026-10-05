@@ -63,13 +63,14 @@ pub(crate) struct FleetService {
     joined: Option<Result<(), Failure>>,
 }
 impl FleetService {
-    pub(crate) fn start_scoped(
+    pub(super) fn start_scoped(
         state: PathBuf,
         runtime_state: PathBuf,
         address: SocketAddr,
         domain: DomainStore,
         fleet_id: String,
         server_name: String,
+        probes: Option<Arc<super::palpo_work::Probes>>,
     ) -> Self {
         let cancel = CancellationToken::new();
         let stage = Stage(Arc::new(Mutex::new("starting")));
@@ -80,6 +81,7 @@ impl FleetService {
             domain,
             fleet_id,
             server_name,
+            probes,
             stage,
             cancel.clone(),
         ));
@@ -141,6 +143,7 @@ async fn supervise(
     domain: DomainStore,
     fleet_id: String,
     server_name: String,
+    probes: Option<Arc<super::palpo_work::Probes>>,
     stage: Stage,
     cancel: CancellationToken,
 ) -> Result<(), Failure> {
@@ -187,6 +190,9 @@ async fn supervise(
             return Ok(());
         }
     };
+    if let (Some(probes), Some(service)) = (&probes, &running.service) {
+        probes.attach_runtime(service.routes());
+    }
     stage.set("running");
     run(running, &state, &domain, &registration, &stage, &cancel).await
 }
@@ -226,7 +232,7 @@ fn build(
         fix: "the imported fleet's files must form a provisioning host",
     };
     let representative = secret(state, "matrix.representative_token")?;
-    let matrix_root = config::matrix_root(state)?;
+    let matrix_root = crate::bootstrap::config::matrix_root(state)?;
     let host = TokenProvisioningHost::application_service(
         registration.clone(),
         &homeserver,

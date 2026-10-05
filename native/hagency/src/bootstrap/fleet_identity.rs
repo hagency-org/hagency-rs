@@ -75,7 +75,7 @@ fn matrix_client(state: &Path) -> Result<reqwest::Client, Error> {
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20));
-    if let Some(pem) = super::config::matrix_root(state).map_err(|_| Error::Store)? {
+    if let Some(pem) = crate::bootstrap::config::matrix_root(state).map_err(|_| Error::Store)? {
         builder = builder
             .add_root_certificate(reqwest::Certificate::from_pem(&pem).map_err(|_| Error::Store)?);
     }

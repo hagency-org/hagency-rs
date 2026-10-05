@@ -23,6 +23,18 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Readiness follows current Matrix route authority after provisioning
+  Test: native_factory_readiness_requires_current_dm_and_project_routes
+  Given a completed native agent with admitted owner and project routes
+  When its direct-room recipient proof is invalidated
+  Then current Matrix readiness is false while the original provisioning receipt remains complete
+
+Scenario: Readiness follows the current registration worker
+  Test: native_factory_failure_diagnostics
+  Given registered agents with healthy, blocked and detached workers
+  When the status publisher observes runtime availability
+  Then only a running healthy attached worker is available and stopped or missing workers cannot be Ready
+
 Scenario: Restart recovery cannot claim another engagement's agents
   Test: restarted_factories_list_only_agents_of_their_exact_registration
   Given two completed agents in distinct registrations on the same homeserver

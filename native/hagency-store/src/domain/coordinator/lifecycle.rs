@@ -179,12 +179,23 @@ impl DomainRepository {
                 |r| r.get(0),
             )
             .optional()?;
-        let provision: Option<String> = self.db.query_row(
-            "SELECT state FROM effects WHERE engagement_id=?1 AND kind='provision'",
+        let provision: Option<String> = self
+            .db
+            .query_row(
+                "SELECT state FROM effects WHERE engagement_id=?1 AND kind='provision'",
+                [agent],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let matrix_ready: bool = self.db.query_row(
+            "SELECT COUNT(DISTINCT json_extract(r.config,'$.privacy.kind'))=2 \
+             FROM current_matrix_routes c JOIN matrix_session_routes r ON r.session_id=c.session_id \
+             JOIN runner_sessions s ON s.id=c.session_id WHERE s.engagement_id=?1 \
+             AND json_extract(r.config,'$.privacy.kind') IN ('direct','group')",
             [agent], |r| r.get(0),
-        ).optional()?;
+        )?;
         Ok(
-            json!({"paused":stopped,"runtimeState":record.state,"provisionEffect":provision,"cleanup":record.cleanup,"cleanupEffect":cleanup,"settlement":self.coordinator_settlement(agent).ok(),"matrixProfile":self.matrix_agent_profile(agent)?}),
+            json!({"paused":stopped,"runtimeState":record.state,"provisionEffect":provision,"matrixReady":matrix_ready,"cleanup":record.cleanup,"cleanupEffect":cleanup,"settlement":self.coordinator_settlement(agent).ok(),"matrixProfile":self.matrix_agent_profile(agent)?}),
         )
     }
 
