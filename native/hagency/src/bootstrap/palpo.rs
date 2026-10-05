@@ -348,6 +348,8 @@ impl Live {
             return Err(ImportError::Closed);
         }
         let homeserver = super::palpo_import::homeserver(homeserver)?;
+        super::association::validate_import(&self.0.state, raw, &homeserver)
+            .map_err(|_| ImportError::Invalid("association binding"))?;
         let (mut registration, mut appservice, machine, endpoint, generation) =
             super::palpo_import::parse(raw)?;
         appservice["homeserver"] = serde_json::json!(homeserver);

@@ -73,16 +73,47 @@ It uses the same pinned Rust contract; the Hagency binary does not invoke a
 JavaScript backend. Build and test scripts ending in `.mjs` remain development
 tools. Existing web presentation assets are not execution or approval authority.
 
+## Native owner association setup
+
+An initialized installation can initiate an association with the owner's existing
+Matrix account. The token stays in an owner-private file; it is not stored in the
+intent or returned to the mini app.
+
+```sh
+hagency association --state-dir /private/hagency \
+  --palpo-origin https://operations.example.org \
+  --homeserver https://matrix.example.org \
+  --matrix-token-file /private/owner-matrix.token \
+  --request-id association_one --name "Owner Hagency" \
+  --coordinator @coordinator:example.org \
+  --export-mxid @owner:example.org \
+  --delegation-expires-at-ms <explicit-owner-deadline-ms>
+```
+
+The native setup checks the Matrix owner and coordinator account, persists its
+runtime identity and frozen intent, then submits the request. An identical retry
+recovers the same request; changed content needs another request ID. The
+designated admin decides once in Rinx. Import of the versioned approved profile
+must match this installation's pending runtime, server/origin, owner, coordinator
+and delegation policy. Legacy downloads remain supported during migration.
+The runtime advertises its implemented coordinator capability; importing a
+profile never manufactures a successful connection proof.
+
+The Rinx `native_palpo_association.py` harness passed eight checks using actual
+Rinx, Rust Palpo and Hagency processes against an isolated Matrix HTTP fixture.
+It drives the native admin decision and owner connection button, imports through
+the Hagency CLI and waits for the real worker's authenticated probe receipt.
+It does not claim live Matrix, agent execution or native save-dialog acceptance.
+
 ## Remaining acceptance work
 
-- Palpo's designated-admin association/profile export and mini-app preparation
-  routes; coordinator account verification and semantic legacy reconciliation.
+- Owner delegation changes and semantic legacy reconciliation.
 - Rinx Rust-host/OctoScript screens and manifest, plus the Hagency contribution
   page consuming the new Rust endpoints.
 - A portal-visible pending record for commands blocked before native Matrix
   admission. Current native agent rows begin after verified admission; this is
   not yet the complete "every delivered approved agent" guarantee.
-- Matrix notification delivery, reminder scheduling and final command outcomes
+- Live Matrix notification acceptance and final command outcomes
   for authority expiry or permanently invalid room bindings.
 - Isolated combined Palpo/Rinx/Hagency tests, real Makepad instrumentation and
   live chat/usage evidence before production cutover.

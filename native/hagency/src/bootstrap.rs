@@ -1,6 +1,7 @@
 //! Explicit one-attempt development startup; no production scheduler or file tool.
 pub mod accounts;
 mod approval;
+pub mod association;
 mod config;
 mod driver;
 pub(crate) mod engagement_notice;

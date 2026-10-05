@@ -15,6 +15,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Request a Matrix server association from this authenticated resource owner.
+    Association(hagency::bootstrap::association::Args),
     /// Serve scoped task tools over MCP stdio using inherited runner context.
     Mcp {
         /// Expose only the fixed owned-runner maintenance and enabled file tools.
@@ -280,6 +282,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Association(args) => {
+            println!("{}", hagency::bootstrap::association::run(args).await?);
+        }
         Command::Mcp { .. } => unreachable!("MCP runs on the dedicated main thread"),
         Command::Task { call_id, command } => {
             let context = hagency::task_client::Context::from_env()?;

@@ -23,6 +23,14 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Owner setup retries its original association and refuses another installation's profile
+  Test: native_owner_association_retries_frozen_intent_and_refuses_foreign_profile
+  Level: integration
+  Test Double: local Matrix and Palpo HTTP fixture; real private native setup state
+  Given an authenticated owner initiates an engagement from native Hagency setup
+  When the response is lost or an imported profile changes the runtime or coordinator
+  Then the request retries unchanged and only the matching local association can be imported
+
 Scenario: One coordinator approval schedules native provisioning
   Test: coordinator_approval_reserves_and_provisions_without_a_console_decision
   Given a verified engagement, eligible manager, ready project and current Matrix proof

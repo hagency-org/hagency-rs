@@ -229,6 +229,9 @@ pub(crate) fn coordinator_profile(
             "verified"
         }))
         .map_err(|_| Error::Invalid("engagement state"))?;
+    // This runtime implements v1. Palpo cannot observe that capability until our
+    // authenticated heartbeat/probe; its pre-import projection may be false.
+    engagement.coordinator_approval_v1 = true;
     Ok(Some(engagement))
 }
 
@@ -358,6 +361,8 @@ pub fn run(
         self::homeserver(homeserver).map_err(|_| Error::Invalid("--homeserver must be https"))?;
     private::read_secret(&state.join("operator.token"))?;
     let raw = std::fs::read_to_string(file).map_err(|_| Error::Invalid("file unreadable"))?;
+    super::association::validate_import(state, &raw, &origin)
+        .map_err(|_| Error::Invalid("association binding"))?;
     let (registration, mut appservice, machine, endpoint, generation) = parse(&raw)?;
     appservice["homeserver"] = json!(origin);
     let _custody = Repository::open(state)?;
