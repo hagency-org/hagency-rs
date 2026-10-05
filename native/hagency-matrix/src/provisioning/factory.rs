@@ -751,7 +751,10 @@ impl TokenProvisioningHost {
             .start(domain.clone(), scope.clone(), home)
             .await
             .map_err(|error| {
-                eprintln!("agent factory {} runtime startup refused: {error:?}", effect.engagement_id);
+                eprintln!(
+                    "agent factory {} runtime startup refused: {error:?}",
+                    effect.engagement_id
+                );
                 Error::OutcomeUnknown
             })?;
         *custody.runtime.lock().await = Some(runtime);

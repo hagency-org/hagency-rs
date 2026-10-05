@@ -228,7 +228,9 @@ fn native_reattach_scope_rebuilds_only_what_the_factory_completed() {
             );
             if case != "absent" {
                 assert!(
-                    db.inline_factory_engagements(&registration()).unwrap().is_empty(),
+                    db.inline_factory_engagements(&registration())
+                        .unwrap()
+                        .is_empty(),
                     "{case}"
                 );
             }
@@ -532,7 +534,9 @@ fn native_warm_runtime_writer_scope() {
     assert!(matches!(scope.clone().claim_warm(), Err(Error::Busy)));
     let runtime = scope.claim_runtime().unwrap();
     let worker = runtime.clone();
-    let recaptured = db.provision_runtime_scope(&effect, &registration()).unwrap();
+    let recaptured = db
+        .provision_runtime_scope(&effect, &registration())
+        .unwrap();
     assert!(matches!(recaptured.claim_runtime(), Err(Error::Busy)));
     drop(runtime);
     assert!(matches!(recaptured.claim_runtime(), Err(Error::Busy)));
@@ -729,17 +733,30 @@ fn restarted_factories_list_only_agents_of_their_exact_registration() {
     let mut agents = Vec::new();
     for (index, registered) in [&first, &second].into_iter().enumerate() {
         db.register(registered).unwrap();
-        let mut req = request(&format!("agent_{index}"), &format!("Agent{index}"), &pool, 100);
+        let mut req = request(
+            &format!("agent_{index}"),
+            &format!("Agent{index}"),
+            &pool,
+            100,
+        );
         req.fleet_id = registered.fleet_id.clone();
         let mut observed = observation(&req);
         observed.reception.joined.remove(&first.representative_mxid);
-        observed.reception.joined.insert(registered.representative_mxid.clone());
+        observed
+            .reception
+            .joined
+            .insert(registered.representative_mxid.clone());
         observed.project.joined.remove(&first.representative_mxid);
-        observed.project.joined.insert(registered.representative_mxid.clone());
-        observed.project.binding.as_mut().unwrap()["fleetId"] = serde_json::json!(registered.fleet_id);
+        observed
+            .project
+            .joined
+            .insert(registered.representative_mxid.clone());
+        observed.project.binding.as_mut().unwrap()["fleetId"] =
+            serde_json::json!(registered.fleet_id);
         let verified = hagency_core::authority::verify_request(registered, req, observed).unwrap();
         db.admit(&verified, 1000).unwrap();
-        db.approve(&format!("approve_{index}"), &verified, 1000).unwrap();
+        db.approve(&format!("approve_{index}"), &verified, 1000)
+            .unwrap();
         let effect = db.claim_effect().unwrap().unwrap();
         let scope = db.provision_runtime_scope(&effect, registered).unwrap();
         scope.claim_warm().unwrap();
@@ -749,7 +766,10 @@ fn restarted_factories_list_only_agents_of_their_exact_registration() {
     drop(db);
     let mut db = DomainRepository::open(&state).unwrap();
     for (index, registered) in [&first, &second].into_iter().enumerate() {
-        assert_eq!(db.inline_factory_engagements(registered).unwrap(), vec![agents[index].clone()]);
+        assert_eq!(
+            db.inline_factory_engagements(registered).unwrap(),
+            vec![agents[index].clone()]
+        );
         let mut wrong = registered.clone();
         wrong.generation += 1;
         assert!(db.inline_factory_engagements(&wrong).unwrap().is_empty());

@@ -226,7 +226,12 @@ impl WarmHostPlan {
             }
             let root = host.reattach_root(&scope, &home, &workspace)?;
             let binding = crate::warm::Binding::reattached(
-                scope, runtime_lease, home, root, workspace, local_codex,
+                scope,
+                runtime_lease,
+                home,
+                root,
+                workspace,
+                local_codex,
             );
             Ok(FactoryRuntime {
                 host: host.into_shared(),

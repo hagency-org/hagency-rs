@@ -2,8 +2,8 @@
 pub mod accounts;
 mod approval;
 pub mod association;
-pub mod coordinator_migration;
 mod config;
+pub mod coordinator_migration;
 mod driver;
 pub(crate) mod engagement_notice;
 pub mod fleet;

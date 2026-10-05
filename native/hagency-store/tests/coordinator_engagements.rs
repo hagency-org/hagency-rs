@@ -55,12 +55,17 @@ fn legacy_adoption_moves_existing_hold_once_and_preserves_original_decisions_acr
     db.put_resource(&parent).unwrap();
     let legacy_proof = proof(&request("legacy_agent", "OriginalAgent", &parent, 1000));
     let original = db.admit(&legacy_proof, 1000).unwrap();
-    let granted = db.approve("original_console_decision", &legacy_proof, 1000).unwrap();
+    let granted = db
+        .approve("original_console_decision", &legacy_proof, 1000)
+        .unwrap();
     assert_eq!(original.id, granted.id);
     db.configure_coordinator(&authority()).unwrap();
     // No parent headroom remains. A normal new contribution would reserve the
     // same 1000 tokens twice and must fail before migration maps its child.
-    assert!(db.put_coordinator_resource(&resource_grant(1000, 1), 1000).is_err());
+    assert!(
+        db.put_coordinator_resource(&resource_grant(1000, 1), 1000)
+            .is_err()
+    );
     let before = db.coordinator_migration_inventory().unwrap();
     let plan: LegacyAdoption = serde_json::from_value(json!({"version":1,"id":"native_migration_one",
         "sourceDigest":before["sourceDigest"],"serverEngagementId":registration().fleet_id,
@@ -71,47 +76,103 @@ fn legacy_adoption_moves_existing_hold_once_and_preserves_original_decisions_acr
         "agents":{granted.id.clone():"grant_one"}})).unwrap();
     let mut changed = plan.clone();
     changed.resource_owner = "@admin:example.test".to_owned().try_into().unwrap();
-    assert!(matches!(db.adopt_legacy_allocations(&changed,1000),Err(Error::Generation)));
-    assert_eq!(db.coordinator_migration_inventory().unwrap(),before);
-    changed = plan.clone(); changed.resources[0].allocated_tokens=999.try_into().unwrap();
-    assert!(matches!(db.adopt_legacy_allocations(&changed,1000),Err(Error::InsufficientCapacity)));
-    assert_eq!(db.coordinator_migration_inventory().unwrap(),before);
-    changed = plan.clone(); changed.resources[0].allocated_tokens=1001.try_into().unwrap();
-    assert!(matches!(db.adopt_legacy_allocations(&changed,1000),Err(Error::InsufficientCapacity)));
-    assert_eq!(db.coordinator_migration_inventory().unwrap(),before);
-    let receipt = db.adopt_legacy_allocations(&plan,1000).unwrap();
-    assert_eq!(receipt["agents"][0]["agentAllocationId"],granted.id);
-    assert_eq!(receipt["agents"][0]["retainedTokens"],1000);
+    assert!(matches!(
+        db.adopt_legacy_allocations(&changed, 1000),
+        Err(Error::Generation)
+    ));
+    assert_eq!(db.coordinator_migration_inventory().unwrap(), before);
+    changed = plan.clone();
+    changed.resources[0].allocated_tokens = 999.try_into().unwrap();
+    assert!(matches!(
+        db.adopt_legacy_allocations(&changed, 1000),
+        Err(Error::InsufficientCapacity)
+    ));
+    assert_eq!(db.coordinator_migration_inventory().unwrap(), before);
+    changed = plan.clone();
+    changed.resources[0].allocated_tokens = 1001.try_into().unwrap();
+    assert!(matches!(
+        db.adopt_legacy_allocations(&changed, 1000),
+        Err(Error::InsufficientCapacity)
+    ));
+    assert_eq!(db.coordinator_migration_inventory().unwrap(), before);
+    let receipt = db.adopt_legacy_allocations(&plan, 1000).unwrap();
+    assert_eq!(receipt["agents"][0]["agentAllocationId"], granted.id);
+    assert_eq!(receipt["agents"][0]["retainedTokens"], 1000);
     assert!(receipt["agents"][0]["consumedTokens"].is_null());
-    assert_eq!(db.engagements("",16).unwrap()[0].id,granted.id);
+    assert_eq!(db.engagements("", 16).unwrap()[0].id, granted.id);
     let pending = proof(&request("new_agent", "NewAgent", &parent, 1));
-    db.admit(&pending,1000).unwrap();
+    db.admit(&pending, 1000).unwrap();
     let command: AgentApproval = serde_json::from_value(json!({"context":context("new_agent_decision"),"request":{"id":"new_agent","revision":1,
         "serverEngagementId":registration().fleet_id,"projectId":"project_one","projectRevision":1,"resourceAllocationId":"grant_one",
         "projectOwner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":canonical::digest(&value(pending.request())).unwrap(),"requestedTokens":1},"allocatedTokens":1})).unwrap();
-    assert!(matches!(db.approve_coordinated_agent(&command,&pending,1000),Err(Error::InsufficientCapacity)));
+    assert!(matches!(
+        db.approve_coordinated_agent(&command, &pending, 1000),
+        Err(Error::InsufficientCapacity)
+    ));
     // Only an explicit parent/resource-owner increase makes a top-up possible.
-    db.put_resource(&resource("pool","seat",2000)).unwrap();
-    db.put_coordinator_resource(&resource_grant(1100,2),1001).unwrap();
-    let increased = db.approve_coordinator_top_up(&top_up(&granted.id,"legacy_top_up",1000,100),&legacy_proof,1001).unwrap();
-    assert_eq!(increased.id,granted.id);
-    assert_eq!(u64::from(increased.allocation()),1100);
+    db.put_resource(&resource("pool", "seat", 2000)).unwrap();
+    db.put_coordinator_resource(&resource_grant(1100, 2), 1001)
+        .unwrap();
+    let increased = db
+        .approve_coordinator_top_up(
+            &top_up(&granted.id, "legacy_top_up", 1000, 100),
+            &legacy_proof,
+            1001,
+        )
+        .unwrap();
+    assert_eq!(increased.id, granted.id);
+    assert_eq!(u64::from(increased.allocation()), 1100);
     let retire: AgentControl=serde_json::from_value(json!({"context":context("legacy_retire"),"agentAllocationId":granted.id,
         "projectId":"project_one","projectRevision":1,"resourceAllocationId":"grant_one","operation":"retire"})).unwrap();
-    db.control_coordinator_agent(&registration().fleet_id,&retire,1002).unwrap();
-    assert_eq!(db.server_engagement_resources(&registration().fleet_id,"",50).unwrap()[0]["remainingTokens"],0);
+    db.control_coordinator_agent(&registration().fleet_id, &retire, 1002)
+        .unwrap();
+    assert_eq!(
+        db.server_engagement_resources(&registration().fleet_id, "", 50)
+            .unwrap()[0]["remainingTokens"],
+        0
+    );
     let after = db.coordinator_migration_inventory().unwrap();
     drop(db);
     let mut db = DomainRepository::open(&state).unwrap();
-    assert_eq!(db.adopt_legacy_allocations(&plan,2000000).unwrap(),receipt);
-    assert_eq!(db.coordinator_migration_inventory().unwrap(),after);
+    assert_eq!(
+        db.adopt_legacy_allocations(&plan, 2000000).unwrap(),
+        receipt
+    );
+    assert_eq!(db.coordinator_migration_inventory().unwrap(), after);
     // The original decision and single provisioning effect still exist.
     let raw = rusqlite::Connection::open(state.join("domain.sqlite3")).unwrap();
-    assert_eq!(raw.query_row("SELECT COUNT(*) FROM decisions WHERE id='original_console_decision'",[],|r|r.get::<_,u64>(0)).unwrap(),1);
-    assert_eq!(raw.query_row("SELECT COUNT(*) FROM effects WHERE engagement_id=?1 AND kind='provision'",[&granted.id],|r|r.get::<_,u64>(0)).unwrap(),1);
-    let stored:Value=serde_json::from_str(&raw.query_row("SELECT decision FROM coordinator_agents WHERE agent_id=?1",[&granted.id],|r|r.get::<_,String>(0)).unwrap()).unwrap();
-    assert_eq!(stored["legacyAdoption"],"native_migration_one");
-    assert!(stored["context"].is_null(),"Migration must not forge a deciding coordinator");
+    assert_eq!(
+        raw.query_row(
+            "SELECT COUNT(*) FROM decisions WHERE id='original_console_decision'",
+            [],
+            |r| r.get::<_, u64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT COUNT(*) FROM effects WHERE engagement_id=?1 AND kind='provision'",
+            [&granted.id],
+            |r| r.get::<_, u64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    let stored: Value = serde_json::from_str(
+        &raw.query_row(
+            "SELECT decision FROM coordinator_agents WHERE agent_id=?1",
+            [&granted.id],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["legacyAdoption"], "native_migration_one");
+    assert!(
+        stored["context"].is_null(),
+        "Migration must not forge a deciding coordinator"
+    );
 }
 
 #[test]
@@ -800,11 +861,27 @@ fn project_and_top_up_refusals_are_terminal_and_applied_commands_replay_after_ex
 fn uncertain_provision_is_visible_after_restart_without_releasing_its_reservation() {
     let (dir, mut db) = setup();
     let (approval, proof) = prepared(&mut db, "uncertain_agent", "Uncertain", 200);
-    let agent = db.approve_coordinated_agent(&approval, &proof, 1000).unwrap();
-    assert_eq!(db.coordinator_agent_lifecycle(&agent.id).unwrap()["provisionEffect"], "pending");
-    let effect = db.claim_effect_for(&format!("provision_{}", agent.id)).unwrap().unwrap();
-    assert_eq!(db.coordinator_agent_lifecycle(&agent.id).unwrap()["provisionEffect"], "started");
-    db.observe_effect(&effect.id, effect.fence, &hagency_store::EffectOutcome::Unknown).unwrap();
+    let agent = db
+        .approve_coordinated_agent(&approval, &proof, 1000)
+        .unwrap();
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["provisionEffect"],
+        "pending"
+    );
+    let effect = db
+        .claim_effect_for(&format!("provision_{}", agent.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.coordinator_agent_lifecycle(&agent.id).unwrap()["provisionEffect"],
+        "started"
+    );
+    db.observe_effect(
+        &effect.id,
+        effect.fence,
+        &hagency_store::EffectOutcome::Unknown,
+    )
+    .unwrap();
     drop(db);
     let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();
     let lifecycle = db.coordinator_agent_lifecycle(&agent.id).unwrap();
@@ -812,7 +889,10 @@ fn uncertain_provision_is_visible_after_restart_without_releasing_its_reservatio
     assert_eq!(lifecycle["runtimeState"], "reserved");
     assert!(db.claim_effect_for(&effect.id).unwrap().is_none());
     let (next, next_proof) = prepared(&mut db, "next_agent", "Next", 101);
-    assert!(matches!(db.approve_coordinated_agent(&next, &next_proof, 1001), Err(Error::InsufficientCapacity)));
+    assert!(matches!(
+        db.approve_coordinated_agent(&next, &next_proof, 1001),
+        Err(Error::InsufficientCapacity)
+    ));
 }
 
 #[test]

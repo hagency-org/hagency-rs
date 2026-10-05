@@ -4809,9 +4809,14 @@ impl DomainStore {
         })
         .await
     }
-    pub async fn inline_factory_engagements(&self, registration: hagency_core::authority::Registration) -> Result<Vec<String>, Error> {
-        self.call(weight(&registration)?, move |db| db.inline_factory_engagements(&registration))
-            .await
+    pub async fn inline_factory_engagements(
+        &self,
+        registration: hagency_core::authority::Registration,
+    ) -> Result<Vec<String>, Error> {
+        self.call(weight(&registration)?, move |db| {
+            db.inline_factory_engagements(&registration)
+        })
+        .await
     }
     pub async fn provision_runtime_account(
         &self,
