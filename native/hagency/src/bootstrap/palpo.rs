@@ -34,26 +34,90 @@ struct Work {
     fleet: String,
     generation: u64,
 }
+/// The profiles found at start. While another engagement can start, a
+/// profile that cannot load is parked under its engagement ID with the
+/// repair: one interrupted import or stray entry never stops the others.
+/// With nothing to start, `load_all` refuses as a single profile always has.
+#[derive(Default)]
+pub(super) struct Loaded {
+    pub(super) prepared: Vec<Prepared>,
+    pub(super) parked: Vec<(String, Failure)>,
+    /// Entries of `palpo-engagements/` that are not engagement directories.
+    pub(super) ignored: Vec<String>,
+}
+
+/// The status key of a profile that did not load: its engagement ID when the
+/// files name one, so importing that engagement again replaces the parked
+/// status; otherwise the file to repair.
+fn profile_key(state: &Path, directory: &Path) -> String {
+    let fleet = if directory == state {
+        read(
+            &state.join("palpo-transport.json"),
+            16 * 1024,
+            "palpo-transport.json",
+        )
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value["registration"]["fleetId"].as_str().map(str::to_owned))
+    } else {
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+    };
+    fleet
+        .filter(|fleet| super::palpo_import::is_engagement_id(fleet))
+        .unwrap_or_else(|| "palpo-transport.json".into())
+}
+
 impl Prepared {
-    pub(super) fn load_all(state: &Path) -> Result<Vec<Self>, Failure> {
-        let directories =
+    pub(super) fn load_all(state: &Path) -> Result<Loaded, Failure> {
+        let profiles =
             super::palpo_import::profile_directories(state).map_err(|_| Failure::Config {
                 field: "Palpo profiles",
-                fix: "every profile must be private and readable",
+                fix: "the state and palpo-engagements directories must be private and readable",
             })?;
+        let mut loaded = Loaded {
+            ignored: profiles.ignored,
+            ..Loaded::default()
+        };
         let mut seen = std::collections::BTreeSet::new();
-        let mut result = Vec::new();
-        for directory in directories {
-            let profile = Self::load(&directory)?;
-            if !seen.insert(profile.registration.fleet_id.clone()) {
-                return Err(Failure::Config {
-                    field: "Palpo profiles",
-                    fix: "an engagement must have exactly one credential directory",
-                });
+        for directory in profiles.directories {
+            match Self::load(&directory) {
+                Ok(profile) if seen.insert(profile.registration.fleet_id.clone()) => {
+                    loaded.prepared.push(profile);
+                }
+                // A second credential directory for a running engagement is
+                // never started beside it.
+                Ok(profile) => loaded.parked.push((
+                    format!("{} (second directory)", profile.registration.fleet_id),
+                    Failure::Config {
+                        field: "Palpo profiles",
+                        fix: "an engagement must have exactly one credential directory",
+                    },
+                )),
+                Err(failure) => loaded
+                    .parked
+                    .push((profile_key(state, &directory), failure)),
             }
-            result.push(profile);
         }
-        Ok(result)
+        for fleet in profiles.unusable {
+            loaded.parked.push((
+                fleet,
+                Failure::Config {
+                    field: "Palpo engagement directory",
+                    fix: "the directory must be private (0700), owned by this user and readable",
+                },
+            ));
+        }
+        // Parking keeps the other engagements serving. With none to start,
+        // the broken configuration refuses the start, naming its repair.
+        if loaded.prepared.is_empty()
+            && let Some((_, failure)) = loaded.parked.first()
+        {
+            return Err(*failure);
+        }
+        Ok(loaded)
     }
     pub(super) fn load(state: &Path) -> Result<Self, Failure> {
         super::palpo_import::ensure_committed(state).map_err(|_| Failure::Config {
@@ -170,10 +234,11 @@ impl Prepared {
 /// Whether `serve --palpo-transport` found an imported fleet at boot. A fresh
 /// install has none yet: TS starts with no outbound fleet and picks one up
 /// when the operator imports it, so an absent file is "waiting for the
-/// import", never a startup refusal. A present but broken file still refuses.
+/// import", never a startup refusal. A present but broken profile refuses the
+/// start unless another engagement can start (`Prepared::load_all`).
 pub(super) fn imported(state: &Path) -> Result<bool, Failure> {
     super::palpo_import::profile_directories(state)
-        .map(|p| !p.is_empty())
+        .map(|p| !p.directories.is_empty() || !p.unusable.is_empty())
         .map_err(|_| Failure::Config {
             field: "Palpo profiles",
             fix: "the profile directories must be private and readable",
@@ -569,6 +634,11 @@ impl StatusHandle {
             .entry(id.into())
             .or_insert_with(|| Self::new(true))
             .clone()
+    }
+    /// A profile that did not load at start: unavailable with a configuration
+    /// error until that engagement is imported again.
+    pub(super) fn park(&self, key: &str) {
+        self.child(key).set("unavailable", Some("config"));
     }
     /// The state word alone, for the readiness rollup (brief 19): the full
     /// `Status` stays console-only; `/health` names components by state

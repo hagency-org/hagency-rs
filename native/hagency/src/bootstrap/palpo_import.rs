@@ -282,10 +282,32 @@ pub(crate) fn profile_directory(state: &Path, fleet: &str) -> Result<PathBuf, Er
     Ok(directory)
 }
 
-pub(crate) fn profile_directories(state: &Path) -> Result<Vec<PathBuf>, Error> {
-    let mut result = Vec::new();
+/// An engagement ID as an engagement directory is named: `hf_` and 32
+/// lowercase hex digits.
+pub(crate) fn is_engagement_id(name: &str) -> bool {
+    name.len() == 35
+        && name.starts_with("hf_")
+        && name[3..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The profiles under a state directory. One bad entry never refuses the
+/// others: an engagement directory that cannot be used is `unusable` (that
+/// engagement is parked), any other entry is `ignored`, and hidden entries
+/// such as Finder's `.DS_Store` are not profiles and are not listed.
+#[derive(Debug, Default)]
+pub(crate) struct Profiles {
+    /// The first (legacy) profile at the root, then each engagement directory.
+    pub(crate) directories: Vec<PathBuf>,
+    pub(crate) unusable: Vec<String>,
+    pub(crate) ignored: Vec<String>,
+}
+
+pub(crate) fn profile_directories(state: &Path) -> Result<Profiles, Error> {
+    let mut result = Profiles::default();
     if present(&state.join("palpo-transport.json"))? {
-        result.push(state.to_owned());
+        result.directories.push(state.to_owned());
     }
     let root = state.join("palpo-engagements");
     if !present(&root)? {
@@ -294,27 +316,29 @@ pub(crate) fn profile_directories(state: &Path) -> Result<Vec<PathBuf>, Error> {
     private::directory(&root)?;
     for entry in std::fs::read_dir(root).map_err(|_| Error::Invalid("profile directory"))? {
         let entry = entry.map_err(|_| Error::Invalid("profile directory"))?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| Error::Invalid("profile directory"))?;
-        if name.len() != 35
-            || !name.starts_with("hf_")
-            || !name[3..]
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(Error::Invalid("profile directory"));
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
         }
-        private::directory(&entry.path())?;
-        if present(&entry.path().join("palpo-transport.json"))? {
-            result.push(entry.path());
+        if entry.file_name().to_str() != Some(name.as_str()) || !is_engagement_id(&name) {
+            result.ignored.push(name);
+            continue;
         }
-        if result.len() > 33 {
+        let transport = private::directory(&entry.path())
+            .map_err(|_| Error::Invalid("profile directory"))
+            .and_then(|_| present(&entry.path().join("palpo-transport.json")));
+        match transport {
+            Ok(true) => result.directories.push(entry.path()),
+            Ok(false) => {}
+            Err(_) => result.unusable.push(name),
+        }
+        if result.directories.len() > 33 {
             return Err(Error::Invalid("too many engagements"));
         }
     }
-    result.sort();
+    result.directories.sort();
+    result.unusable.sort();
+    result.ignored.sort();
     Ok(result)
 }
 
@@ -689,14 +713,95 @@ mod tests {
             private::read_secret(&primary.join("palpo-appservice.json")).unwrap(),
             saved
         );
-        assert_eq!(profile_directories(root.path()).unwrap().len(), 2);
+        assert_eq!(
+            profile_directories(root.path()).unwrap().directories.len(),
+            2
+        );
         assert_eq!(
             super::super::palpo::Prepared::load_all(root.path())
                 .unwrap()
+                .prepared
                 .len(),
             2
         );
         assert!(profile_directory(root.path(), "../wrong").is_err());
+    }
+
+    /// One unusable entry parks only itself. Finder's `.DS_Store` is not a
+    /// profile, a stray file is ignored, and an interrupted import or an
+    /// engagement directory that is not private is parked under its
+    /// engagement ID; the healthy engagement still loads.
+    #[cfg(unix)]
+    #[test]
+    fn native_palpo_one_unusable_profile_does_not_stop_the_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let first = download();
+        let (one, as_one, machine_one, endpoint_one, generation) =
+            parse(&first.to_string()).unwrap();
+        let primary = profile_directory(root.path(), &one.fleet_id).unwrap();
+        write(
+            &primary,
+            &one,
+            &as_one,
+            &machine_one,
+            &endpoint_one,
+            generation,
+        )
+        .unwrap();
+        let interrupted = "hf_ffffffffffffffffffffffffffffffff";
+        let second = first
+            .to_string()
+            .replace(FLEET, interrupted)
+            .replace("as-token-value", "second-as-token")
+            .replace("hs-token-value", "second-hs-token");
+        let (two, as_two, machine_two, endpoint_two, generation) = parse(&second).unwrap();
+        let secondary = profile_directory(root.path(), &two.fleet_id).unwrap();
+        write(
+            &secondary,
+            &two,
+            &as_two,
+            &machine_two,
+            &endpoint_two,
+            generation,
+        )
+        .unwrap();
+        // An import that stopped between its files.
+        private::replace(
+            &secondary.join(PENDING),
+            br#"{"state":"pending","digest":"interrupted"}"#,
+        )
+        .unwrap();
+        let engagements = root.path().join("palpo-engagements");
+        let shared = "hf_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        std::fs::create_dir(engagements.join(shared)).unwrap();
+        std::fs::set_permissions(
+            engagements.join(shared),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(engagements.join(".DS_Store"), b"finder").unwrap();
+        std::fs::write(engagements.join("notes.txt"), b"stray").unwrap();
+
+        let profiles = profile_directories(root.path()).unwrap();
+        assert_eq!(profiles.directories, vec![primary, secondary]);
+        assert_eq!(profiles.unusable, vec![shared.to_owned()]);
+        assert_eq!(profiles.ignored, vec!["notes.txt".to_owned()]);
+        let loaded = super::super::palpo::Prepared::load_all(root.path()).unwrap();
+        assert_eq!(loaded.prepared.len(), 1, "the healthy engagement loads");
+        let mut parked: Vec<&str> = loaded.parked.iter().map(|(k, _)| k.as_str()).collect();
+        parked.sort();
+        assert_eq!(parked, vec![shared, interrupted]);
+        assert_eq!(loaded.ignored, vec!["notes.txt".to_owned()]);
+
+        // With no engagement left to start, the broken configuration refuses
+        // the start, as a single broken profile always has.
+        private::replace(
+            &root.path().join(PENDING),
+            br#"{"state":"pending","digest":"interrupted"}"#,
+        )
+        .unwrap();
+        assert!(super::super::palpo::Prepared::load_all(root.path()).is_err());
     }
 
     #[test]

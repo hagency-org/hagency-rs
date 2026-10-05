@@ -1431,16 +1431,27 @@ impl Bootstrap {
         // A fresh install has no imported fleet yet: it waits for the console
         // import instead of refusing to start.
         let palpo_imported = options.palpo_transport && palpo::imported(&state)?;
-        let palpo_prepared = if palpo_imported {
+        let palpo_loaded = if palpo_imported {
             palpo::Prepared::load_all(&state)?
         } else {
-            Vec::new()
+            palpo::Loaded::default()
         };
         let palpo_status = if options.palpo_transport && !palpo_imported {
             palpo::StatusHandle::awaiting()
         } else {
             palpo::StatusHandle::new(options.palpo_transport)
         };
+        // A profile that cannot load is parked with its repair; the other
+        // engagements, the console and the operator API still start, and an
+        // import of the parked engagement starts it without a restart.
+        for entry in &palpo_loaded.ignored {
+            tracing::warn!(entry = %entry, "palpo-engagements holds an entry that is not an engagement directory; it is ignored");
+        }
+        for (engagement, failure) in &palpo_loaded.parked {
+            palpo_status.park(engagement);
+            tracing::error!(engagement = %engagement, error = %failure, "Palpo profile parked; the other engagements start");
+        }
+        let palpo_prepared = palpo_loaded.prepared;
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: custody_entered");
         let store = Store::start(
             Repository::open(&state).map_err(|_| Failure::Startup)?,
