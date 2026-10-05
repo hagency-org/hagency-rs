@@ -23,6 +23,18 @@ live deployment.
 
 ## Acceptance Criteria
 
+Scenario: Credential rotation fences older imports and repairs an interrupted file replacement
+  Test: native_palpo_profile_rotation_refuses_stale_generation_and_recovers_partial_files
+  Given a newer private transport generation was only partly written
+  When startup or an old or changed profile import is attempted
+  Then startup and conflicting imports are refused while the exact retry repairs the original operation
+
+Scenario: Importing a second same-server profile retains a larger verified profile
+  Test: native_palpo_multiple_profiles_same_server_preserve_independent_credentials
+  Given the first private transport profile exceeds 512 bytes after binding its reception room
+  When another engagement on that server is imported and both profiles reload
+  Then the original credentials and reception remain intact in independently selected directories
+
 Scenario: Scoped agent controls cannot bypass cleanup inspection or replay an old pause
   Test: scoped_agent_controls_recheck_authority_and_preserve_cleanup_and_capacity_on_replay
   Given a coordinated agent controlled by its project owner or current delegate

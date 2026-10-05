@@ -56,6 +56,10 @@ impl Prepared {
         Ok(result)
     }
     pub(super) fn load(state: &Path) -> Result<Self, Failure> {
+        super::palpo_import::ensure_committed(state).map_err(|_| Failure::Config {
+            field: "Palpo profile",
+            fix: "retry the exact pending profile import before starting transport",
+        })?;
         let value: Config = serde_json::from_slice(&read(
             &state.join("palpo-transport.json"),
             16 * 1024,
@@ -379,6 +383,14 @@ impl Live {
             registration.reception_room_id = current.reception_room_id;
         }
         let policy = super::palpo_import::coordinator_profile(raw, &registration)?;
+        super::palpo_import::validate_write(
+            &profile,
+            &registration,
+            &appservice,
+            &machine,
+            &endpoint,
+            generation,
+        )?;
         domain
             .import_coordinator_registration(registration.clone(), policy)
             .await

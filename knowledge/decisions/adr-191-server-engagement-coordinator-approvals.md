@@ -159,3 +159,16 @@ capacity. The store test exercises measured consumption, uncertain cleanup,
 restart/replay and later additional usage. Rinx's 18-check native instrument run
 uses Rust Palpo plus an authenticated provider fixture for pause/resume/removal;
 it does not establish real executor termination or live Matrix chat acceptance.
+
+Profile import now uses bounded private JSON reads for verified registrations,
+which can exceed the secret-token reader's 512-byte limit. It rejects older
+transport/registration generations and credential changes within a generation.
+A private import journal prevents activation between partial file writes and
+permits repair only by retrying the exact pending profile. A mutable reception
+room binding does not falsely change the credential fingerprint.
+
+Five profile unit checks, the console import route, clippy and all 1,241 Rust
+spec bindings passed. Rinx's combined 16-check native association run
+`7a2dc86faa514493888fba9425eefc35` verified two simultaneous same-server profiles,
+rotation, restart and stale-export refusal with pinned executable hashes. Matrix
+is an HTTP fixture in that run; it is not live agent/device acceptance.
