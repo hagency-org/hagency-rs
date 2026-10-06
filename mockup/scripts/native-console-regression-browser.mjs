@@ -223,7 +223,7 @@ try {
   // the wire assertion backing the console filters above: every refused
   // response was one of the two named structural noises, anything else
   // fails here by name.
-  assert.deepEqual(failures, [], `console errors: ${failures.join(' | ')}`);
+  assert.deepEqual(failures, [], `console errors: ${failures.join(' | ')}; responses: ${refused.join(' | ')}`);
   assert.deepEqual(refused, [], `refused responses beyond the named noises: ${refused.join(' | ')}`);
   assert(urls.every((url) => !url.includes('access=')), 'no ticket value in a request URL');
   console.log('PASS native console regression browser');

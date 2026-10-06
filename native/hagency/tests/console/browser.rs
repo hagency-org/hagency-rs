@@ -1352,7 +1352,14 @@ async fn native_console_regression_browser() {
     let acceptor = TcpListener::new(address).try_bind().await.unwrap();
     let server = Server::new(acceptor);
     let handle = server.handle();
-    let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
+    let serving = tokio::spawn(
+        server.try_serve(
+            f.app
+                .clone()
+                .with_palpo_import(f.root.path().join("state"))
+                .router(),
+        ),
+    );
     let url = hagency::console::client::access(&f.root.path().join("state"), address)
         .await
         .unwrap();

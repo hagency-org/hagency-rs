@@ -7,7 +7,9 @@
  * service. That distinction is the point: a page can render perfectly and still
  * refuse the action, and only a real press finds out.
  *
- * Protocol, exactly the sibling walk's: one JSON line on stdin {base,url,shots}.
+ * Protocol: one JSON line on stdin {base,url,shots,projectManager} and an
+ * optional serverEngagementId. projectManager is a full Matrix user ID on
+ * the selected server; the resource wizard records it as an eligible manager.
  * The access link is never an argv, never printed, never logged — it carries the
  * one outstanding ticket, and the harness that minted it owns it.
  *
@@ -19,7 +21,7 @@
  * as soon as it is known, so a crash later still leaves the earlier steps.
  *
  * Run against the fake harness (feature-gated suite spawns this file) or a live
- * rig:  echo '{"base":"http://127.0.0.1:PORT","url":"<access link>","shots":"/tmp"}' | node live-actions.mjs
+ * rig: echo '{"base":"http://127.0.0.1:PORT","url":"<access link>","shots":"/tmp","projectManager":"@owner:example.org"}' | node live-actions.mjs
  */
 
 import { createInterface } from 'node:readline';
@@ -149,14 +151,17 @@ await step('2-create-resource-configuration', async () => {
   const before = await page.locator('[data-resource-row]').count();
   await page.goto(`${cfg.base}/console/resources/new/?source_resource_id=${encodeURIComponent(source)}`);
   await page.locator('[data-native-configuration-id]').waitFor();
+  await page.locator('#configuration-engagement option').nth(1).waitFor({ state: 'attached' });
+  await page.locator('#configuration-engagement').selectOption(cfg.serverEngagementId ?? { index: 1 });
   // Two Next clicks reach the budget step (NATIVE_STEPS is model, reasoning,
   // budget); the name is prefilled from the source, and a monthly ceiling is
   // the one shape `save` accepts natively.
   await name(/^(Next|下一步)$/).click();
   await name(/^(Next|下一步)$/).click();
-  await page.locator('#configuration-ceiling').selectOption('monthly');
   await page.locator('#wz-tokens').fill('40000');
-  await name(/^(Create another configuration|创建另一项配置)$/).click();
+  if (!cfg.projectManager) throw new Error('projectManager must name an eligible Matrix user on the selected server');
+  await page.locator('#configuration-managers').fill(cfg.projectManager);
+  await name(/^(Create resource|创建资源)$/).click();
   await page.locator('[data-configuration-action="saved"]').waitFor();
   await page.goto(`${cfg.base}/console/resources/`);
   await page.locator('[data-native-resource-state="ready"][aria-busy="false"]').waitFor();
