@@ -118,6 +118,10 @@ fn verdict_store_error(res: &mut Response, error: hagency_store::Error) {
             refusal(res, StatusCode::CONFLICT, "insufficient_capacity")
         }
         hagency_store::Error::NoCeiling => refusal(res, StatusCode::CONFLICT, "no_ceiling"),
+        // ADR-191: the engagement's coordinator decides this request in Rinx.
+        hagency_store::Error::LocalAuthority => {
+            refusal(res, StatusCode::CONFLICT, "coordinator_managed")
+        }
         // ADR-186 §A2: the refusal carries the store's own explanation of
         // the binding limit, which the console shows beside the amount.
         hagency_store::Error::OverCommit { message } => {

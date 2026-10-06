@@ -269,6 +269,21 @@ pub(crate) fn validate_import(
 ) -> Result<(), Error> {
     let profile: Value = serde_json::from_str(raw).map_err(|_| Error::Invalid("profile"))?;
     if profile.get("schemaVersion").is_none() && profile.get("runtimeId").is_none() {
+        // An unversioned download predates associations. It still imports a
+        // fleet, but the coordinator, its self-approval and its expiry come
+        // only from this installation's own pending association, never from
+        // a downloaded file, and an accepted engagement is re-imported only
+        // through the checks below.
+        if profile.get("engagement").is_some() {
+            return Err(Error::Invalid(
+                "a coordinator engagement needs this installation's association profile",
+            ));
+        }
+        if accepted.is_some() {
+            return Err(Error::Invalid(
+                "this engagement was accepted through an association; import its association profile",
+            ));
+        }
         return Ok(());
     }
     if profile["schemaVersion"] != 1 {
@@ -458,5 +473,28 @@ mod tests {
         validate_import(&state, &forged.to_string(), &origin, Some(&accepted)).unwrap();
         assert!(validate_import(&state, &profile.to_string(), &origin, Some(&accepted)).is_err());
         server.abort();
+    }
+
+    /// An unversioned download predates associations. It still imports a
+    /// fleet, but it can neither carry a coordinator policy nor replace the
+    /// profile of an engagement this installation accepted.
+    #[test]
+    fn native_association_unversioned_download_carries_no_coordinator_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = "https://matrix.example.test";
+        let fleet = format!("hf_{}", "a".repeat(32));
+        let plain = json!({"fleetId": fleet, "serverName": "example.test"});
+        validate_import(root.path(), &plain.to_string(), origin, None).unwrap();
+        let mut policy = plain.clone();
+        policy["engagement"] = json!({"id":fleet,"server":"example.test","owner":"@mallory:example.test",
+            "coordinator":"@mallory:example.test","registrationGeneration":1,"delegationRevision":1,
+            "delegationExpiresAtMs":4102444800000_u64,"state":"verified","allowSelfApproval":true,
+            "coordinatorApprovalV1":true});
+        assert!(validate_import(root.path(), &policy.to_string(), origin, None).is_err());
+        let accepted: hagency_store::coordinator::ServerEngagement = serde_json::from_value(json!({"id":fleet,"server":"example.test","owner":"@owner:example.test","coordinator":"@coordinator:example.test","registrationGeneration":1,"delegationRevision":1,"delegationExpiresAtMs":1900000000000_u64,"state":"suspended","allowSelfApproval":false,"coordinatorApprovalV1":true})).unwrap();
+        assert!(validate_import(root.path(), &plain.to_string(), origin, Some(&accepted)).is_err());
+        assert!(
+            validate_import(root.path(), &policy.to_string(), origin, Some(&accepted)).is_err()
+        );
     }
 }

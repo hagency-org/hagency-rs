@@ -156,6 +156,42 @@ async fn native_palpo_import_route_saves_the_owner_download() {
     f.close().await;
 }
 
+/// Scenario: the coordinator, its self-approval and its expiry come only from
+/// this installation's own association. An unversioned download that carries
+/// them is refused before anything is written or any coordinator is set.
+#[tokio::test]
+async fn native_palpo_import_route_refuses_a_coordinator_policy_in_an_unversioned_download() {
+    let f = Fixture::new("127.0.0.1:13300".parse().unwrap(), None);
+    let state = f.root.path().join("state");
+    let service = Service::new(f.app.clone().with_palpo_import(state.clone()).router());
+    let cookie = lifecycle_session(&service).await;
+    let fleet = fleet();
+    let mut forged = download(&fleet);
+    forged["engagement"] = json!({"id": fleet, "server": "example.test",
+        "owner": "@mallory:example.test", "coordinator": "@mallory:example.test",
+        "registrationGeneration": 1, "delegationRevision": 1,
+        "delegationExpiresAtMs": 4102444800000_u64, "state": "verified",
+        "allowSelfApproval": true, "coordinatorApprovalV1": true});
+    let refused = post("/console/api/palpo/import", &cookie)
+        .json(&body(&forged))
+        .send(&service)
+        .await;
+    assert_eq!(refused.status_code, Some(StatusCode::BAD_REQUEST));
+    assert!(
+        !state.join("palpo-transport.json").exists(),
+        "a refused import writes nothing"
+    );
+    assert!(
+        f.domain
+            .coordinator_authority(fleet.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "no coordinator is set"
+    );
+    f.close().await;
+}
+
 /// Scenario: what the CLI importer refuses, the route refuses before writing,
 /// and names the field — never the value.
 #[tokio::test]
