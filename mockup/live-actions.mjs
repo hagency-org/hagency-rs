@@ -146,11 +146,12 @@ await step('1-login', async () => {
 await step('2-create-resource-configuration', async () => {
   await page.goto(`${cfg.base}/console/resources/`);
   await page.locator('[data-native-resource-state="ready"][aria-busy="false"]').waitFor();
-  const source = await page.locator('[data-resource-row]').first().getAttribute('data-resource-row');
-  if (!source) throw new Error('no source resource to derive a configuration from');
   const before = await page.locator('[data-resource-row]').count();
-  await page.goto(`${cfg.base}/console/resources/new/?source_resource_id=${encodeURIComponent(source)}`);
+  // Unassigned sources are intentionally absent from the configured-resource
+  // rows. Use the same creation link as the operator, including an empty list.
+  await page.locator('.page-head a[href*="/console/resources/new/"]').click();
   await page.locator('[data-native-configuration-id]').waitFor();
+  const source = await page.locator('[data-native-configuration-id]').getAttribute('data-native-configuration-id');
   await page.locator('#configuration-engagement option').nth(1).waitFor({ state: 'attached' });
   await page.locator('#configuration-engagement').selectOption(cfg.serverEngagementId ?? { index: 1 });
   // Two Next clicks reach the budget step (NATIVE_STEPS is model, reasoning,

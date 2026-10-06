@@ -1318,13 +1318,13 @@ fn regression_script() -> PathBuf {
 /// The #56 regression lane: ONE login walks every rail entry, then the key
 /// operator actions end to end on fixture data — approve and refuse a
 /// pending engagement, stop an agent (start asserted as the fail-closed
-/// absence it is), generate a side registration file, clear-dirty the
+/// absence it is), redirect a retired project-side bookmark, clear-dirty the
 /// configuration wizard, resolve the seeded alert — each asserting its
 /// visible result text. The store outcomes are asserted here against the
 /// database, derived from the same code paths the verdict and lifecycle
 /// lanes pin (approve → reserved + provision effect; refuse → rejected;
 /// a started dispatch fences to outcome_unknown with its session
-/// quarantined; the registration YAML lands on disk).
+/// quarantined; the retired registration flow writes no YAML).
 #[tokio::test]
 async fn native_console_regression_browser() {
     let address = address();
@@ -1526,11 +1526,11 @@ async fn native_console_regression_browser() {
     assert_eq!(alert_status, "resolved");
     drop(sql);
     assert!(
-        f.root
+        !f.root
             .path()
             .join("state/registrations/example.test.yaml")
             .exists(),
-        "the registration file landed on disk"
+        "opening a retired project-side bookmark must not create a registration"
     );
     handle.stop_graceful(Some(Duration::from_secs(2)));
     serving.await.unwrap().unwrap();
