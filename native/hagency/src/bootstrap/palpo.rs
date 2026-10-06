@@ -196,6 +196,9 @@ struct LiveInner {
     enabled: bool,
     owner: tokio::sync::Mutex<BTreeMap<String, Owner>>,
     imports: tokio::sync::Mutex<()>,
+    pairings: tokio::sync::Mutex<()>,
+    pairing_task: Mutex<Option<Arc<tokio::sync::Mutex<JoinHandle<()>>>>>,
+    pairing_cancel: CancellationToken,
     /// ADR-187: an imported fleet's service (agents, approvals) with no
     /// coordinator; absent on a coordinator install, which runs its own.
     fleet: Option<FleetMode>,
@@ -231,6 +234,63 @@ impl From<super::palpo_import::Error> for ImportError {
     }
 }
 impl Live {
+    pub(crate) fn start_pairings(&self) {
+        let mut task = self
+            .0
+            .pairing_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if task.is_some() || self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let weak = Arc::downgrade(&self.0);
+        let cancel = self.0.pairing_cancel.clone();
+        *task = Some(Arc::new(tokio::sync::Mutex::new(tokio::spawn(
+            async move {
+                loop {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let Some(inner) = weak.upgrade() else {
+                        break;
+                    };
+                    let live = Self(inner);
+                    if !cancel.is_cancelled() {
+                        let _ = super::pairing::tick(&live, &cancel).await;
+                    }
+                    drop(live);
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+                    }
+                }
+            },
+        ))));
+    }
+    pub(crate) async fn create_pairing(
+        &self,
+        input: super::pairing::Input,
+    ) -> Result<serde_json::Value, super::association::Error> {
+        let _guard = self.0.pairings.lock().await;
+        if self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(super::association::Error::Invalid("runtime closed"));
+        }
+        let value = super::pairing::create(self.state_dir(), input)?;
+        self.start_pairings();
+        Ok(value)
+    }
+    pub(crate) async fn pairing_verified(&self, fleet: &str) -> bool {
+        self.0
+            .domain
+            .coordinator_authority(fleet.to_owned())
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|policy| serde_json::json!(policy.state) == "verified")
+    }
+    pub(crate) fn pairing_status(&self) -> Result<serde_json::Value, super::association::Error> {
+        super::pairing::list(self.state_dir(), self.0.enabled)
+    }
     pub(crate) async fn verify_coordinator(&self, fleet: &str, user: &str) -> bool {
         let Ok(registration) = self.0.domain.provisioning_registration(fleet.into()).await else {
             return false;
@@ -256,6 +316,9 @@ impl Live {
             enabled,
             owner: tokio::sync::Mutex::new(BTreeMap::new()),
             imports: tokio::sync::Mutex::new(()),
+            pairings: tokio::sync::Mutex::new(()),
+            pairing_task: Mutex::new(None),
+            pairing_cancel: CancellationToken::new(),
             fleet: None,
             closed: std::sync::atomic::AtomicBool::new(false),
             cancel: Mutex::new(BTreeMap::new()),
@@ -458,6 +521,7 @@ impl Live {
         })
     }
     pub(super) fn cancel(&self) {
+        self.0.pairing_cancel.cancel();
         self.0
             .closed
             .store(true, std::sync::atomic::Ordering::Release);
@@ -480,6 +544,21 @@ impl Live {
     }
     pub(super) async fn close(&self) -> Result<(), Failure> {
         self.cancel();
+        self.0.pairing_cancel.cancel();
+        let pairing = self
+            .0
+            .pairing_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(task) = pairing {
+            let _ = (&mut *task.lock().await).await;
+            self.0
+                .pairing_task
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
         let mut result = Ok(());
         // The fleet's agents and approvals close before the transport.
         if let Some(fleet) = &self.0.fleet {

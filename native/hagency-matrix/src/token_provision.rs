@@ -60,6 +60,7 @@ pub struct TokenAccountProvision {
     /// A restart re-attaching an account this custody already completed. It may
     /// only read: the stored response, then whoami. It can never register or log in.
     reattach: bool,
+    recovering: bool,
     pub(crate) factory_rooms: Option<Arc<tokio::sync::Mutex<()>>>,
     as_guard: Option<Arc<application_service::Guard>>,
     scope: Option<ProvisionScope>,
@@ -207,6 +208,7 @@ impl TokenAccountProvision {
         };
         Ok(Self {
             reattach: false,
+            recovering: false,
             factory_rooms: None,
             as_guard: None,
             scope: None,
@@ -231,6 +233,11 @@ impl TokenAccountProvision {
     /// provision that is already Complete, so the custody binding is unchanged.
     pub fn for_reattach(mut self) -> Self {
         self.reattach = true;
+        self
+    }
+    pub(crate) fn for_recovery(mut self) -> Self {
+        self.reattach = true; // Register/login are forbidden during inspection.
+        self.recovering = true;
         self
     }
     pub(crate) fn with_domain(
@@ -263,7 +270,15 @@ impl TokenAccountProvision {
     }
     async fn validate(&self, scope: &ProvisionScope, deadline: Instant) -> Result<(), Error> {
         let (effect, registration) = (scope.effect.clone(), scope.registration.clone());
-        if self.reattach {
+        if self.recovering {
+            timeout_at(
+                deadline,
+                scope
+                    .domain
+                    .validate_recoverable_provision(effect, registration),
+            )
+            .await
+        } else if self.reattach {
             timeout_at(
                 deadline,
                 scope
@@ -306,6 +321,10 @@ impl TokenAccountProvision {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<ProvisionedTokenAccount, Error> {
+        if self.reattach {
+            hagency_store::private::open(&self.root.join("complete"), false)
+                .map_err(|_| Error::Storage)?;
+        }
         let root = self.root.clone();
         let context = self.context.clone();
         let key = self.key;
@@ -524,6 +543,64 @@ pub struct ProvisionedTokenAccount {
     roots: Vec<reqwest::Certificate>,
 }
 impl ProvisionedTokenAccount {
+    /// Recovery is restricted to a completed identity, completed key ledger,
+    /// and completed rooms BEFORE any owner invite or runtime could start.
+    pub(crate) async fn resume_before_owner_invite(
+        &mut self,
+        representative: &str,
+        anchors: Vec<(String, String)>,
+        inspection: hagency_store::OwnedProvisionScope,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        if !self.reattach {
+            return Err(Error::Config);
+        }
+        let original = self.scope.as_ref().ok_or(Error::Config)?;
+        let operation = rooms::Operation::new(self, original.clone(), representative)?;
+        let (custody, rooms) = operation.inspect_before_owner_invite().await?;
+        let config = self
+            .host_config(1, self.key, rooms)?
+            .with_fresh_account_enrollment(anchors)?;
+        let scope = crate::enrollment::provisioning::Scope::new(
+            original.effect.clone(),
+            original.registration.clone(),
+            &config,
+        )?
+        .for_recovery();
+        let collector = crate::Collector::new(config, original.domain.clone())?;
+        let deadline = Instant::now() + self.limits.sdk;
+        timeout_at(deadline, scope.current(&collector.inner, cancel))
+            .await
+            .map_err(|_| Error::Timeout)??;
+        let owner = crate::sdk::Owner::open_existing(&collector.inner.config).await?;
+        let result = async {
+            if !matches!(
+                owner
+                    .enrollment_handle_for(crate::sdk::enrollment::Purpose::Agent)
+                    .command(crate::sdk::enrollment::Command::Status)
+                    .await?,
+                crate::enrollment::state::View::Complete
+            ) {
+                return Err(Error::OutcomeUnknown);
+            }
+            timeout_at(deadline, scope.current(&collector.inner, cancel))
+                .await
+                .map_err(|_| Error::Timeout)??;
+            checkpoint(cancel, deadline)
+        }
+        .await;
+        let closed = owner.close().await;
+        result?;
+        closed?;
+        checkpoint(cancel, deadline)?;
+        original
+            .domain
+            .resume_inspected_provision(inspection)
+            .await?;
+        drop(custody);
+        self.reattach = false;
+        Ok(())
+    }
     pub fn sender_mxid(&self) -> &str {
         &self.context.user
     }

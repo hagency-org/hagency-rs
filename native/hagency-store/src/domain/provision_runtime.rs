@@ -225,7 +225,57 @@ impl DomainRepository {
         effect: &Effect,
         registration: &Registration,
     ) -> Result<OwnedProvisionScope, Error> {
-        self.validate_provision_account(effect, registration)?;
+        self.provision_scope_at(effect, registration, false)
+    }
+    /// Mint inspection custody only. Runtime authorization still rejects the
+    /// uncertain effect until the original Matrix artifacts have been checked.
+    pub fn inspect_provision_scope(
+        &mut self,
+        effect: &Effect,
+        registration: &Registration,
+    ) -> Result<OwnedProvisionScope, Error> {
+        self.provision_scope_at(effect, registration, true)
+    }
+    pub fn resume_inspected_provision(&mut self, scope: &OwnedProvisionScope) -> Result<(), Error> {
+        if !Arc::ptr_eq(&scope.owner, &self.approval_owner)
+            || scope.claimed.load(Ordering::Acquire)
+            || scope.runtime_live.load(Ordering::Acquire)
+        {
+            return Err(Error::RunnerAuthority);
+        }
+        self.validate_recoverable_provision(&scope.effect, &scope.registration)?;
+        if self.warm_scopes.len() >= 16 {
+            return Err(Error::Capacity);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute("UPDATE effects SET state='started',outcome_digest=NULL WHERE id=?1 AND fence=?2 AND state='uncertain'",
+            rusqlite::params![scope.effect.id, scope.effect.fence])?;
+        if changed != 1 {
+            return Err(Error::State);
+        }
+        current(&tx, scope, &self.accounts, &self.approval_owner, false)?;
+        let result = json!({"effectId":scope.effect.id,"fence":scope.effect.fence,"checkpoint":"enrolled_before_owner_invite"});
+        let digest = canonical::transport_digest(&result)?;
+        tx.execute("INSERT OR IGNORE INTO decisions(id,digest,result,kind,at) VALUES(?1,?2,?3,'resume_enrolled_provision',?4)",
+            rusqlite::params![format!("provision_recovery_{digest}"), digest, result.to_string(), super::graphs::now_ms()?])?;
+        tx.commit()?;
+        self.warm_scopes
+            .insert(scope.effect.id.clone(), scope.clone());
+        Ok(())
+    }
+    fn provision_scope_at(
+        &mut self,
+        effect: &Effect,
+        registration: &Registration,
+        recovering: bool,
+    ) -> Result<OwnedProvisionScope, Error> {
+        if recovering {
+            self.validate_recoverable_provision(effect, registration)?;
+        } else {
+            self.validate_provision_account(effect, registration)?;
+        }
         let resource: Resource = serde_json::from_value(
             effect
                 .payload
@@ -260,6 +310,17 @@ impl DomainRepository {
             claimed: Arc::new(AtomicBool::new(false)),
             runtime_live: Arc::new(AtomicBool::new(false)),
         };
+        if recovering {
+            let actual = read_resource(&tx, &scope.resource.id())?;
+            if canonical::transport_digest(&runtime_identity(&actual))?
+                != canonical::transport_digest(&runtime_identity(&scope.resource))?
+            {
+                return Err(Error::Unqualified);
+            }
+            self.accounts.check_resource(&tx, &scope.resource)?;
+            tx.commit()?;
+            return Ok(scope);
+        }
         current(&tx, &scope, &self.accounts, &self.approval_owner, false)?;
         tx.commit()?;
         if let Some(known) = self.warm_scopes.get(&effect.id) {

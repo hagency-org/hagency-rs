@@ -2514,6 +2514,15 @@ impl DomainRepository {
         let rows = statement.query_map([fleet_id], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+    /// Candidates only; encrypted Matrix custody decides whether any can resume.
+    pub fn uncertain_provisions(&self, fleet_id: &str) -> Result<Vec<String>, Error> {
+        project::identifier(fleet_id, 128)?;
+        let mut statement = self.db.prepare(
+            "SELECT e.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.fleet_id=?1 AND f.kind='provision' AND f.state='uncertain' AND e.state='reserved' AND e.generation=r.generation ORDER BY f.id LIMIT 16")?;
+        Ok(statement
+            .query_map([fleet_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
     /// Revoked engagements of one fleet whose retirement is still pending and
     /// whose agent never published a Matrix transport (read-only). No worker
     /// will ever run for them; the provisioning host settles each one whose

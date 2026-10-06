@@ -4115,6 +4115,15 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn resource_engagements(
+        &self,
+        id: String,
+    ) -> Result<Vec<crate::coordinator::ResourceGrant>, Error> {
+        if id.len() > 128 {
+            return Err(Error::Capacity);
+        }
+        self.call(512, move |db| db.resource_engagements(&id)).await
+    }
     pub async fn configure_resource(
         &self,
         command: crate::ResourceConfigurationCommand,
@@ -4780,6 +4789,43 @@ impl DomainStore {
             db.validate_provision_account(&effect, &registration)
         })
         .await
+    }
+    pub async fn effect(&self, id: String) -> Result<Effect, Error> {
+        self.call(weight(&id)?, move |db| db.effect(&id)).await
+    }
+    pub async fn uncertain_provisions(&self, fleet_id: String) -> Result<Vec<String>, Error> {
+        self.call(weight(&fleet_id)?, move |db| {
+            db.uncertain_provisions(&fleet_id)
+        })
+        .await
+    }
+    pub async fn validate_recoverable_provision(
+        &self,
+        effect: Effect,
+        registration: hagency_core::authority::Registration,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&effect, &registration))?, move |db| {
+            db.validate_recoverable_provision(&effect, &registration)
+        })
+        .await
+    }
+    pub async fn inspect_provision_scope(
+        &self,
+        effect: Effect,
+        registration: hagency_core::authority::Registration,
+    ) -> Result<crate::OwnedProvisionScope, Error> {
+        self.call(weight(&(&effect, &registration))?, move |db| {
+            db.inspect_provision_scope(&effect, &registration)
+        })
+        .await
+    }
+    pub async fn resume_inspected_provision(
+        &self,
+        scope: crate::OwnedProvisionScope,
+    ) -> Result<(), Error> {
+        let size = weight(&scope.queue_value())?;
+        self.call(size, move |db| db.resume_inspected_provision(&scope))
+            .await
     }
     pub async fn provision_runtime_scope(
         &self,

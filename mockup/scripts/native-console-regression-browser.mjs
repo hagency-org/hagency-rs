@@ -170,29 +170,12 @@ try {
   await page.locator(`[data-engagement-id="${config.engagement}"] [data-lifecycle-action="stop"]`).click();
   await page.locator('[data-stop-action="saved"]').waitFor();
 
-  /* (e) GENERATE a side registration (download, lifecycle scope): the
-   * written host path, mode and fingerprints render; no token value does. */
+  /* (e) The retired manual project-side connection page redirects to the
+   * server-engagement flow; registration APIs retain their backend tests. */
   await page.goto(`${config.base}/console/project-sides/`);
-  await page.locator('[data-native-state="ready"]').waitFor();
-  await page.locator('[data-side-registration] input').first().fill(config.registrationUrl);
-  // The side selector's state locks to '' when the panel mounts before the
-  // sides read lands (useState captures the empty list and never re-runs);
-  // an operator picks the side from the dropdown — so does the driver,
-  // rather than depending on a default that never arrives.
-  await page.locator('[data-side-registration] select').selectOption({ index: 0 });
-  await page.getByRole('button', { name: /^(Generate registration|生成注册文件)$/ }).click();
-  // The issue failure renders as a note naming the server's refusal word —
-  // dump the panel so the failure mode is named, not guessed.
-  try {
-    await page.locator('[data-side-registration] .mono-s').first().waitFor({ timeout: 15_000 });
-  } catch (error) {
-    const panel = await page.locator('[data-side-registration]').innerText().catch(() => '(no registration panel)');
-    throw new Error(`the issued registration never rendered; panel says:\n${panel}\n${error.message}`);
-  }
-  const registrationText = await page.locator('[data-side-registration]').innerText();
-  assert(/state\/registrations\//.test(registrationText), 'the written host path renders');
-  assert(/0600|Staged|暂存/.test(registrationText), 'the issue outcome renders — written at 0600, or staged behind the live credential');
-  assert(!/(as|hs)_token_/.test(registrationText), 'no token VALUE renders, only fingerprints');
+  await page.waitForURL(/\/console\/server-engagements\/?$/);
+  await page.locator('[data-server-engagements]').waitFor();
+  assert.equal(await page.locator('[data-palpo-import], [data-side-registration]').count(), 0);
 
   /* (f) CLEAR-DIRTY on the configuration wizard (configuration scope): edit
    * the draft's ceiling, then Reload discards it and restores the observed
@@ -208,14 +191,12 @@ try {
   await page.locator(`[data-native-configuration-id="${config.resource}"][aria-busy="false"]`).waitFor();
   await page.getByRole('button', { name: /^(Next|下一步)$/ }).click();
   await page.getByRole('button', { name: /^(Next|下一步)$/ }).click();
-  await page.locator('#configuration-ceiling').selectOption('monthly');
   await page.locator('#wz-tokens').fill('777777');
   await page.getByRole('button', { name: /(Reload configuration and discard draft|重新读取配置并放弃草稿)/ }).click();
   await page.locator(`[data-native-configuration-id="${config.resource}"][aria-busy="false"]`).waitFor();
   // The tokens input carries its value only under the monthly arm — the
   // same select-then-read the configuration lane uses after its reload.
-  await page.locator('#configuration-ceiling').selectOption('monthly');
-  assert.equal(await page.locator('#wz-tokens').inputValue(), '5000', 'the draft was discarded and the observed ceiling restored');
+  assert.equal(await page.locator('#wz-tokens').inputValue(), '', 'an unassigned account configuration does not preallocate a resource budget');
 
   /* (g) ALERT TRANSITION (configuration scope): the fixture's open ceiling
    * alert resolves; the row leaves the open list and the no-open state

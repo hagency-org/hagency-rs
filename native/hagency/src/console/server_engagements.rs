@@ -92,18 +92,37 @@ async fn decisions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(store) = domain(depot, res) else {
         return;
     };
-    let result = store.coordinator_deliveries(id, after, limit).await;
+    let result = page_value("decisions", after, limit, |after, limit| {
+        store.coordinator_deliveries(id.clone(), after, limit)
+    })
+    .await;
     if let Err(e) = recheck(depot) {
         failed(res, e);
         return;
     }
     match result {
-        Ok(rows) => bounded(
-            res,
-            &json!({"nextCursor":rows.last().map(|r|&r["id"]),"decisions":rows}),
-        ),
+        Ok(value) => bounded(res, &value),
         Err(e) => failure(res, e),
     }
+}
+async fn page_value<F, Fut>(
+    key: &str,
+    after: String,
+    limit: usize,
+    fetch: F,
+) -> Result<serde_json::Value, hagency_store::Error>
+where
+    F: Fn(String, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<serde_json::Value>, hagency_store::Error>>,
+{
+    let rows = fetch(after, limit).await?;
+    // Resource pages can also stop at their byte budget, so even
+    // a short page needs a lookahead before advertising another page.
+    let next = match rows.last().and_then(|row| row["id"].as_str()) {
+        Some(last) if !fetch(last.to_owned(), 1).await?.is_empty() => Some(last),
+        _ => None,
+    };
+    Ok(json!({(key):rows,"nextCursor":next}))
 }
 fn page(req: &Request) -> Result<(String, usize), Error> {
     query(req, &["after", "limit"], 300)?;
@@ -123,7 +142,7 @@ fn page(req: &Request) -> Result<(String, usize), Error> {
     }
     Ok((after, limit))
 }
-fn failure(res: &mut Response, error: hagency_store::Error) {
+pub(super) fn failure(res: &mut Response, error: hagency_store::Error) {
     match error {
         hagency_store::Error::InsufficientCapacity | hagency_store::Error::OverCommit { .. } => {
             crate::refusal(res, StatusCode::CONFLICT, "contribution_capacity_exceeded")
@@ -152,16 +171,16 @@ async fn list(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(store) = domain(depot, res) else {
         return;
     };
-    let result = store.server_engagements(after, limit).await;
+    let result = page_value("engagements", after, limit, |after, limit| {
+        store.server_engagements(after, limit)
+    })
+    .await;
     if let Err(e) = recheck(depot) {
         failed(res, e);
         return;
     }
     match result {
-        Ok(rows) => bounded(
-            res,
-            &json!({"nextCursor":rows.last().map(|r|&r["id"]),"engagements":rows}),
-        ),
+        Ok(value) => bounded(res, &value),
         Err(e) => failure(res, e),
     }
 }
@@ -178,16 +197,16 @@ async fn resources(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(store) = domain(depot, res) else {
         return;
     };
-    let result = store.server_engagement_resources(id, after, limit).await;
+    let result = page_value("resources", after, limit, |after, limit| {
+        store.server_engagement_resources(id.clone(), after, limit)
+    })
+    .await;
     if let Err(e) = recheck(depot) {
         failed(res, e);
         return;
     }
     match result {
-        Ok(rows) => bounded(
-            res,
-            &json!({"nextCursor":rows.last().map(|r|&r["id"]),"resources":rows}),
-        ),
+        Ok(value) => bounded(res, &value),
         Err(e) => failure(res, e),
     }
 }

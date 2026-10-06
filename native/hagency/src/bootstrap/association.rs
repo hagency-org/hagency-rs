@@ -44,7 +44,7 @@ pub struct Args {
     pub export_mxid: Vec<String>,
 }
 
-fn origin(value: &str) -> Result<reqwest::Url, Error> {
+pub(super) fn origin(value: &str) -> Result<reqwest::Url, Error> {
     let url = reqwest::Url::parse(value).map_err(|_| Error::Invalid("origin"))?;
     if !(url.scheme() == "https"
         || url.scheme() == "http"
@@ -59,7 +59,7 @@ fn origin(value: &str) -> Result<reqwest::Url, Error> {
     }
     Ok(url)
 }
-fn read(path: &Path) -> Result<Value, Error> {
+pub(super) fn read(path: &Path) -> Result<Value, Error> {
     use std::io::Read;
     let file = private::open(path, false)?;
     let mut bytes = Vec::new();
@@ -71,7 +71,7 @@ fn read(path: &Path) -> Result<Value, Error> {
     }
     serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("local intent"))
 }
-fn create(path: &Path, value: &Value) -> Result<(), Error> {
+pub(super) fn create(path: &Path, value: &Value) -> Result<(), Error> {
     use std::io::Write;
     let mut file = private::open(path, true)?;
     file.write_all(&serde_json::to_vec(value).map_err(|_| Error::Invalid("local intent"))?)
@@ -87,7 +87,7 @@ fn create(path: &Path, value: &Value) -> Result<(), Error> {
     .map_err(|_| Error::Invalid("local intent directory sync"))?;
     Ok(())
 }
-fn identity(state: &Path) -> Result<String, Error> {
+pub(super) fn identity(state: &Path) -> Result<String, Error> {
     let file = state.join("association-runtime.json");
     if !file
         .try_exists()
@@ -108,7 +108,9 @@ fn identity(state: &Path) -> Result<String, Error> {
         .map(str::to_owned)
         .ok_or(Error::Invalid("runtime identity"))
 }
-async fn response(response: Result<reqwest::Response, reqwest::Error>) -> Result<Value, Error> {
+pub(super) async fn response(
+    response: Result<reqwest::Response, reqwest::Error>,
+) -> Result<Value, Error> {
     let mut response =
         response.map_err(|_| Error::Invalid("server unavailable; retry the same request"))?;
     if !response.status().is_success() {

@@ -203,7 +203,7 @@ function NativeDataProvider({ children }) {
         triageRows.current = after ? [...triageRows.current, ...(value.engagements ?? [])] : (value.engagements ?? []);
         merged = { ...value, engagements: triageRows.current };
       }
-      setState({ ...initial, ...merged, phase: 'ready', requestKey });
+      setState({ ...initial, ...merged, phase: 'ready', requestKey, current_after: after });
       return value;
     } catch (error) {
       if (mine !== generation.current) return;

@@ -1,7 +1,7 @@
 //! A single SQLite owner on a dedicated bounded worker; no IO in async handlers.
 pub use domain::resource_configuration::{
     CeilingChange, ProfileChange, ResourceConfigurationAccess, ResourceConfigurationCommand,
-    ResourceConfigurationResult,
+    ResourceConfigurationResult, ResourceEngagementChange,
 };
 pub mod agent_home;
 pub mod backup;

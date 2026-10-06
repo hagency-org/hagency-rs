@@ -18,6 +18,7 @@ use std::{
 use tokio::time::{Instant, timeout_at};
 
 pub(crate) struct Scope {
+    recovering: bool,
     effect: Effect,
     registration: Registration,
     request: ProjectRequest,
@@ -73,10 +74,15 @@ impl Scope {
             return Err(Error::Config);
         }
         Ok(Self {
+            recovering: false,
             effect,
             registration,
             request,
         })
+    }
+    pub(crate) fn for_recovery(mut self) -> Self {
+        self.recovering = true;
+        self
     }
     pub(crate) async fn current(
         &self,
@@ -86,7 +92,11 @@ impl Scope {
         self.current_at(inner, cancel, false).await
     }
     async fn validate(&self, domain: &DomainStore, active: bool) -> Result<(), Error> {
-        if active {
+        if self.recovering {
+            domain
+                .validate_recoverable_provision(self.effect.clone(), self.registration.clone())
+                .await?;
+        } else if active {
             domain
                 .validate_active_provision_account(self.effect.clone(), self.registration.clone())
                 .await?;
@@ -107,7 +117,7 @@ impl Scope {
             return Err(Error::Cancelled);
         }
         self.validate(&inner.domain, active).await?;
-        inner.whoami(cancel).await?;
+        inner.whoami_identity(cancel).await?;
         let sender = &inner.config.identity.transport.sender_mxid;
         // ADR-184: the owner is in the frozen user set from the start. The agent
         // enrolls before the owner is invited to its DM, so the owner's
@@ -134,6 +144,14 @@ impl Scope {
                     })
                     .map(|e| e["content"]["membership"].clone())
             });
+            if self.recovering
+                && matches!(target.privacy, RoomPrivacy::Direct { .. })
+                && owner_membership.is_some()
+            {
+                // The pre-invite checkpoint must still precede the first DM.
+                // Never reserve a new cursor after the owner could have written.
+                return Err(Error::Recipients);
+            }
             let (room, facts) = inner.room(target, value)?;
             if !room.joined.contains(sender) {
                 return Err(Error::Recipients);
@@ -297,7 +315,7 @@ impl Jobs {
                     .map_err(|_| Error::OutcomeUnknown)?
                     .as_ref()
                 {
-                    Some(Ok(())) => {}
+                    Some(Ok(())) | Some(Err(Error::AwaitingSetup)) => {}
                     Some(Err(error)) => return Err(error.clone()),
                     None => return Err(Error::Busy),
                 }
@@ -330,22 +348,61 @@ impl Jobs {
             .lock()
             .map_err(|_| Error::OutcomeUnknown)?
             .before_activation()?;
-        let deadline = Instant::now() + job.collector.inner.config.limits.sdk;
         let cancel = cancel.clone();
         let operation = job.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let inner = &operation.collector.inner;
             let scope = &operation.scope;
-            let result = timeout_at(
-                deadline,
-                inner.enroll(EnrollmentScope::Provision(scope), &cancel, deadline),
-            )
-            .await
-            .unwrap_or(Err(Error::Timeout));
+            let result = async {
+                inner.enroll_provision(scope, &cancel).await?;
+                let deadline = Instant::now() + inner.config.limits.sdk;
+                timeout_at(deadline, inner.reserve_intake_cursor(&cancel))
+                    .await
+                    .unwrap_or(Err(Error::Timeout))
+                    .map_err(|error| {
+                        eprintln!(
+                            "provision enrollment stage=initial_sync effect={} error={error:?}",
+                            scope.effect.id
+                        );
+                        error
+                    })
+            }
+            .await;
             let result = match result {
-                Ok(()) => checkpoint(&cancel, deadline),
-                Err(error) => Err(error),
+                Err(error @ (Error::Timeout | Error::Transport)) if !cancel.is_cancelled() => {
+                    // Query the SAME SDK owner after the interrupted command.
+                    // Possible/unapplied writes and poisoned journals refuse.
+                    let retryable = {
+                        let guard = inner.owner.lock().await;
+                        match guard.as_ref() {
+                            Some(owner) => matches!(
+                                owner
+                                    .enrollment_handle_for(crate::sdk::enrollment::Purpose::Agent)
+                                    .command(crate::sdk::enrollment::Command::Status)
+                                    .await,
+                                Ok(super::state::View::Absent
+                                    | super::state::View::Complete
+                                    | super::state::View::Ready
+                                    | super::state::View::Verify
+                                    | super::state::View::Write(_))
+                            ),
+                            None => matches!(inner.config.root.try_exists(), Ok(false)),
+                            // A cancelled SDK open may still own the on-disk
+                            // lock. Never create a replacement for that owner.
+                        }
+                    };
+                    if retryable {
+                        eprintln!(
+                            "provision enrollment waiting effect={} cause={error:?}",
+                            scope.effect.id
+                        );
+                        Err(Error::AwaitingSetup)
+                    } else {
+                        Err(error)
+                    }
+                }
+                result => result,
             };
             if let Err(error) = &result {
                 eprintln!(
@@ -356,6 +413,7 @@ impl Jobs {
             // Enrollment does not complete the factory. Any failed original
             // physical step is retained as unknown, never NotApplied/Active.
             let result = if result.is_err()
+                && !matches!(result, Err(Error::AwaitingSetup))
                 && inner
                     .domain
                     .observe_effect(

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import PageHead from '@/components/PageHead';
@@ -15,6 +15,7 @@ import { NativeAccessNotice } from '@/components/NativeUsage';
 import NativeStatusStrip from '@/components/NativeStatusStrip';
 import SearchSelect from '@/components/SearchSelect';
 import { labelFor } from '@/lib/labels';
+import { fetchServerEngagements } from '@/lib/native-api';
 
 /*
  * ② 配置向导 — four steps, and three of them write a field that already exists.
@@ -80,17 +81,24 @@ export default function WizardPage() {
     {data.action?.configuration && <section className="notice" data-configuration-action={data.action.kind} role={data.action.kind === 'saved' || data.action.kind === 'pending' ? 'status' : 'alert'}>
       <p>{t(`nc.action.${data.action.kind}`)}</p>
       {data.action.error === 'resource_in_use' && <p>{t('nc.inUse')}</p>}
+      {data.action.error === 'contribution_capacity_exceeded' && <p>{t('nc.capacityError')}</p>}
+      {data.action.error === 'engagement_authority_changed' && <p>{t('nc.engagementUnavailable')}</p>}
       <a className="btn" href={`/console/resources/${data.action.result ? `?resource_id=${data.action.result.resourceId}` : ''}`}>{t(data.action.result ? 'nc.openSaved' : 'nr.reconcile')}</a>
       {data.action.result && <TechnicalDetails><code>{data.action.result.resourceId}</code></TechnicalDetails>}
     </section>}
     {['ready', 'stale'].includes(data.phase) && (data.editor
       ? <div data-native-configuration-id={data.editor.resource.id} aria-busy={data.refreshing === true}><WizardForm key={`${data.editing}:${data.editor.resource.id}`} native={data} /></div>
-      : <section className="panel"><p>{t('nc.noSource')}</p><p><a className="btn primary" href="/console/accounts/">{t('nc.noSourceAccounts')}</a></p></section>)}
+      : <section className="panel"><p>{t('nc.noSource')}</p><p><a className="btn primary" href="/console/setup/">{t('nc.noSourceSetup')}</a></p></section>)}
   </>;
 }
 const validNativeTokens = (value) => /^[0-9]+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) >= 0;
-function nativeDraft(resource) {
-  return { framework: resource.framework, provider: resource.provider, model: resource.model, reasoning: resource.reasoning, tokens: resource.ceiling?.tokens ?? '', profileKind: 'preserve', ceilingKind: 'preserve' };
+function nativeDraft(observation, editing) {
+  const resource = observation.resource;
+  const binding = editing ? observation.resource.engagementResources[0] : null;
+  return { framework: resource.framework, provider: resource.provider, model: resource.model, reasoning: resource.reasoning,
+    tokens: binding?.allocatedTokens ?? '', profileKind: 'preserve', ceilingKind: 'monthly',
+    serverEngagementId: binding?.serverEngagementId ?? '', allocationId: binding?.id ?? null,
+    expectedRevision: binding?.revision ?? null, managers: binding?.eligibleManagers.join('\n') ?? '' };
 }
 function WizardForm({ native = null }) {
   const t = useT(); const data = useData();
@@ -102,7 +110,24 @@ function WizardForm({ native = null }) {
   const [step, setStep] = useState(0);
   const steps = native ? NATIVE_STEPS : STEPS;
   const at = steps[step];
-  const [draft, setDraft] = useState(() => native ? nativeDraft(base) : { name: '', framework: null, provider: null, model: null, reasoning: null, tokens: 1_000_000, rateCapPerDay: 50_000, yolo: false });
+  const [draft, setDraft] = useState(() => native ? nativeDraft(observation, native.editing) : { name: '', framework: null, provider: null, model: null, reasoning: null, tokens: 1_000_000, rateCapPerDay: 50_000, yolo: false });
+  const [serverEngagements, setServerEngagements] = useState([]);
+  const [engagementError, setEngagementError] = useState('');
+  const [engagementsLoaded, setEngagementsLoaded] = useState(false);
+  useEffect(() => {
+    if (!native) return;
+    let active = true;
+    (async () => {
+      const rows = []; let after = '';
+      do { const page = await fetchServerEngagements(after); rows.push(...page.engagements); after = page.nextCursor; } while (after);
+      if (active) { setServerEngagements(rows); setEngagementsLoaded(true); }
+    })().catch(e => { if (active) setEngagementError(e.message); });
+    return () => { active = false; };
+  }, [!!native]);
+  const bindings = native?.editing ? observation.resource.engagementResources : [];
+  const engagement = serverEngagements.find(e => e.id === draft.serverEngagementId);
+  const managers = [...new Set((draft.managers ?? '').split(/[\s,]+/).filter(Boolean))];
+  const validEngagement = engagement?.state === 'verified' && engagement.delegationExpiresAtMs > Date.now();
   const router = useRouter();
   const set = (patch) => setDraft((d) => ({ ...d, ...patch, ...(native && ('model' in patch || 'reasoning' in patch) ? { profileKind: 'select' } : {}) }));
   const selectable = draft.framework ? MODEL_SELECTABLE[draft.framework] : null;
@@ -115,10 +140,11 @@ function WizardForm({ native = null }) {
   const chosenDetect = detected.find((f) => f.id === draft.framework) ?? null;
   const action = native?.action?.configuration ? native.action : null;
   const blocked = native && (native.phase !== 'ready' || !native.permissions?.configureResource || ['pending', 'unknown', 'saved'].includes(action?.kind)
-    || (!native.editing && !choice) || (draft.ceilingKind === 'monthly' && !validNativeTokens(draft.tokens)));
+    || (!native.editing && !choice) || !validNativeTokens(draft.tokens) || !validEngagement || managers.length === 0 || managers.length > 64
+    || managers.some(m => !m.startsWith('@') || m.split(':').slice(1).join(':') !== engagement.serverName));
   const reload = async () => {
     const value = await refresh();
-    if (value?.editor?.resource.id === base.id && value.editing === native.editing) { setObservation(value.editor); setDraft(nativeDraft(value.editor.resource)); }
+    if (value?.editor?.resource.id === base.id && value.editing === native.editing) { setObservation(value.editor); setDraft(nativeDraft(value.editor, native.editing)); }
   };
   return (
     <>
@@ -150,15 +176,36 @@ function WizardForm({ native = null }) {
         ))}
       </ol>
 
-      {native && <section className="panel"><h3 className="sub">{t('nc.source')}</h3>
+      {native && <section className="panel" data-resource-engagement>
+        <h3>{t('nc.engagement')}</h3><p>{t('nc.engagementHelp')}</p>
+        {engagementError && <p role="alert">{engagementError}</p>}
+        {!engagementsLoaded && !engagementError && <p role="status">{t('nr.loading')}</p>}
+        {engagementsLoaded && !serverEngagements.length && <p>{t('nc.noEngagement')}</p>}
+        <label htmlFor="configuration-engagement">{t('se.choose')}</label>
+        <select id="configuration-engagement" value={draft.allocationId ?? draft.serverEngagementId} disabled={bindings.length === 1} onChange={e => {
+          const binding = bindings.find(b => b.id === e.target.value);
+          set(binding ? { allocationId: binding.id, expectedRevision: binding.revision, serverEngagementId: binding.serverEngagementId, tokens: binding.allocatedTokens, managers: binding.eligibleManagers.join('\n') }
+            : { serverEngagementId: e.target.value });
+        }}>
+          <option value="">{t('se.choose')}</option>
+          {bindings.length ? bindings.map(b => <option key={b.id} value={b.id}>{serverEngagements.find(e => e.id === b.serverEngagementId)?.serverName ?? b.serverEngagementId} · {b.id}</option>)
+            : serverEngagements.filter(e => e.state === 'verified').map(e => <option key={e.id} value={e.id}>{e.serverName} · {e.coordinatorMxid} · {e.id}</option>)}
+        </select>
+        {engagement && <p>{t('se.coordinator')} {engagement.coordinatorMxid}</p>}
+        {draft.serverEngagementId && engagementsLoaded && !validEngagement && <p role="alert">{t('nc.engagementUnavailable')}</p>}
+      </section>}
+      {native && <section className="panel" data-configuration-source>
+        {native.editing && <h3 className="sub">{t('nc.source')}</h3>}
         {!native.editing && <div className="field"><label htmlFor="configuration-source">{t('nc.source')}</label><SearchSelect
           id="configuration-source"
+          placeholder={t('nc.sourceSearch')}
           value={base.id}
           onChange={(event) => native.choose(event.target.value)}
           options={native.resources.map((r) => ({ value: r.id, label: [r.framework, r.model, r.reasoning].filter(Boolean).join(' · ') }))}
           outside={labelFor(base.id) ?? t('nr.outsidePage')}
           empty={t('nr.empty')}
-        /><div className="btn-row"><button className="btn" onClick={native.firstPage}>{t('nu.firstPage')}</button><button className="btn" disabled={!native.next_after} onClick={native.nextPage}>{t('nu.nextPage')}</button></div></div>}
+        /><p className="note">{t('nc.sourceHelp')}</p>
+        {(native.current_after || native.next_after) && <div className="btn-row"><button className="btn" disabled={!native.current_after} onClick={native.firstPage}>{t('nu.firstPage')}</button><button className="btn" disabled={!native.next_after} onClick={native.nextPage}>{t('nu.nextPage')}</button></div>}</div>}
         <dl className="kv"><dt>{t('wz.step.framework')}</dt><dd>{base.framework}</dd><dt>{t('col.provider')}</dt><dd>{base.provider ?? t('nu.unknown')}</dd><dt>{t('col.model')}</dt><dd>{base.model}</dd></dl>
         <TechnicalDetails><code>{base.id}</code></TechnicalDetails>
       </section>}
@@ -361,9 +408,10 @@ function WizardForm({ native = null }) {
             <span className="dim">{t('wz.presetNameHint')}</span>
           </div>
           </>}
-          {native && <div className="field"><label htmlFor="configuration-ceiling">{t('nc.ceilingChange')}</label><select id="configuration-ceiling" value={draft.ceilingKind} onChange={(event) => set({ ceilingKind: event.target.value })}>
-            {['preserve', 'clear', 'monthly'].map((kind) => <option key={kind} value={kind}>{t(`nc.ceiling.${kind}`)}</option>)}
-          </select><p>{t('nc.ceilingMeaning')}</p></div>}
+          {native && <div className="field"><label htmlFor="configuration-managers">{t('se.managers')}</label>
+            <textarea id="configuration-managers" value={draft.managers} onChange={e => set({ managers: e.target.value })} />
+            <p>{t('nc.managersHelp')}</p>
+          </div>}
           <div className={native ? "field" : "field-row"}>
             <label htmlFor="wz-tokens">{t('wz.monthlyTokens')}</label>
             <input
@@ -426,7 +474,7 @@ function WizardForm({ native = null }) {
             disabled={blocked}
             onClick={async () => {
               if (native) {
-                await native.configure(base, { profileChange: draft.profileKind === 'preserve' ? { kind: 'preserve' } : { kind: 'select', model: draft.model, reasoning: draft.reasoning }, ceilingChange: draft.ceilingKind === 'monthly' ? { kind: 'monthly', tokens: Number(draft.tokens) } : { kind: draft.ceilingKind } });
+                await native.configure(base, { profileChange: draft.profileKind === 'preserve' ? { kind: 'preserve' } : { kind: 'select', model: draft.model, reasoning: draft.reasoning }, ceilingChange: { kind: 'monthly', tokens: Number(draft.tokens) }, engagement: { serverEngagementId: draft.serverEngagementId, allocationId: draft.allocationId, expectedRevision: draft.expectedRevision, eligibleManagers: managers } });
                 return;
               }
               if (!live) return say('ok', t('wz.wouldCreate'));

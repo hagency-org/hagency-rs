@@ -64,6 +64,19 @@ fn native_setup_writes_a_runtime_serve_accepts() {
         home.join(".codex").to_str().unwrap()
     );
 
+    // Loading JSON alone does not construct the provisioning host. Exercise
+    // its actual custody boundary: managed homes must be outside service state.
+    let homes = hagency_store::agent_home::ManagedHomePlan::new(
+        written["home"]["root"].as_str().unwrap().into(),
+        Vec::new(),
+        written["home"]["task_client"].as_str().unwrap().into(),
+    )
+    .unwrap();
+    assert!(
+        homes.separate_from(&state).is_ok(),
+        "setup must keep managed agent homes disjoint from credential/SDK state"
+    );
+
     // A second run never replaces the file silently.
     let again = run(&home, &["--state-dir", state_arg, "--codex", codex_arg]);
     assert!(!again.status.success());

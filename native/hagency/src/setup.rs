@@ -113,7 +113,14 @@ pub fn configure(options: &Options) -> Result<Report, String> {
     };
     let signed_in = codex_home.join("auth.json").is_file();
 
-    let homes = state.join("agent-homes");
+    // The provisioning host refuses managed homes inside credential/SDK
+    // custody. Keep the default specific to this state directory, but disjoint.
+    let mut homes_name = state
+        .file_name()
+        .ok_or("state directory has no name")?
+        .to_os_string();
+    homes_name.push("-agent-homes");
+    let homes = state.with_file_name(homes_name);
     private::directory(&homes).map_err(|e| format!("agent-homes: {e}"))?;
     let task_client = std::env::current_exe()
         .and_then(|path| path.canonicalize())

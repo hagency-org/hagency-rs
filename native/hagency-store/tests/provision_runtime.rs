@@ -781,3 +781,63 @@ fn restarted_factories_list_only_agents_of_their_exact_registration() {
         scope.claim_warm().unwrap();
     }
 }
+
+#[test]
+fn native_provision_recovery_scope_is_inspection_only() {
+    for changed in [
+        "none",
+        "revoke",
+        "generation",
+        "payload",
+        "claimed",
+        "foreign",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = DomainRepository::open(&root.path().join("state")).unwrap();
+        let pool = resource("pool", "seat", 1000);
+        let effect = provision(&mut db, &pool);
+        db.observe_effect(&effect.id, effect.fence, &EffectOutcome::Unknown)
+            .unwrap();
+        let inspection = db
+            .inspect_provision_scope(&effect, &registration())
+            .unwrap();
+        assert!(db.provision_runtime_account(&inspection).is_err());
+        assert!(db.complete_original_provision(&inspection).is_err());
+        match changed {
+            "revoke" => {
+                db.revoke("revoke", &effect.engagement_id).unwrap();
+            }
+            "generation" => {
+                db.register(&Registration {
+                    generation: 2,
+                    ..registration()
+                })
+                .unwrap();
+            }
+            "payload" => {
+                rusqlite::Connection::open(root.path().join("state/domain.sqlite3")).unwrap().execute("UPDATE effects SET payload=json_set(payload,'$.runtimeName','changed') WHERE id=?1", [&effect.id]).unwrap();
+            }
+            "claimed" => {
+                inspection.claim_warm().unwrap();
+            }
+            "foreign" => {
+                let other = tempfile::tempdir().unwrap();
+                let mut foreign = DomainRepository::open(&other.path().join("state")).unwrap();
+                assert!(foreign.resume_inspected_provision(&inspection).is_err());
+            }
+            _ => {}
+        }
+        if changed == "none" || changed == "foreign" {
+            db.resume_inspected_provision(&inspection).unwrap();
+            let resumed = db.effect(&effect.id).unwrap();
+            assert_eq!(resumed.state, EffectState::Started);
+            assert_eq!(resumed.fence, effect.fence);
+            assert_eq!(resumed.payload, effect.payload);
+            assert!(db.resume_inspected_provision(&inspection).is_err());
+            db.validate_provision_account(&effect, &registration())
+                .unwrap();
+        } else {
+            assert!(db.resume_inspected_provision(&inspection).is_err());
+        }
+    }
+}

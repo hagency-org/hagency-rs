@@ -1,46 +1,50 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
-# Hagency user guide
+# Hagency quick start and user guide
 
-This guide shows you how to add AI agents to a Palpo Matrix server with
-Hagency and how to work with them in the Rinx Matrix client. Follow the steps
-in order the first time. Later sections cover everyday use and problems.
+Run local Codex agents in Palpo Matrix projects and work with them in Rinx.
+This guide follows the current server-engagement workflow: establish the
+connection, create resources, request a project, then request an agent.
 
 ## Terms used in this guide
 
-- **Hagency**: the service that runs AI agents and lends them to projects on a
+- **Hagency operator / resource owner**: runs Hagency on the Codex host and
+  decides which resources and budgets to offer. The resource owner's Matrix
+  account confirms server-connection requests.
+- **Palpo administrator**: approves installing the server engagement on the
   Matrix server.
-- **Palpo**: the Matrix server (homeserver) where your projects and accounts
-  live. Palpo has its own web admin pages.
-- **Rinx**: the Matrix chat app you use to talk to agents.
-- **Hagency console**: the Hagency web page where the operator sets up
-  Hagency, connects Palpo, manages resources and approves agent requests.
-- **Fleet**: one Hagency installation as a Palpo server sees it. Palpo reserves
-  a block of Matrix account names for the fleet, all starting with `hf_`, and
-  Hagency creates the fleet's agents under those names. One Hagency serves one
-  fleet.
-- **Resource**: a model, a reasoning effort and a monthly token ceiling that
-  Hagency offers to Palpo. Projects define agents on a published resource.
-- **Agent**: an AI worker that Hagency creates as a Matrix account on your
-  server.
-- **Owner**: the Matrix user who requested the agent for a project. The owner
-  receives the agent's DM and its approval cards.
-- **Guest**: anyone in a room with the agent who is not its owner, such as a
-  project member. Guests talk to the agent by @mentioning it.
-- **DM**: a private, encrypted chat between the agent and its owner.
-- **Approval room**: the project's private room where Hagency's approval bot
-  posts approval cards for the owner.
+- **Coordinator**: an existing Matrix account delegated to approve project,
+  agent and top-up requests for a server engagement. This is a human approval
+  role; it does not require a coordinator AI agent.
+- **Server engagement**: one authorized connection between Hagency and Palpo,
+  with its own coordinator and resources. Hagency can keep multiple engagements
+  separate. A **fleet** is the server-side registration and account namespace
+  for that connection, not another token pool.
+- **Resource**: a model, reasoning effort and token budget for one server
+  engagement. Several resources may use the same local Codex account.
+- **Source configuration**: an existing local configuration that supplies the
+  coding framework, provider and account when creating a resource.
+- **Project owner / agent owner**: the Matrix user who requests the project or
+  agent. The agent owner receives its DM and execution-approval cards.
+- **Agent engagement**: one agent's accepted allocation and runtime record,
+  shown under Hagency's **Engagements**. It differs from a server engagement.
+- **Project room**: the unencrypted room for project discussion and @mentions.
+- **DM**: the encrypted private chat between an agent and its owner.
+- **Approval room**: the separate encrypted room where the approval bot sends
+  protected-operation requests to the owner.
 
 ## Who does what
 
-| Role | What they do |
-| --- | --- |
-| Palpo administrator | Adds this Hagency to the Palpo server once. |
-| Hagency operator | Signs Codex in, runs Hagency, sets it up in the console (coding agent, Palpo connection, resources), approves agent requests. |
-| Owner | Creates the project and its approval room in Palpo, requests an agent, accepts the agent's DM, answers approval cards. |
-| Guests | Project members and anyone else in a room with the agent. They talk to it by @mentioning it in shared rooms. See [Work with an agent: owner and guest](#work-with-an-agent-owner-and-guest). |
+| Role | Where | Responsibility |
+| --- | --- | --- |
+| Hagency operator / resource owner | Hagency console; Rinx Palpo Inbox | Configure local Codex, request and verify connections, create resources and manage delegation. |
+| Palpo administrator | Rinx Palpo Inbox | Approve the server engagement. |
+| Coordinator | Rinx Palpo Inbox | Review project, agent and additional-token requests within the delegated resources. |
+| Project / agent owner | Rinx Palpo Resources, Projects and Agents; chat | Request a project and agent, accept the DM, send work and answer execution-approval cards. |
+| Guest | Project room | @mention the agent; protected operations still need the agent owner's approval. |
 
-One person can hold several roles.
+One person can hold several roles. Rinx uses the currently signed-in Matrix
+account; separate app profiles help when testing several roles on one computer.
 
 ## Before you start
 
@@ -49,35 +53,26 @@ You need:
 - A Palpo server reachable over `https`, for example
   `https://matrix.your-server.example`.
 - An administrator account on that Palpo server.
-- The `hagency` program. A release build has the console built in. The
-  current release, `nv0.1.0-rc.1`, is a pre-release on the project's
-  [GitHub Releases page](https://github.com/hagency-org/hagency-rs/releases);
-  its `.tar.gz` assets and `SHA256SUMS` are built by the release workflow and
-  attached by hand. Download `SHA256SUMS` and the archive for your platform,
-  `hagency-nv0.1.0-rc.1-<target>.tar.gz`, where `<target>` is
-  `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` or
-  `aarch64-unknown-linux-gnu` (for example
-  `hagency-nv0.1.0-rc.1-aarch64-apple-darwin.tar.gz` on an Apple silicon Mac).
-  Verify the archive with `shasum -a 256 -c --ignore-missing SHA256SUMS`
-  (Linux: `sha256sum -c --ignore-missing SHA256SUMS`), then extract it with
-  `tar -xzf`; it holds only the `hagency` binary. On macOS, the binary is not
-  code-signed, so run `xattr -d com.apple.quarantine hagency` once.
-  `./hagency --version` prints `0.1.0`; the `rc.1` suffix is only in the tag
-  and the asset names. The repository README explains
-  how to [get the binary](../../README.md#2-get-the-hagency-binary) in full,
-  including how to build it from source.
+- A Hagency build containing this workflow and a compatible Rinx build with
+  the bundled Palpo mini app. See [Get the binary](../../README.md#2-get-the-hagency-binary)
+  for build instructions. Older pre-release binaries may expose the earlier
+  manual JSON-import workflow instead.
+- Existing resource-owner and coordinator Matrix accounts on the selected
+  server. A coordinator is not created automatically by entering a name.
 - Codex installed on the machine that runs Hagency. You sign it in yourself
   in Step 1.
 - An owner account that has cross-signing set up in Rinx (for example, by
   setting up secure backup or verifying a session). Hagency waits until the
   owner has a cross-signing key before it creates an agent for them.
 
-Steps 1 to 5 are for the operator. Steps 6 to 8 involve the owner.
+Steps 1 to 3 are local operator setup. Step 4 involves the resource owner and
+administrator; Step 5 is resource configuration. Steps 6 to 8 involve the
+project owner and coordinator.
 
 ## Step 1: Sign in to Codex
 
-Fleet agents run Codex with the Codex sign-in on the machine that runs
-Hagency. They do not use accounts added in the console.
+Agents use the Codex sign-in on the machine that runs Hagency. Keep that
+machine and the Hagency service running while agents are working.
 
 On that machine, sign Codex in yourself:
 
@@ -151,113 +146,137 @@ but does not stop you.
 
 ## Step 4: Connect Palpo
 
-These Palpo pages belong to Palpo, not to Hagency, so their exact layout may
-differ in your Palpo version.
+1. **Operator:** in **Setup → Connect Palpo**, or on **Server engagements**,
+   click **New server engagement**.
+2. Fill in the HTTPS **Matrix server address**, resource owner's full Matrix
+   ID, coordinator's full Matrix ID, connection name and delegation duration.
+   For example, an account ID is `@owner:example.org`, not a display name and
+   not an HTTPS URL. Both accounts must already exist on the selected server.
+   Leave **Separate Palpo address** blank unless the administrator gives you a
+   different operations address.
+3. Click **Request connection**. Hagency saves the request and continues in the
+   background; the page shows who needs to act next.
+4. **Resource owner:** in Rinx, open **Mini apps → Palpo** (under **Discover** on mobile). Review
+   the host consent and click **Run** if this is the first use. In **Inbox**,
+   open the connection request and approve the one you initiated. The
+   **Open request in Rinx** link in Hagency goes to the same request.
+5. **Palpo administrator:** open that request in your own Rinx **Palpo → Inbox**
+   and approve the server setup.
+6. Hagency receives the approved configuration automatically. **No JSON file is
+   needed for a new connection requested this way.**
+7. **Resource owner:** open the approved request in your Rinx Inbox and click
+   **Verify connection** once. It becomes disabled while verifying. Wait for
+   **Connection verified** in Rinx and Hagency before creating resources.
 
-1. Sign in to the Palpo web admin as an administrator.
-2. Add a Hagency to the server. Name the Matrix account that will own it,
-   and choose the outbound connection mode.
-3. Sign in to the Palpo web admin with the account that owns this Hagency.
-4. Open **My Hagency access** and click **Download Hagency configuration**.
-   Palpo downloads a JSON file. Keep it private: it contains the fleet's
-   credentials.
-5. In the console, on the **Setup** page, go to **Connect Palpo**.
-6. Under **Configuration file**, choose the JSON file. The console shows
-   "Fleet on *your server*:" and the fleet ID.
-7. Under **Matrix address**, enter your server's Matrix address, for example
-   `https://matrix.your-server.example`. It must use `https`.
-8. Click **Connect**. The console shows "Connected to *your server*." No
-   restart is needed.
-9. Go back to the Palpo web admin and click
-   **Verify connection & create reception**. When Palpo reports success,
-   projects on the server can request agents.
+Hagency creates the necessary service accounts; you do not create a separate
+coordinator bot or connect a project-side server. Each server engagement has
+its own credentials, delegation and resources.
 
-Adding a Hagency needs an administrator because it reserves a block of
-account names for the fleet. After this step, nobody needs administrator
-rights for daily use.
+To change the coordinator or expiry, use **Server engagements → Change
+delegation**. **Cancel** closes the unsaved form. Suspending or revoking the
+delegation stops new authorized allocations; it does not erase existing agents,
+reservations or history. Revocation requires a new association if you later
+want to reconnect. Do not revoke a working engagement just to add a resource.
 
-The same import is also on **Project sides**, in the panel
-**Connect a Palpo project server**.
+## Step 5: Create a resource
 
-The fleet runs without a coordinator agent. Hagency creates the agents and
-the approval bot itself, and you will not see a "Hagency coordinator" DM.
+The wizard needs an existing local **Source configuration**. If the list is
+empty on a fresh installation, the operator must first create the local Codex
+source with the [operator API](../../README.md#create-a-resource-with-the-operator-api).
+**Setup** currently prepares the runtime but does not seed that first source;
+opening Setup again does not create one. This is a current onboarding gap.
 
-One Hagency connects to one Palpo fleet. Importing a second fleet is refused
-with "Another Palpo fleet is already connected to this Hagency."
+1. Open **My resources → New resource configuration**. The link in Setup opens
+   the same wizard.
+2. Select the verified **Server engagement**.
+3. Under **Source configuration**, choose the local Codex configuration. The
+   optional search filters framework, model or reasoning level. It does not
+   ask for an agent, project or role. Paging controls appear only when more
+   source configurations exist.
+4. Choose a **Model** and **Reasoning** level from the available qualified
+   choices.
+5. On **Budget**, enter the monthly token budget and **Eligible Matrix project
+   managers**. Use full user IDs on this server, separated by spaces or newlines,
+   for example:
 
-## Step 5: Offer a resource
+   ```text
+   @project-owner:example.org
+   @another-manager:example.org
+   ```
 
-1. On the **Setup** page, go to **Offer a resource**. This step needs
-   Step 3.
-2. Under **Model**, choose a model and reasoning effort. The list holds only
-   the pairs Hagency has qualified. For Codex that is `gpt-5.6-sol` with
-   `low`, `medium` or `high` reasoning.
-3. Under **Monthly token ceiling**, keep 20,000,000 or type another whole
-   number.
-4. Click **Offer to Palpo**. The page shows "Offered. Project owners can now
-   request agents on this resource."
+   This list controls who may request a project on the resource; it is not a
+   project-room member list. Include the coordinator's ID only if that account
+   should also be eligible to request projects.
+6. Click **Create resource**. Its creation and engagement allocation are saved
+   together. Publication to Palpo is queued; wait until it appears in Rinx's
+   **Palpo → Resources** under an eligible account.
 
-To offer another model or reasoning effort, repeat these steps.
+One server engagement can have multiple resources. Repeat the same wizard to
+add another model or budget. There is no separate allocation dialog or second
+engagement token pool to fill afterward.
 
-Manage your resources on **My resources**. Each row shows a resource's
-model, its monthly token ceiling, and whether it is **Included** (published
-to Palpo) or **Withdrawn**.
+In **My resources**, use **Edit configuration** to change a resource or
+**Withdraw from native catalog** to stop offering it. In-use resources may
+refuse model changes; the budget cannot be reduced below consumed or reserved
+tokens. Displayed budgets and shared-account declarations are allocation
+facts, not measured usage or guaranteed provider capacity. **Unknown** account
+quota does not mean zero.
 
-- To change a resource, click **Edit configuration** on its row. Choose the
-  model and the reasoning effort, set the **Monthly token ceiling**, and
-  click **Save configuration**. A resource cannot be changed while an agent
-  is reserved or active on it.
-- To stop offering a resource, click **Withdraw from native catalog**.
-  **Include in native catalog** offers it again.
-- Do not use **Managed accounts** or **Enroll resource** for a fleet. A
-  resource made there is bound to a managed account, and fleet agents cannot
-  run on it. With no resources, **My resources** points you to **Setup**.
+## Step 6: Request a project and an agent
 
-Hagency sends published resources to Palpo every 15 seconds. Owners choose
-from them when they request an agent.
+1. **Project owner:** in Rinx's **Palpo → Resources**, choose a resource and
+   click **Request project here**. Enter the project name and purpose.
+2. Leave the room choice empty to create a new project room, or click
+   **Choose an existing room**. An eligible existing room is private
+   (invite-only), unencrypted, not a Space, and created by your account.
+   Submitting invites the engagement's representative to that room. The server
+   checks the room again when processing the request.
+3. Submit. **Coordinator:** approve or reject the project in **Palpo → Inbox**.
+   **Owner:** wait for project setup to complete in **Projects**. Project
+   approval grants access to the selected resource; it does not reserve an
+   agent's token allocation.
+4. **Owner:** click **Request agent** on the ready project. Choose the resource
+   and role; enter the agent name, initial tokens and daily rate. Use the name
+   rules shown by the form, then submit.
+5. **Coordinator:** open the agent request in your Inbox, review the requested
+   allocation and approve or reject it. Hagency validates the delivered decision and current capacity.
+6. Follow the request under **Agents** or **Open latest result**. Approval and
+   execution are separate:
 
-The repository README describes the command-line alternatives, including the
-[operator API](../../README.md#create-a-resource-with-the-operator-api) for
-creating a resource.
+   | Execution | Meaning |
+   | --- | --- |
+   | `pending` | Hagency has not finished accepting the decision. |
+   | `provisioning` | The allocation was accepted; Matrix and runtime setup are in progress. |
+   | `ready` | The runtime is ready for chat. |
+   | `allocation_refused` | Hagency could not accept the allocation; inspect the stated reason. |
+   | `provisioning_failed` / `provisioning_unknown` | Setup failed or its outcome is uncertain; the operator must inspect the original attempt. |
+   | `unavailable` | The agent exists, but its runtime or Matrix connection needs attention. |
 
-## Step 6: Request and approve an agent
-
-1. **Owner:** in Palpo, create or register your project with
-   **Create project and approval room**. Then define an agent for the
-   project: an agent name, one published resource, a role, the tokens you
-   request and a daily rate. These are Palpo's pages, outside Hagency, so
-   their layout may differ in your Palpo version.
-2. **Operator:** in the console, open **Engagements**. On the **Requests**
-   tab, the request appears under **Pending verdicts**, with its candidate
-   resource and the tokens that resource has left.
-3. In **Tokens**, keep the requested amount or type another whole number.
-   **All remaining** fills in everything the resource can still give.
-4. Click **Approve**. To turn the request down, click **Reject** and then
-   **Confirm**.
-
-After approval, Hagency creates the agent. The agent joins the project room
-and invites the owner to a new DM.
+The project room is the shared place for discussion and agent @mentions. It is
+not the agent's private workspace or approval room. Agent DMs and approval rooms
+are encrypted separately. Agents do not work in encrypted group rooms shared
+with other people.
 
 ## Step 7: Accept the DM and talk to the agent
 
-1. **Owner:** in Rinx, accept the invitation to the agent's DM. The agent
-   waits, with no time limit, until you join. If Hagency restarts before you
-   join, see [Troubleshooting](#troubleshooting).
-2. Send a message in the DM. In the DM, the agent answers every message from
-   its owner. The DM is for you and the agent only; if anyone else joins, the
-   agent stops answering there.
-3. In the project room, any member can @mention the agent to ask it
-   something. The agent answers in the thread of that message. Keep
-   follow-ups in the same thread.
+1. **Owner:** accept the agent's DM invitation in Rinx when it appears. Watch
+   the execution status until it is **ready**; seeing an account or invitation
+   alone does not prove the runtime has started.
+2. Send a short message such as “Reply with ready.” **No @mention is needed in
+   the owner DM, including the first message.** Do not add other people to it.
+3. In the project room, @mention the agent to give it work. Keep follow-ups in
+   the same thread. A safe first test is a short reply that requires no file
+   changes or external actions.
+4. When testing protected operations, watch the separate owner approval room.
 
 ## Step 8: Approve agent actions
 
 Some actions, such as running certain commands, need the owner's approval.
 
-The approval room is the private room the owner created in Palpo with
-**Create project and approval room** in Step 6. Palpo invites Hagency's
-approval bot to it, and Hagency accepts an agent request only after the room
-holds exactly the owner and the approval bot.
+Project setup creates the private approval room and invites Hagency's approval
+bot. Hagency verifies its owner and membership before accepting agent work.
+Resource/project approvals in the Palpo Inbox and these runtime-operation
+approvals are different decisions.
 
 1. When the agent needs approval, it posts "Agent *name* is waiting for
    approval from its owner." in the project room.
@@ -293,7 +312,7 @@ joined.
 | Invite the agent to another room | The agent accepts on its own | The operator accepts or declines it in the console |
 | Approve the agent's actions | Yes, with the cards in the approval room | No. Guests see "Agent *name* is waiting for approval from its owner." and wait |
 | Tokens | The work of everyone, guests included, spends the owner's allocation | Spends the owner's allocation |
-| Add tokens or end the agent's work | Asks the operator, who does it in the console (**Add tokens**, **Retire**) | No |
+| Add tokens or end the agent's work | Uses authorized controls in Rinx **Palpo → Agents**; top-ups require coordinator approval | No |
 
 ### As the owner
 
@@ -306,7 +325,7 @@ joined.
    room with other people, turn encryption off when you create the room.
 4. Watch your approval room. Every action that needs approval, whoever asked
    for it, comes to you as a card there. Until you answer, the agent waits.
-5. When the agent pauses because its tokens ran out, ask the operator for more
+5. When the agent pauses because its tokens ran out, request more in Rinx
    (see [Manage tokens](#manage-tokens)).
 
 ### As a guest
@@ -365,23 +384,22 @@ the owner's approval room, never into the shared room.
 
 ## Manage tokens
 
-When the operator approves a request, they set the agent's token allocation.
+A coordinator's approval accepts the requested allocation, subject to Hagency's
+capacity checks. Runtime work consumes that agent allocation. If it runs out,
+the agent pauses.
 
-When the agent uses up its allocation, it pauses and posts "Paused: used N of
-M tokens. The owner can add tokens in the Hagency console." No work is
-dropped. Only the operator can open the console, so the owner asks the
-operator to add tokens.
+1. **Owner:** in Rinx's **Palpo → Agents**, click **Request more tokens** on the
+   agent, enter the additional amount, and submit.
+2. **Coordinator:** review the top-up in the Palpo Inbox.
+3. Wait for the runtime result. A recorded approval is not proof that Hagency
+   has accepted the additional allocation yet.
 
-To add tokens:
-
-1. In the console, open **Engagements**.
-2. On the agent's row, click **Add tokens**.
-3. Enter an amount, or click **All remaining**, and click **Add**.
-
-The agent resumes and posts "Resumed: N tokens available."
-
-To end an agent's work for a project, click **Retire** on its row and then
-**Confirm**.
+Authorized agent controls also appear here: **Rename agent**, **Pause agent**,
+**Resume agent** and **Remove agent**. Use **Open latest result** to check the
+runtime's response. Removal keeps chat history and completes only after
+verified runtime and Matrix cleanup. Unsettled usage can retain a reservation.
+Hagency's **Engagements** and **Usage** pages provide the operator's detailed
+runtime and accounting view.
 
 ## Encryption and your devices
 
@@ -396,24 +414,35 @@ Agent DMs and approval rooms are end-to-end encrypted.
 
 ## Troubleshooting
 
-**The agent never appears, or never sends a DM.**
-- Check that the owner accepted the DM invitation. The agent waits until the
-  owner joins.
-- If Hagency restarted while the agent was waiting for the owner to join the
-  DM, Hagency never finishes creating that agent, and the console has no
-  action to resume it. The operator opens **Engagements**, clicks **Retire**
-  on that agent's row and then **Confirm**. The owner then defines the agent
-  again in Palpo, and the operator approves the new request.
-- Check that the owner has cross-signing set up. Hagency waits until it can
-  read the owner's cross-signing key.
-- Check that you clicked **Verify connection & create reception** in Palpo
-  after connecting.
-- Check the Hagency log line "fleet service stage". It shows what the fleet
-  is waiting for: `awaiting_runtime_config` (Hagency is not configured for
-  Codex yet: finish **Setup → Coding agents**, Step 3) or
-  `awaiting_reception` (Palpo has not verified the connection yet). The
-  service's log is `~/Library/Logs/Hagency/hagency.log` on macOS, and
-  `journalctl --user -u hagency` shows it on Linux.
+**The Inbox is empty.**
+Check the signed-in Matrix account and the Inbox filter. Connection requests
+first need the resource owner, then the administrator; project and agent requests
+need the designated coordinator. Requests already decided may be under the
+waiting or completed filter. Reading a notification does not approve a request.
+
+**The agent is approved but not ready, or never sends a DM.**
+
+- Read **Execution** and the explanation under **Open latest result**. A
+  business approval does not by itself start Codex.
+- Accept the owner DM invitation when it appears and ensure the owner has
+  cross-signing set up in Rinx.
+- Confirm the server engagement says **Connection verified** and local Codex
+  is configured and signed in.
+- For `provisioning_unknown`, retain the original request and ask the operator
+  to inspect its effect, Matrix state and logs before retrying. An account or
+  room may already exist and its allocation may still be reserved. Do not
+  create duplicates or revoke the server engagement as a setup workaround.
+- Check Hagency's “fleet service stage” log for `awaiting_runtime_config`
+  (finish **Setup → Coding agents**) or `awaiting_reception` (finish connection
+  verification). On macOS the service log is
+  `~/Library/Logs/Hagency/hagency.log`; on Linux use
+  `journalctl --user -u hagency`.
+
+**The first DM needs an @mention.**
+It should not. Confirm the execution state is ready and that this is the
+agent's owner DM. If an ordinary message still gets no response, ask the
+operator to inspect Matrix key exchange and runtime intake rather than treating
+@mentions as a DM requirement.
 
 **The log shows `refused_config`, or Setup says "The coding agent changed".**
 Codex was updated, and Hagency's configuration still names the old Codex
@@ -435,8 +464,8 @@ or `~/.codex`). If you set Hagency up with `hagency setup --codex-home` or
 then restart Hagency.
 
 **The Approve button is greyed out.**
-No published resource can serve the request. Check **My resources** in
-Step 5.
+Check the request's current assignee, delegation expiry, resource availability
+and stated refusal. Buttons depend on the signed-in account's authority.
 
 **The agent ignores my messages in a group room.**
 In a room with other people, the agent answers only when you @mention it.
@@ -453,23 +482,26 @@ Your current session is not verified. Verify it, or answer the card from a
 verified session.
 
 **The agent stopped and posted "Paused".**
-Its token allocation is used up. Add tokens in **Engagements**.
+Its token allocation is used up. Use **Palpo → Agents → Request more tokens**.
 
 **Links in messages show no preview.**
 Link previews are made by the homeserver, not by Hagency. Ask the Palpo
 administrator to allow previews for the sites you need.
 
-**The console refuses the configuration file.**
-- "This is not the Hagency configuration downloaded from Palpo.": choose the
-  file from **Download Hagency configuration**.
-- "this file has no outbound connection and will be refused": add the Hagency
-  in Palpo again with the outbound connection.
-- "Another Palpo fleet is already connected to this Hagency.": one Hagency
-  serves one fleet.
+**Hagency is waiting for connection verification.**
+Automatic configuration delivery follows owner confirmation and administrator
+approval. In the resource owner's Rinx Inbox, open that same approved request
+and click **Verify connection** once. Wait while its button says verification
+is in progress. Downloading JSON is not part of this new-connection flow.
+
+**There is no source configuration.**
+This is the first-resource onboarding gap described in Step 5. Create the local
+source through the documented operator API; then return to the resource wizard.
 
 ## Known limitations
 
-- **A restart while an agent waits for its owner strands that agent.** See
+- **Uncertain setup is not automatically safe to repeat.** The operator must
+  inspect the original attempt before retrying an uncertain write. See
   [Troubleshooting](#troubleshooting).
 - **A changed owner key cannot be accepted in the console.** Hagency trusts
   the cross-signing key it first sees for an owner. If the owner later resets
@@ -479,6 +511,5 @@ administrator to allow previews for the sites you need.
 - **No work in encrypted rooms shared with other people.** The agent stays in
   such a room but does not work there (see
   [How the agent behaves in the room](#how-the-agent-behaves-in-the-room)).
-- **One homeserver only.** Agents work only with people and rooms on the
-  fleet's own Palpo server. Users and rooms on other Matrix servers cannot
-  work with them.
+- **Each agent stays within its server engagement.** Multiple server
+  engagements do not grant an agent access to another homeserver's users or rooms.

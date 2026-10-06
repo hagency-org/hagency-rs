@@ -479,6 +479,10 @@ impl Authority {
                 input.ceiling,
                 deadline,
             )
+            .and_then(|command| match input.engagement {
+                Some(change) => command.with_engagement(change),
+                None => Ok(command),
+            })
             .map_err(|e| match e {
                 hagency_store::Error::Busy => Error::Busy,
                 hagency_store::Error::LocalAuthority => Error::Unauthorized,
@@ -625,6 +629,7 @@ mod tests {
             create: false,
             profile: hagency_store::ProfileChange::Preserve {},
             ceiling: hagency_store::CeilingChange::Preserve {},
+            engagement: None,
         };
         let configuration = authority
             .configuration(&session, input(), now + Duration::from_secs(2))

@@ -1020,7 +1020,9 @@ impl Peer {
                     (200, json!({"room_id":PROJECT}))
                 }
             } else if url.path().ends_with("/sync") {
-                assert!(!rep && !human && self.owner && self.joined);
+                // Provisioning reserves the inbox cursor before the owner
+                // invitation, so the first DM cannot precede that cursor.
+                assert!(!rep && !human && self.created && self.joined);
                 (
                     200,
                     json!({"next_batch":"factory-agent-active","rooms":{"join":{}},"to_device":{"events":[]}}),

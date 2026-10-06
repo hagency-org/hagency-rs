@@ -372,6 +372,12 @@ async fn prepare_owners(
         .await
         .map_err(|_| Failure::OutcomeUnknown)?;
     engagements.extend(
+        domain
+            .uncertain_provisions(registration.fleet_id.clone())
+            .await
+            .map_err(|_| Failure::OutcomeUnknown)?,
+    );
+    engagements.extend(
         running
             .host
             .awaiting_owner_engagements()

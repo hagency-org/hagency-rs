@@ -35,11 +35,13 @@ existing workflow until reconciled.
    App Service credentials, transport custody bindings, SDK stores and workers.
    Replacing one engagement closes its original workers before replacing them;
    it does not replace another engagement on the same server.
-3. The owner reserves a bounded part of an owned resource for an engagement.
-   Only its eligible project managers may request use. The contribution is
-   charged once at the parent; agent allocations draw from that reserved pool.
-   Increasing a contribution is allowed within current parent headroom. An
-   agent approval or token top-up never enlarges its contribution implicitly.
+3. The owner creates an engagement resource through **New resource configuration**.
+   The same form selects its server engagement, account/runtime profile, model,
+   reasoning, token budget and eligible project managers. One engagement may have
+   multiple resources. There is one configured budget per resource, with no
+   separately configured parent pool or second allocation step. Account limits
+   constrain the combined commitments. Agent approvals and top-ups consume this
+   resource budget and never enlarge it implicitly.
 4. A project command must come from its engagement coordinator. An agent or
    top-up command may come from that coordinator or the resource owner. Palpo
    authenticates the human and emits the exact command; Hagency validates its
@@ -73,7 +75,58 @@ It uses the same pinned Rust contract; the Hagency binary does not invoke a
 JavaScript backend. Build and test scripts ending in `.mjs` remain development
 tools. Existing web presentation assets are not execution or approval authority.
 
-## Native owner association setup
+## 2026-10-05: one resource configuration and budget
+
+This amendment replaces the previous owned-pool → engagement-sub-pool setup.
+`POST /console/api/resources` and `PATCH /console/api/resources/{id}/configuration`
+accept the engagement binding with the profile and monthly budget. The domain
+writer commits the configuration, budget and durable publication atomically.
+Invalid eligibility, stale revisions, unavailable engagements or account capacity
+failures roll back the entire change. A cloned configuration shares the actual
+account; the source configuration's ceiling is not another capacity constraint.
+
+The existing `resourceAllocationId` remains the protocol identity used by project
+and agent references, not an extra user-managed pool. Existing IDs, reservations,
+usage and settlement history stay intact. Editing a legacy configuration shared
+by several grants selects an existing binding; its compatibility ceiling is
+computed from their budgets. New configurations each create one binding. The
+legacy contribution API remains available for compatibility, but the portal uses
+only the unified configuration form. Installations with no coordinator engagements
+retain their legacy catalog publication and usage view until migration. The
+coordinator resource budget view shows usable tokens
+within the engagement rather than the zero unreserved parent headroom.
+
+## 2026-10-05: desktop association setup without token files
+
+**Server engagements → New server engagement** is the primary entry. Setup uses
+that same control. The owner supplies the Matrix server address, existing owner
+and coordinator Matrix IDs, a connection name and delegation duration. The Palpo
+operations address is optional when the homeserver proxies its native endpoints.
+
+The native host persists a frozen intent, runtime identity and random private
+pairing capability before contacting Palpo. A staged request has no Matrix
+identity authority: only the named owner can see and confirm it in Rinx, using
+Rinx's existing authenticated session. Confirmation authorizes delivery to the
+requesting runtime, then the designated administrator reviews the next revision.
+The existing admin association approval remains the only server approval.
+
+After appservice installation, the native host fetches and validates the bound
+profile and imports it through the existing live importer. Pairing capabilities
+and downloaded credentials never enter browser responses, Splash or Matrix
+notices. The owner uses **Verify connection** in the Rinx request to authorize
+its private connection room; only the existing authenticated probe completes
+verification. Import alone is not connection success.
+
+The worker continues with the browser closed and resumes from private state on
+startup. Lost replies replay the same intent and capability. Owner confirmation
+expires after 30 minutes; bootstrap retrieval expires within seven days or at the
+delegation deadline. Changed registration generations or delegation revisions,
+suspension and revocation fence bootstrap profile retrieval. Existing CLI and
+native file imports remain available for legacy recovery; neither is required
+for this desktop flow. Setup links to **New resource configuration**, removing
+its separate resource-offer form.
+
+## Legacy native owner association setup
 
 An initialized installation can initiate an association with the owner's existing
 Matrix account. The token stays in an owner-private file; it is not stored in the
@@ -117,7 +170,9 @@ Passing domain, HTTP and transport tests does not establish those user-facing
 acceptance results. Existing production state and services are unchanged.
 
 The native portal now has Server engagements and Agent allocations pages.
-Resources and Server engagements edit the same contribution record and revision.
+Resources has the single **New resource configuration** entry. Server engagements
+shows the configured resources and links edits to that same configuration form;
+it has no allocation button or allocation dialog.
 The delivered-decision registry precedes Matrix admission, preserves refusals and
 replays after restart, and exposes no private agent instructions. The Chrome
 acceptance test operates the actual native console, edits one allocation twice,

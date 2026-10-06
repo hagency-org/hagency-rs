@@ -314,7 +314,7 @@ impl DomainRepository {
         expected: &super::Effect,
         registration: &hagency_core::authority::Registration,
     ) -> Result<(), Error> {
-        self.validate_provision_account_at(expected, registration, false)
+        self.validate_provision_account_at(expected, registration, super::EffectState::Started)
     }
     /// Original acknowledged owner after a separately observed Applied. This
     /// read cannot complete provisioning or reconstruct a lost Started claim.
@@ -323,25 +323,38 @@ impl DomainRepository {
         expected: &super::Effect,
         registration: &hagency_core::authority::Registration,
     ) -> Result<(), Error> {
-        self.validate_provision_account_at(expected, registration, true)
+        self.validate_provision_account_at(expected, registration, super::EffectState::Complete)
+    }
+    /// Inspection only: no runtime or transport may ever have been admitted.
+    /// The Matrix host must additionally inspect the original encrypted account,
+    /// pre-invite rooms and completed SDK ledger before resuming this effect.
+    pub fn validate_recoverable_provision(
+        &mut self,
+        expected: &super::Effect,
+        registration: &hagency_core::authority::Registration,
+    ) -> Result<(), Error> {
+        self.validate_provision_account_at(expected, registration, super::EffectState::Uncertain)?;
+        let used: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runner_sessions WHERE engagement_id=?1) OR EXISTS(SELECT 1 FROM matrix_transports WHERE engagement_id=?1)",
+            [&expected.engagement_id], |row| row.get(0))?;
+        if used || self.warm_scopes.contains_key(&expected.id) {
+            return Err(Error::State);
+        }
+        Ok(())
     }
     fn validate_provision_account_at(
         &mut self,
         expected: &super::Effect,
         registration: &hagency_core::authority::Registration,
-        active: bool,
+        required: super::EffectState,
     ) -> Result<(), Error> {
+        let active = required == super::EffectState::Complete;
         identifier(&expected.id, 128)?;
         registration.validate()?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let actual = super::read_effect(&tx, &expected.id)?;
-        let required = if active {
-            super::EffectState::Complete
-        } else {
-            super::EffectState::Started
-        };
         if expected.kind != "provision"
             || expected.state != super::EffectState::Started
             || actual.kind != expected.kind

@@ -465,6 +465,9 @@ impl DomainRepository {
         }
         Ok(result)
     }
+    pub fn resource_engagements(&self, resource: &str) -> Result<Vec<ResourceGrant>, Error> {
+        resource_grants(&self.db, resource)
+    }
     pub fn coordinator_agent_usage(&self, id: &str) -> Result<Value, Error> {
         let quota = self.quota_status(id)?;
         let observed:Option<u64>=self.db.query_row("SELECT MIN(observed_at) FROM usage_sources WHERE engagement_id=?1 AND observed_at IS NOT NULL",[id],|r|r.get(0))?;
@@ -786,76 +789,7 @@ impl DomainRepository {
             Ok::<_, Error>(())
         };
         check()?;
-        let authority = current(&tx, grant.server_engagement_id.as_str(), now)?;
-        bounded_row(&tx, "coordinator_resources", "id", grant.id.as_str(), 2000)?;
-        if grant.eligible_managers.len() > 64
-            || grant
-                .eligible_managers
-                .iter()
-                .any(|u| !u.belongs_to(&authority.server))
-        {
-            return Err(Error::LocalAuthority);
-        }
-        let resource = read_resource(&tx, &grant.resource_id)?;
-        self.accounts.check_resource(&tx, &resource)?;
-        let (granularity, key) = period(&resource, now)?;
-        let old: Option<StoredResourceGrant> = tx.query_row("SELECT engagement_id,resource_id,preset_id,seat_id,revision,allocated_tokens,period,period_key,managers FROM coordinator_resources WHERE id=?1", [grant.id.as_str()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional()?;
-        let amount = u64::from(grant.allocated_tokens);
-        let managers = serialize(&grant.eligible_managers)?;
-        let mut before = 0;
-        if let Some((
-            fleet,
-            parent,
-            preset,
-            seat,
-            revision,
-            allocated,
-            period,
-            period_key,
-            previous_managers,
-        )) = old
-        {
-            if fleet != grant.server_engagement_id.as_str()
-                || parent != grant.resource_id
-                || preset != resource.preset_id
-                || seat != resource.seat_id
-                || period != granularity
-                || period_key != key
-            {
-                return Err(Error::Generation);
-            }
-            if u64::from(grant.revision) == revision
-                && amount == allocated
-                && managers == previous_managers
-            {
-                return Ok(());
-            }
-            if u64::from(grant.revision) <= revision {
-                return Err(Error::Conflict);
-            }
-            before = allocated;
-        }
-        if amount < held(&tx, grant.id.as_str())?.0 {
-            return Err(Error::InsufficientCapacity);
-        }
-        if amount > before {
-            check_grant(
-                &tx,
-                &resource,
-                "engagement contribution",
-                amount - before,
-                now,
-            )?;
-        }
-        tx.execute("INSERT INTO coordinator_resources(id,engagement_id,resource_id,preset_id,seat_id,revision,allocated_tokens,period,period_key,managers) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,allocated_tokens=excluded.allocated_tokens,managers=excluded.managers", params![grant.id.as_str(),grant.server_engagement_id.as_str(),grant.resource_id,resource.preset_id,resource.seat_id,u64::from(grant.revision),amount,granularity,key,managers])?;
-        publish(
-            &tx,
-            grant.server_engagement_id.as_str(),
-            &format!("resource_{}", grant.id.as_str()),
-            json!({"kind":"resource","resource":{
-            "id":grant.id,"serverEngagementId":grant.server_engagement_id,"revision":grant.revision,"allocatedTokens":grant.allocated_tokens,"eligibleManagers":grant.eligible_managers
-        },"resourceId":grant.resource_id,"period":granularity,"periodKey":key}),
-        )?;
+        put_resource_transaction(&tx, &self.accounts, grant, now)?;
         check()?;
         tx.commit()?;
         check().map_err(|_| Error::OutcomeUnknown)
@@ -1113,4 +1047,104 @@ impl DomainRepository {
             Some(command),
         )
     }
+}
+
+/// Shared by the legacy contribution command and atomic resource configuration.
+pub(super) fn put_resource_transaction(
+    tx: &Transaction<'_>,
+    accounts: &accounts::Registry,
+    grant: &ResourceGrant,
+    now: u64,
+) -> Result<(), Error> {
+    let authority = current(tx, grant.server_engagement_id.as_str(), now)?;
+    bounded_row(tx, "coordinator_resources", "id", grant.id.as_str(), 2000)?;
+    if grant.eligible_managers.len() > 64
+        || grant
+            .eligible_managers
+            .iter()
+            .any(|u| !u.belongs_to(&authority.server))
+    {
+        return Err(Error::LocalAuthority);
+    }
+    let resource = read_resource(tx, &grant.resource_id)?;
+    accounts.check_resource(tx, &resource)?;
+    let (granularity, key) = period(&resource, now)?;
+    let old: Option<StoredResourceGrant> = tx.query_row("SELECT engagement_id,resource_id,preset_id,seat_id,revision,allocated_tokens,period,period_key,managers FROM coordinator_resources WHERE id=?1", [grant.id.as_str()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional()?;
+    let amount = u64::from(grant.allocated_tokens);
+    let managers = serialize(&grant.eligible_managers)?;
+    let mut before = 0;
+    if let Some((
+        fleet,
+        parent,
+        preset,
+        seat,
+        revision,
+        allocated,
+        period,
+        period_key,
+        previous_managers,
+    )) = old
+    {
+        if fleet != grant.server_engagement_id.as_str()
+            || parent != grant.resource_id
+            || preset != resource.preset_id
+            || seat != resource.seat_id
+            || period != granularity
+            || period_key != key
+        {
+            return Err(Error::Generation);
+        }
+        if u64::from(grant.revision) == revision
+            && amount == allocated
+            && managers == previous_managers
+        {
+            return Ok(());
+        }
+        if u64::from(grant.revision) <= revision {
+            return Err(Error::Conflict);
+        }
+        before = allocated;
+    }
+    if amount < held(tx, grant.id.as_str())?.0 {
+        return Err(Error::InsufficientCapacity);
+    }
+    if amount > before {
+        check_grant(
+            tx,
+            &resource,
+            "engagement contribution",
+            amount - before,
+            now,
+        )?;
+    }
+    tx.execute("INSERT INTO coordinator_resources(id,engagement_id,resource_id,preset_id,seat_id,revision,allocated_tokens,period,period_key,managers) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,allocated_tokens=excluded.allocated_tokens,managers=excluded.managers", params![grant.id.as_str(),grant.server_engagement_id.as_str(),grant.resource_id,resource.preset_id,resource.seat_id,u64::from(grant.revision),amount,granularity,key,managers])?;
+    publish(
+        tx,
+        grant.server_engagement_id.as_str(),
+        &format!("resource_{}", grant.id.as_str()),
+        json!({"kind":"resource","resource":{
+            "id":grant.id,"serverEngagementId":grant.server_engagement_id,"revision":grant.revision,"allocatedTokens":grant.allocated_tokens,"eligibleManagers":grant.eligible_managers
+        },"resourceId":grant.resource_id,"period":granularity,"periodKey":key}),
+    )?;
+    Ok(())
+}
+
+pub(super) fn resource_grants(
+    db: &Connection,
+    resource: &str,
+) -> Result<Vec<ResourceGrant>, Error> {
+    let mut query = db.prepare("SELECT id,engagement_id,revision,allocated_tokens,managers FROM coordinator_resources WHERE resource_id=?1 ORDER BY id")?;
+    let rows = query.query_map([resource], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, u64>(2)?,
+            r.get::<_, u64>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (id, engagement, revision, tokens, managers) = row?;
+        serde_json::from_value(json!({"id":id,"serverEngagementId":engagement,"resourceId":resource,"revision":revision,"allocatedTokens":tokens,"eligibleManagers":serde_json::from_str::<Value>(&managers)?})).map_err(Into::into)
+    }).collect()
 }

@@ -10,6 +10,8 @@ mod alerts;
 mod approval_bindings;
 #[path = "console/approvals.rs"]
 mod approvals;
+#[path = "console/associations.rs"]
+mod associations;
 #[path = "console/browser.rs"]
 #[cfg(feature = "native-console-browser")]
 mod browser;

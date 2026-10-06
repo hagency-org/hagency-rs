@@ -201,121 +201,173 @@ impl Inner {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<(), Error> {
-        checkpoint(cancel, deadline)?;
-        // A new provisioning SDK must not be created until the returned token
-        // and the actual pre-activation room/writer scope have been observed.
-        if let Scope::Provision(scope) = scope {
-            scope.current(self, cancel).await?;
+        self.enroll_bounded(scope, cancel, Some(deadline)).await
+    }
+
+    /// A provision is a finite sequence of durable steps. Give each step its
+    /// own SDK budget; key publication must not consume the first-sync budget.
+    pub(crate) async fn enroll_provision(
+        &self,
+        scope: &provisioning::Scope,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        self.enroll_bounded(Scope::Provision(scope), cancel, None)
+            .await
+    }
+
+    async fn enroll_bounded(
+        &self,
+        scope: Scope<'_>,
+        cancel: &CancellationToken,
+        fixed_deadline: Option<Instant>,
+    ) -> Result<(), Error> {
+        let next_deadline =
+            || fixed_deadline.unwrap_or_else(|| Instant::now() + self.config.limits.sdk);
+        let deadline = next_deadline();
+        let prepared = tokio::time::timeout_at(deadline, async {
             checkpoint(cancel, deadline)?;
-        }
-        let owner = self.enrollment_handle(scope).await?;
-        // ADR-183: a refusal is retried from the top, never fenced. A record
-        // the previous pass left at a redoable step (a refused verify, a
-        // prepared write, a ready record) resumes at that step; a write that
-        // may have crossed the wire stays the SDK's honest uncertainty.
-        let status = match owner.command(Command::Status).await? {
-            View::Absent => Status::Absent,
-            View::Complete => Status::Complete,
-            View::Verify | View::Ready | View::Write(_) => Status::Resume,
-            _ => return Err(Error::Storage),
-        };
-        let users = self.enrollment_current_for(scope, cancel).await?;
-        let versions = self
-            .http
-            .request(&["_matrix", "client", "versions"], None, cancel)
-            .await?
-            .success()?;
-        let advertised = versions
-            .get("versions")
-            .and_then(|v| v.as_array())
-            .ok_or(Error::Unsupported)?;
-        if advertised.len() > 64
-            || !advertised.iter().any(|v| {
-                matches!(
-                    v.as_str(),
-                    Some("v1.11" | "v1.12" | "v1.13" | "v1.14" | "v1.15" | "v1.16" | "v1.17")
-                )
-            })
-        {
-            return Err(Error::Unsupported);
-        }
-        match status {
-            Status::Absent => {
-                let query = self.enrollment_query(&owner, &users, cancel).await?;
-                owner.command(Command::Prepare(query)).await?;
+            // Validate before opening a fresh SDK, and retain that census.
+            // Every write below still gets a fresh check immediately before it.
+            let initial_users = if let Scope::Provision(scope) = scope {
+                Some(scope.current(self, cancel).await?)
+            } else {
+                None
+            };
+            let owner = self.enrollment_handle(scope).await?;
+            let status = match owner.command(Command::Status).await? {
+                View::Absent => Status::Absent,
+                View::Complete => Status::Complete,
+                View::Verify | View::Ready | View::Write(_) => Status::Resume,
+                _ => return Err(Error::Storage),
+            };
+            let users = match initial_users {
+                Some(users) => users,
+                None => self.enrollment_current_for(scope, cancel).await?,
+            };
+            let versions = self
+                .http
+                .request(&["_matrix", "client", "versions"], None, cancel)
+                .await?
+                .success()?;
+            let advertised = versions
+                .get("versions")
+                .and_then(|v| v.as_array())
+                .ok_or(Error::Unsupported)?;
+            if advertised.len() > 64
+                || !advertised.iter().any(|v| {
+                    matches!(
+                        v.as_str(),
+                        Some("v1.11" | "v1.12" | "v1.13" | "v1.14" | "v1.15" | "v1.16" | "v1.17")
+                    )
+                })
+            {
+                return Err(Error::Unsupported);
             }
-            Status::Complete => {
-                let query = self.enrollment_query(&owner, &users, cancel).await?;
-                match owner.command(Command::Verify(query)).await? {
-                    View::Complete => {
+            match status {
+                Status::Absent => {
+                    let query = self.enrollment_query(&owner, &users, cancel).await?;
+                    owner.command(Command::Prepare(query)).await?;
+                }
+                Status::Complete => {
+                    let query = self.enrollment_query(&owner, &users, cancel).await?;
+                    match owner.command(Command::Verify(query)).await? {
+                        View::Complete | View::Write(_) => {}
+                        _ => return Err(Error::Storage),
+                    }
+                }
+                Status::Resume => {}
+            }
+            checkpoint(cancel, deadline)?;
+            Ok((owner, users))
+        })
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        let (owner, users) = prepared.map_err(|error| {
+            eprintln!("matrix enrollment stage=prepare error={error:?}");
+            error
+        })?;
+        // The ledger caps writes at WRITES. A step either advances a durable
+        // phase or finishes; a stalled step cannot continually renew its timer.
+        for _ in 0..state::WRITES + 4 {
+            let deadline = next_deadline();
+            let mut stage = "status";
+            let mut unsent = None;
+            let result = tokio::time::timeout_at(deadline, async {
+                checkpoint(cancel, deadline)?;
+                match owner.command(Command::Next).await? {
+                    View::Write(packet) => {
+                        stage = "before_key_write";
+                        owner.command(Command::Possible(packet.index)).await?;
+                        unsent = Some(packet.index);
+                        let acceptance = owner.acceptance()?;
                         if self.enrollment_current_for(scope, cancel).await? != users {
                             return Err(Error::Recipients);
                         }
                         checkpoint(cancel, deadline)?;
-                        return Ok(());
+                        stage = "key_write";
+                        // From here the POST may have crossed the wire. Never
+                        // clear Possible because its response was lost.
+                        unsent = None;
+                        let response = self
+                            .http
+                            .post(packet.kind.path(), packet.body, cancel)
+                            .await?
+                            .success()?;
+                        acceptance.accept(packet.index, response).await?;
+                        Ok(false)
                     }
-                    // ADR-183 B: a device that appeared since the enrollment
-                    // needs an Olm session; the loop below posts the SDK's
-                    // transient claim and the verify completes on its response.
-                    View::Write(_) => {}
-                    _ => return Err(Error::Storage),
+                    View::Verify => {
+                        stage = "verify_keys";
+                        if self.enrollment_current_for(scope, cancel).await? != users {
+                            return Err(Error::Recipients);
+                        }
+                        let query = self.enrollment_query(&owner, &users, cancel).await?;
+                        owner.command(Command::Verify(query)).await?;
+                        Ok(false)
+                    }
+                    View::Ready => {
+                        stage = "finish_keys";
+                        if self.enrollment_current_for(scope, cancel).await? != users {
+                            return Err(Error::Recipients);
+                        }
+                        checkpoint(cancel, deadline)?;
+                        let View::Complete = owner.command(Command::Finish).await? else {
+                            return Err(Error::Storage);
+                        };
+                        if self.enrollment_current_for(scope, cancel).await? != users {
+                            return Err(Error::Recipients);
+                        }
+                        checkpoint(cancel, deadline)?;
+                        Ok(true)
+                    }
+                    View::Complete => {
+                        stage = "verify_complete";
+                        if self.enrollment_current_for(scope, cancel).await? != users {
+                            return Err(Error::Recipients);
+                        }
+                        checkpoint(cancel, deadline)?;
+                        Ok(true)
+                    }
+                    _ => Err(Error::OutcomeUnknown),
+                }
+            })
+            .await
+            .unwrap_or(Err(Error::Timeout));
+            if let Some(index) = unsent {
+                // The original future ended before entering HTTP. Persist the
+                // negative observation; a lost SDK acknowledgment stays unknown.
+                owner.command(Command::NotSent(index)).await?;
+            }
+            match result {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("matrix enrollment stage={stage} error={error:?}");
+                    return Err(error);
                 }
             }
-            Status::Resume => {}
         }
-        loop {
-            checkpoint(cancel, deadline)?;
-            match owner.command(Command::Next).await? {
-                View::Write(packet) => {
-                    owner.command(Command::Possible(packet.index)).await?;
-                    let acceptance = owner.acceptance()?;
-                    // The last SDK Possible await precedes actual current-token,
-                    // room and writer checks immediately before the original POST.
-                    if self.enrollment_current_for(scope, cancel).await? != users {
-                        return Err(Error::Recipients);
-                    }
-                    checkpoint(cancel, deadline)?;
-                    let response = self
-                        .http
-                        .post(packet.kind.path(), packet.body, cancel)
-                        .await?
-                        .success()?;
-                    // Transfer the actual completed response directly into the
-                    // original SDK command before another cancellation point.
-                    acceptance.accept(packet.index, response).await?;
-                }
-                View::Verify => {
-                    if self.enrollment_current_for(scope, cancel).await? != users {
-                        return Err(Error::Recipients);
-                    }
-                    let query = self.enrollment_query(&owner, &users, cancel).await?;
-                    owner.command(Command::Verify(query)).await?;
-                }
-                View::Ready => {
-                    if self.enrollment_current_for(scope, cancel).await? != users {
-                        return Err(Error::Recipients);
-                    }
-                    checkpoint(cancel, deadline)?;
-                    let View::Complete = owner.command(Command::Finish).await? else {
-                        return Err(Error::Storage);
-                    };
-                    // Finishing persistence is another await, never current readiness proof.
-                    if self.enrollment_current_for(scope, cancel).await? != users {
-                        return Err(Error::Recipients);
-                    }
-                    checkpoint(cancel, deadline)?;
-                    return Ok(());
-                }
-                View::Complete => {
-                    if self.enrollment_current_for(scope, cancel).await? != users {
-                        return Err(Error::Recipients);
-                    }
-                    checkpoint(cancel, deadline)?;
-                    return Ok(());
-                }
-                _ => return Err(Error::OutcomeUnknown),
-            }
-        }
+        Err(Error::Capacity)
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -161,6 +161,7 @@ enum Command {
     CloseFault(oneshot::Sender<()>),
     Cursor(oneshot::Sender<Option<String>>),
     IntakeMode(oneshot::Sender<bool>),
+    ReserveIntakeCursor(oneshot::Sender<Result<(), Error>>),
     IntakeBatch(oneshot::Sender<Option<Batch>>),
     IntakeStart(Value, Vec<ReplyRoute>, oneshot::Sender<Result<(), Error>>),
     IntakeAck(
@@ -538,6 +539,9 @@ impl Owner {
                                 observation::command(&command_observation, ObservationPhase::Returned, None);
                                 let _ = reply.send(sdk.journal.intake_enabled);
                             }
+                            Command::ReserveIntakeCursor(reply) => {
+                                let _ = reply.send(sdk.reserve_intake_cursor().await);
+                            }
                             Command::IntakeBatch(reply) => {
                                 let batch = sdk.journal.intake.clone();
                                 #[cfg(test)]
@@ -789,6 +793,14 @@ impl Owner {
             result.as_ref().err().cloned(),
         );
         result
+    }
+    pub(crate) async fn reserve_intake_cursor(&self) -> Result<(), Error> {
+        let (send, reply) = oneshot::channel();
+        self.enqueue(Command::ReserveIntakeCursor(send))?;
+        tokio::time::timeout(self.timeout, reply)
+            .await
+            .map_err(|_| Error::OutcomeUnknown)?
+            .map_err(|_| Error::OutcomeUnknown)?
     }
     pub(crate) async fn batch(&self) -> Result<Option<Batch>, Error> {
         let (send, reply) = oneshot::channel();
@@ -1397,6 +1409,22 @@ impl Sdk {
             .await
             .map_err(|_| Error::OutcomeUnknown)?;
         Ok(())
+    }
+    /// Before the owner is invited, hand the current sync cursor to intake.
+    /// Activation and later room observations must not advance it with a
+    /// timeline-less sync while the owner is already able to send messages.
+    async fn reserve_intake_cursor(&mut self) -> Result<(), Error> {
+        if self.approval || self.journal.pending.is_some() {
+            return Err(Error::OutcomeUnknown);
+        }
+        if self.journal.intake_enabled {
+            return Ok(());
+        }
+        if self.journal.receipts.is_empty() {
+            return Err(Error::Storage);
+        }
+        self.journal.intake_enabled = true;
+        self.persist().await
     }
     async fn intake_start(
         &mut self,

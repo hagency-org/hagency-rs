@@ -45,9 +45,17 @@ try {
   // NATIVE_STEPS is three (model, reasoning, budget) — TWO Next clicks
   // reach the budget step; a third waits forever for a button that no
   // longer exists.
-  async function budget(id, edit = false) { await page.goto(edit ? editUrl(id) : createUrl(id)); await editor(id); await next(); await next(); }
-  async function ceiling(tokens) { await page.locator('#configuration-ceiling').selectOption('monthly'); await page.locator('#wz-tokens').fill(String(tokens)); }
-  async function save(edit = false) { await page.getByRole('button', { name: edit ? /^(Save configuration|保存配置)$/ : /^(Create another configuration|创建另一项配置)$/ }).click(); await page.locator('[data-configuration-action="saved"]').waitFor(); }
+  async function budget(id, edit = false) {
+    await page.goto(edit ? editUrl(id) : createUrl(id)); await editor(id);
+    if (!edit) {
+      await page.locator('#configuration-engagement option').nth(1).waitFor({ state: 'attached' });
+      await page.locator('#configuration-engagement').selectOption({ index: 1 });
+    }
+    await next(); await next();
+    if (!edit) await page.locator('#configuration-managers').fill('@owner:example.test');
+  }
+  async function ceiling(tokens) { await page.locator('#wz-tokens').fill(String(tokens)); }
+  async function save(edit = false) { await page.getByRole('button', { name: edit ? /^(Save configuration|保存配置)$/ : /^(Create resource|创建资源)$/ }).click(); await page.locator('[data-configuration-action="saved"]').waitFor(); }
   // The one link lands on the usage page and exchanges the session cookie;
   // the walk then opens the resource page (one login carries every action).
   await page.goto(config.url);
@@ -62,8 +70,8 @@ try {
     console.log(`VERIFIED ${config.resource}`);
   } else {
     await budget(config.resource); await ceiling(12345);
-    await page.locator('#wz-tokens').fill('9007199254740992'); assert.equal(await page.getByRole('button', { name: 'Create another configuration', exact: true }).isEnabled(), false);
-    await page.locator('#wz-tokens').fill('1e3'); assert.equal(await page.getByRole('button', { name: 'Create another configuration', exact: true }).isEnabled(), false);
+    await page.locator('#wz-tokens').fill('9007199254740992'); assert.equal(await page.getByRole('button', { name: 'Create resource', exact: true }).isEnabled(), false);
+    await page.locator('#wz-tokens').fill('1e3'); assert.equal(await page.getByRole('button', { name: 'Create resource', exact: true }).isEnabled(), false);
     await page.locator('#wz-tokens').fill('12345');
     for (const selector of ['#wz-name', '#wz-rate', '[name="apiKey"]']) assert.equal(await page.locator(selector).count(), 0);
     await save();
@@ -74,7 +82,7 @@ try {
     await page.getByRole('button', { name: '中文', exact: true }).click(); await page.getByRole('button', { name: '深色', exact: true }).click();
     await budget(created, true); await ceiling(22222); await save(true);
     assert.equal(await page.locator('html').getAttribute('lang'), 'zh-CN'); assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
-    const colors = await page.evaluate(() => [getComputedStyle(document.querySelector('#wz-tokens')).backgroundColor, getComputedStyle(document.querySelector('#configuration-ceiling')).backgroundColor]);
+    const colors = await page.evaluate(() => [getComputedStyle(document.querySelector('#wz-tokens')).backgroundColor, getComputedStyle(document.querySelector('#configuration-managers')).backgroundColor]);
     assert.equal(colors[0], colors[1]); assert.notEqual(colors[0], 'rgb(255, 255, 255)');
     console.log(`EDITED ${created}`);
     if (process.env.HAGENCY_CONSOLE_SCREENSHOTS && !config.executable) await page.screenshot({ path: join(process.env.HAGENCY_CONSOLE_SCREENSHOTS, 'console-configuration-zh.png'), fullPage: true });
@@ -87,7 +95,7 @@ try {
       assert.equal(await page.locator('#wz-tokens').inputValue(), '33333');
       await fixture(`EDIT_RESOURCE ${created}`); await page.getByRole('button', { name: 'Save configuration', exact: true }).click(); await page.locator('[data-configuration-action="conflict"]').waitFor();
       await page.getByRole('button', { name: 'Reload configuration and discard draft', exact: true }).click(); await editor(created);
-      await page.locator('#configuration-ceiling').selectOption('monthly'); assert.equal(await page.locator('#wz-tokens').inputValue(), '6000');
+      assert.equal(await page.locator('#wz-tokens').inputValue(), '6000');
       // Real delayed B navigation cannot replace A after Back supersedes it.
       let release; let entered; const held = new Promise((r) => { release = r; }); const began = new Promise((r) => { entered = r; });
       await context.route(configuration(config.resource), async (route) => { entered(); await held; await route.continue(); });
@@ -102,8 +110,8 @@ try {
         headers['sec-fetch-site'] = 'same-origin'; headers.origin = config.base;
         const actual = await route.fetch({ headers }); assert.equal(actual.status(), 200, await actual.text()); unknownId = (await actual.json()).resourceId; await route.abort('failed');
       });
-      await page.getByRole('button', { name: 'Create another configuration', exact: true }).click(); await page.locator('[data-configuration-action="unknown"]').waitFor();
-      assert.equal(await page.getByRole('button', { name: 'Create another configuration', exact: true }).isEnabled(), false);
+      await page.getByRole('button', { name: 'Create resource', exact: true }).click(); await page.locator('[data-configuration-action="unknown"]').waitFor();
+      assert.equal(await page.getByRole('button', { name: 'Create resource', exact: true }).isEnabled(), false);
       await page.getByRole('button', { name: 'Refresh', exact: true }).click(); await editor(config.resource); assert.equal(await page.locator('[data-configuration-action="unknown"]').count(), 1); assert.equal(posts, 1);
       await context.unroute(`${config.base}/console/api/resources`); console.log(`UNKNOWN_CREATED ${unknownId}`);
       // A real held SQLite transaction: the configuration write is refused as

@@ -11,6 +11,7 @@ pub(crate) mod fleet_identity;
 pub(crate) mod fleet_service;
 pub mod intake_refusal;
 pub mod invites;
+pub(crate) mod pairing;
 pub(crate) mod palpo;
 pub mod palpo_import;
 mod palpo_retirement;
@@ -841,6 +842,7 @@ pub(crate) fn matrix_error_label(error: &hagency_matrix::Error) -> &'static str 
         Cancelled => "cancelled",
         Timeout => "timeout",
         AwaitingOwner => "awaiting_owner",
+        AwaitingSetup => "awaiting_setup",
         Transport => "transport",
         Redirect => "redirect",
         Headers => "headers",
@@ -1837,6 +1839,7 @@ impl Bootstrap {
         for prepared in std::mem::take(&mut self.palpo_prepared) {
             self.palpo.start(prepared).await?;
         }
+        self.palpo.start_pairings();
         if let Some(pump) = self.approval.as_ref() {
             // ADR-183 decision 0: a component refusal does not exit the
             // process. The listener/router stay polled while the approval

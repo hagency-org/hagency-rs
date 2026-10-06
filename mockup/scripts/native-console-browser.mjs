@@ -51,37 +51,14 @@ async function rosterWalk(page) {
   assert((await page.locator('[data-lifecycle-action="preset"]').count()) === 0, 'the unavailable preset transition is never advertised');
 }
 
-/* The project-sides walk (ADR-132): the page renders the six-key side
- * cards with the SERVER-OWNED unavailable list verbatim, and no
- * credential value can appear on screen — the validator refuses any key
- * set other than the declared one and no declared key is a credential. */
+/* Old project-side bookmarks lead to the unified server engagement flow. */
 async function projectSidesWalk(page) {
   await page.goto(`${config.base}/console/project-sides/`);
-  await page.locator('[data-native-state="ready"]').first().waitFor();
-  const text = await page.locator('main').innerText();
-  assert.match(text, /example\.test/, 'the side card renders, keyed by server name');
-  assert.match(text, /Projects connected to this Hagency, and how each one is registered|连接到此 Hagency 的项目，以及各自的注册方式/);
-  assert.match(text, /!reception:example\.test/, 'the reception room id renders as ordinary data');
-  assert.match(text, /project_one/, 'the joined project renders');
-  assert.match(text, /!project:example\.test/, 'the project room id renders');
-  // The server's own gap list, verbatim: credential_kind and owner are
-  // NAMED as unknown rather than invented. The list is diagnostics, so it
-  // sits in the page's Technical details disclosure, one click away.
-  const gaps = await page.locator('main .technical-details').first().textContent();
-  assert.match(gaps, /credential_kind/);
-  assert.match(gaps, /owner/);
-  assert(!/as_token|hs_token|asToken|hsToken/.test(text), 'no credential word on screen');
-  assert(!/@owner:example\.test/.test(text), 'the owner mxid stays withheld');
-  assert(!/!private:example\.test/.test(text), 'the owner DM room stays withheld');
-  // #45 parity row #33 joined this page: register-a-side and
-  // generate-registration render beside the read-only observation.
-  // #51 added the connection probe: register, generate, test connection
-  // and refresh — four controls now. The Palpo import's Connect makes five;
-  // it stays disabled until a downloaded configuration is picked.
-  assert((await page.locator('main button').count()) === 5, 'connect, register, generate, test connection and refresh are the controls');
-  const connect = page.locator('[data-palpo-import] button');
-  assert(await connect.isDisabled(), 'Connect waits for a picked configuration');
-  assert.match(await page.locator('[data-palpo-import]').innerText(), /Download Hagency configuration/);
+  await page.waitForURL(/\/console\/server-engagements\/?$/);
+  await page.locator('[data-server-engagements]').waitFor();
+  assert.equal(await page.locator('nav a[href="/console/project-sides/"]').count(), 0);
+  assert.equal(await page.locator('[data-palpo-import], [data-side-registration]').count(), 0);
+  assert.equal(await page.locator('[data-native-associations]').count(), 1);
 }
 
 /* The tasks page's WRITE journey (board #107), shared by the tasks-only lane:

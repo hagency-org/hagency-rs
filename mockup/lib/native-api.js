@@ -83,7 +83,7 @@ export function validateEngagements(v) {
       || typeof e.quotaPaused !== 'boolean')) throw new Error('invalid_native_response');
   return v;
 }
-const RECOVERY_ERRORS = { agent_lifecycle_scope_required: 403, resolution_conflict: 409, dispatch_not_resolvable: 409, invalid_console_request: 400 };
+const RECOVERY_ERRORS = { contribution_capacity_exceeded: 409, engagement_authority_changed: 409, resource_ceiling_required: 409, contribution_limit_exceeded: 400, agent_lifecycle_scope_required: 403, resolution_conflict: 409, dispatch_not_resolvable: 409, invalid_console_request: 400 };
 /* End access revokes the credential this page holds. From the moment it
  * starts until a new ticket is exchanged, no console read or write leaves the
  * page: a multi-step load already in flight (the fleet panel's per-side budget
@@ -800,9 +800,14 @@ const optionalText = (v, max) => v === null || text(v, max);
 const optionalScalarText = (v, max) => v === null || (typeof v === 'string' && [...v].length <= max);
 const periodFields = (v) => !Object.hasOwn(v, 'period') || v.period === null || text(v.period, 64 * 1024);
 const ceiling = (v) => v === null || (v && Object.keys(v).every((k) => ['tokens', 'period'].includes(k)) && (v.tokens === null || number(v.tokens)) && periodFields(v));
-const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'published', 'roles', 'revision'])
+const validResourceBindings = (bindings, resourceId) => Array.isArray(bindings) && bindings.every(g =>
+  object(g, ['id', 'serverEngagementId', 'resourceId', 'revision', 'allocatedTokens', 'eligibleManagers'])
+  && id(g.id) && id(g.serverEngagementId) && g.resourceId === resourceId && number(g.revision) && g.revision >= 1
+  && number(g.allocatedTokens) && Array.isArray(g.eligibleManagers) && g.eligibleManagers.length <= 64
+  && g.eligibleManagers.every(m => text(m, 255)));
+const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'published', 'roles', 'revision', 'engagementResources'])
       || !id(r.id) || !text(r.framework, 64) || !text(r.model, 256) || !optionalText(r.provider, 128) || !optionalText(r.reasoning, 128)
-      || !ceiling(r.ceiling) || typeof r.published !== 'boolean' || !Array.isArray(r.roles) || r.roles.length > 64 || !r.roles.every((v) => text(v, 64)) || !revision(r.revision));
+      || !validResourceBindings(r.engagementResources, r.id) || !ceiling(r.ceiling) || typeof r.published !== 'boolean' || !Array.isArray(r.roles) || r.roles.length > 64 || !r.roles.every((v) => text(v, 64)) || !revision(r.revision));
 export function validateResources(value) {
   if (!object(value, ['resources', 'roles', 'next_after', 'permissions']) || !Array.isArray(value.resources) || value.resources.length > 16
     || !(value.next_after === null || id(value.next_after)) || !object(value.permissions, ['publishResource', 'configureResource']) || typeof value.permissions.publishResource !== 'boolean' || typeof value.permissions.configureResource !== 'boolean'
@@ -849,10 +854,21 @@ export function validateBudget(v) {
 export async function fetchResources(selected, after = '') {
   if ((selected !== null && !id(selected)) || (after && !id(after))) throw new Error('invalid_selection');
   const list = validateResources(await request(`/api/resources?limit=16${after ? `&after=${after}` : ''}`));
-  const chosen = selected ?? list.resources[0]?.id ?? null;
+  const chosen = selected ?? list.resources.find(r => r.engagementResources.length)?.id ?? list.resources[0]?.id ?? null;
   const budget = chosen === null ? null : validateBudget(await request(`/api/resources/${chosen}/budget`));
   for (const r of list.resources) remember(r.id, [r.framework, r.model, r.reasoning].filter(Boolean).join(' · '));
-  return { ...list, selected: chosen, budget, resourceConsole: true };
+  const editor = chosen === null ? null : validateConfiguration(await request(`/api/resources/${chosen}/configuration`), chosen);
+  const coordinatorResources = (await fetchServerEngagements()).engagements.length > 0;
+  const engagementResources = [];
+  for (const fleet of new Set(editor?.resource.engagementResources.map(g => g.serverEngagementId) ?? [])) {
+    let after = '';
+    do {
+      const page = await fetchEngagementResources(fleet, after);
+      engagementResources.push(...page.resources.filter(g => g.resourceId === chosen));
+      after = page.nextCursor;
+    } while (after);
+  }
+  return { ...list, selected: chosen, budget, editor, engagementResources, coordinatorResources, resourceConsole: true };
 }
 export async function publishResource(resource, published) {
   const value = await request(`/api/resources/${resource.id}/publication`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: resource.revision, published }) });
@@ -876,7 +892,7 @@ export function validateConfiguration(value, selected) {
 }
 export async function fetchConfiguration(entry, after = '') {
   const value = await fetchResources(entry.id, after);
-  const editor = value.selected === null ? null : validateConfiguration(await request(`/api/resources/${value.selected}/configuration`), value.selected);
+  const editor = value.editor;
   return { ...value, editor, configurationConsole: true, editing: entry.mode === 'edit' };
 }
 export async function configureResource(resource, create, changes) {
@@ -1255,5 +1271,23 @@ export async function contributeEngagementResource(grant) {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(grant),
   });
   if (!object(value, ['ok']) || value.ok !== true) throw new Error('invalid_native_response');
+  return value;
+}
+
+export async function fetchAssociations() {
+  const value = await request('/api/palpo/associations');
+  const fields = ['id', 'actionId', 'name', 'homeserver', 'ownerMxid', 'coordinatorMxid', 'phase', 'imported', 'transportEnabled', 'expiresAtMs', 'problem'];
+  if (!object(value, ['associations']) || !Array.isArray(value.associations) || value.associations.length > 100
+      || value.associations.some(row => !object(row, fields) || !/^hf_[a-f0-9]{32}$/.test(row.id)
+        || !/^action_[a-f0-9]{32}$/.test(row.actionId)
+        || !['name', 'homeserver', 'ownerMxid', 'coordinatorMxid'].every(key => typeof row[key] === 'string')
+        || !['contacting', 'awaiting_owner', 'awaiting_admin', 'awaiting_connection', 'connected', 'setup_failed', 'rejected', 'expired', 'unavailable'].includes(row.phase)
+        || typeof row.imported !== 'boolean' || typeof row.transportEnabled !== 'boolean' || !number(row.expiresAtMs)
+        || ![null, 'retrying', 'profile_binding'].includes(row.problem))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function startAssociation(input) {
+  const value = await request('/api/palpo/associations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  if (!object(value, ['id']) || !/^hf_[a-f0-9]{32}$/.test(value.id)) throw new Error('invalid_native_response');
   return value;
 }

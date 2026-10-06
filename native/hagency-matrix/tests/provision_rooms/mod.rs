@@ -20,6 +20,7 @@ struct Server {
     owner: bool,
     /// ADR-184: the agent invited the owner to its DM (after enrollment).
     owner_invited: bool,
+    inbox_cursor_reserved: bool,
     posts: usize,
     owner_reads: usize,
     as_created: bool,
@@ -50,6 +51,7 @@ impl Server {
             joined: false,
             owner: false,
             owner_invited: false,
+            inbox_cursor_reserved: false,
             posts: 0,
             owner_reads: 0,
             as_created: false,
@@ -183,7 +185,8 @@ impl Server {
         };
         if request.target.starts_with("/_matrix/client/v3/sync?") {
             assert_eq!(request.method, "GET");
-            assert!(!rep && !human && self.as_logged && self.owner && self.joined);
+            assert!(!rep && !human && self.created && self.joined);
+            self.inbox_cursor_reserved = true;
             return (
                 200,
                 json!({"next_batch":"active-as-original-sdk","rooms":{"join":{}},"to_device":{"events":[]}}),
@@ -278,6 +281,10 @@ impl Server {
             assert!(
                 self.enrolled(),
                 "ADR-184: the owner is invited only after the agent's keys are published"
+            );
+            assert!(
+                self.inbox_cursor_reserved,
+                "the first DM must not precede the inbox cursor"
             );
             assert_eq!(body, json!({"user_id":OWNER}));
             self.owner_invited = true;
@@ -1331,7 +1338,7 @@ async fn native_provisioning_inline_appservice_scope_change() {
                     && room_root(&f).join("agent-rooms").exists()
                 {
                     sdk_reads += 1;
-                    if sdk_reads == 3 {
+                    if sdk_reads == 2 {
                         revoked = true;
                     }
                 }
@@ -1373,7 +1380,7 @@ async fn native_provisioning_inline_appservice_scope_change() {
         device_identity(&mut fake, &mut server).await;
         let before = fake.requests();
         if boundary != "room" {
-            assert_eq!(sdk_reads, 3);
+            assert_eq!(sdk_reads, 2);
             assert!(
                 account
                     .enroll_created_rooms(
@@ -1388,8 +1395,10 @@ async fn native_provisioning_inline_appservice_scope_change() {
             assert_eq!(fake.requests(), before, "failed SDK ownership cannot rearm");
             account.close_enrollment_sdk().await.unwrap();
             let ledger = retained_as_ledger(&f).await;
+            // The original sender observed that authority failed before it
+            // entered HTTP, so no unknown POST is manufactured from this GET.
             assert!(
-                ledger.phase == Phase::Writing && ledger.writes[0].phase == WritePhase::Possible
+                ledger.phase == Phase::Writing && ledger.writes[0].phase == WritePhase::Prepared
             );
             assert!(
                 ledger
@@ -1879,4 +1888,176 @@ async fn native_provisioning_inline_home_scope_change() {
     c.close().await.unwrap();
     f.store.shutdown().await.unwrap();
     fake.close().await;
+}
+
+#[tokio::test]
+async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
+    for unsafe_invite in [false, true] {
+        let home = HomeFixture::new();
+        let mut server = Server::new().await;
+        let (mut f, mut fake, c) = ready_appservice(&home, &server).await;
+        let initial = drive(
+            &f,
+            &mut fake,
+            &c,
+            &mut server,
+            unsafe_invite,
+            |request, response| {
+                if !unsafe_invite
+                    && request.headers.get("authorization")
+                        == Some(&format!("Bearer {AGENT_TOKEN}"))
+                    && request.target.contains("/sync?")
+                {
+                    *response = (503, json!({"errcode":"M_UNKNOWN"}));
+                }
+            },
+        )
+        .await;
+        if unsafe_invite {
+            initial.unwrap();
+        } else {
+            assert_eq!(initial.unwrap_err(), Error::Remote(503));
+        }
+        let account = observed_account(&f, &c);
+        account.close_enrollment_sdk().await.unwrap();
+        let mut effect = f
+            .store
+            .effect(format!("provision_{}", admitted_id(&f)))
+            .await
+            .unwrap();
+        if unsafe_invite {
+            f.store
+                .observe_effect(
+                    effect.id.clone(),
+                    effect.fence,
+                    hagency_store::EffectOutcome::Unknown,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(server.peer.writes.len(), 5);
+        assert_eq!(server.as_posts, 2);
+        let before_rooms = server.posts;
+        c.close().await.unwrap();
+        drop(account);
+        drop(c);
+        f.store.shutdown().await.unwrap();
+        f.store = hagency_store::DomainStore::start(
+            hagency_store::DomainRepository::open(&f.root.path().join("domain")).unwrap(),
+            32,
+        )
+        .unwrap();
+        effect.state = hagency_store::EffectState::Started;
+        let registration = common::domain::registration();
+        let inspection = f
+            .store
+            .inspect_provision_scope(effect.clone(), registration.clone())
+            .await
+            .unwrap();
+        let plan = home.plan(
+            hagency_store::agent_home::ProjectMode::Copy,
+            "project_provision",
+        );
+        let preserved_home = plan.reopen(&inspection, &effect, &registration).unwrap();
+        assert!(
+            preserved_home
+                .home_path()
+                .unwrap()
+                .join("agent.json")
+                .exists()
+        );
+        let operation = crate::TokenAccountProvision::application_service(
+            &registration,
+            &effect,
+            &fake.endpoint,
+            crate::ApplicationServiceCredential::new(AS_TOKEN, &format!("{}_", fleet_id()))
+                .unwrap(),
+            f.root.path().join("accounts"),
+            [73; 32],
+            common::load_limits(),
+        )
+        .unwrap()
+        .with_root_pem(include_bytes!("../fixtures/ca.pem"))
+        .unwrap()
+        .for_recovery()
+        .with_domain(f.store.clone(), effect.clone(), registration);
+        let cancel = CancellationToken::new();
+        let anchor = server.peer.anchor();
+        let work = async {
+            let mut account = operation.execute(&cancel).await?;
+            account
+                .resume_before_owner_invite(
+                    REP_TOKEN,
+                    vec![(OWNER.into(), anchor)],
+                    inspection,
+                    &cancel,
+                )
+                .await?;
+            Ok::<_, Error>(account)
+        };
+        // Capture the anchor before lending the fake server mutably.
+        tokio::pin!(work);
+        let recovered = loop {
+            tokio::select! {
+                result=&mut work => break result,
+                request=fake.next() => {
+                    assert_eq!(request.method,"GET","inspection must not emit any Matrix writes");
+                    let response=server.reply(&request).await;request.json(response.0,response.1);
+                }
+            }
+        };
+        assert_eq!(server.posts, before_rooms);
+        assert_eq!(server.peer.writes.len(), 5);
+        assert_eq!(server.as_posts, 2);
+        if unsafe_invite {
+            assert!(recovered.is_err());
+            assert_eq!(
+                effect_row(&f),
+                Some(("provision".into(), "uncertain".into()))
+            );
+        } else {
+            let account = recovered.unwrap();
+            assert_eq!(effect_row(&f), Some(("provision".into(), "started".into())));
+            server.inbox_cursor_reserved = false;
+            let anchor = server.peer.anchor();
+            let finish = async {
+                account.create_agent_rooms(REP_TOKEN, &cancel).await?;
+                account
+                    .enroll_created_rooms(1, [73; 32], vec![(OWNER.into(), anchor)], &cancel)
+                    .await
+            };
+            tokio::pin!(finish);
+            let enrolled = loop {
+                tokio::select! {
+                    result=&mut finish => break result.unwrap(),
+                    request=fake.next()=>{
+                        assert!(!request.target.ends_with("/register") && !request.target.ends_with("/login") && !request.target.ends_with("/createRoom"));
+                        let response=server.reply(&request).await;request.json(response.0,response.1);
+                    }
+                }
+            };
+            assert_eq!(
+                server.peer.writes.len(),
+                5,
+                "completed keys were not uploaded again"
+            );
+            assert_eq!(server.as_posts, 2);
+            assert_eq!(server.posts, before_rooms);
+            assert!(
+                enrolled
+                    .inner
+                    .owner
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .intake_mode()
+                    .await
+                    .unwrap()
+            );
+            account.close_enrollment_sdk().await.unwrap();
+        }
+        f.store.shutdown().await.unwrap();
+        fake.close().await;
+    }
 }

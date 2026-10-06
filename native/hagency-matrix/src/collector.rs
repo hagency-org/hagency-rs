@@ -325,6 +325,56 @@ impl Inner {
         }))
     }
 
+    /// Called by the original provisioning job after enrollment and before
+    /// inviting the owner. Later activation reads leave this cursor alone;
+    /// the first intake fetches both the first DM and any delayed room key.
+    pub(crate) async fn reserve_intake_cursor(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        let guard = self.owner.lock().await;
+        let owner = guard.as_ref().ok_or(Error::Storage)?;
+        if !owner.intake_mode().await? {
+            self.sync_observation(owner, cancel).await?;
+            owner.reserve_intake_cursor().await?;
+        }
+        Ok(())
+    }
+    async fn sync_observation(
+        &self,
+        owner: &Owner,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        observe!(Cursor);
+        let cursor = owner.cursor().await?;
+        let filter = json!({
+            "room": {
+                "rooms": self.observed().iter().map(|r| r.room_id.clone()).collect::<Vec<_>>(),
+                "timeline": {"limit": 0}, "ephemeral": {"types": []},
+                "account_data": {"types": []}, "state": {"lazy_load_members": false}
+            },
+            "presence": {"types": []}, "account_data": {"types": []}
+        })
+        .to_string();
+        let mut query = vec![
+            ("timeout", "0"),
+            ("full_state", "true"),
+            ("filter", filter.as_str()),
+        ];
+        if let Some(cursor) = cursor.as_deref() {
+            query.push(("since", cursor));
+        }
+        observe!(SyncHttp);
+        let value = self
+            .http
+            .request(&["_matrix", "client", "v3", "sync"], Some(&query), cancel)
+            .await?
+            .success()?;
+        let value = self.scope_sync(value)?;
+        observe!(SyncApply);
+        owner.sync(value).await?;
+        Ok(())
+    }
     pub(crate) async fn collect(
         &self,
         cancel: &CancellationToken,
@@ -362,34 +412,7 @@ impl Inner {
             }
             observe!(IntakeMode);
             if !owner.intake_mode().await? {
-                observe!(Cursor);
-                let cursor = owner.cursor().await?;
-                let filter = json!({
-                    "room": {
-                        "rooms": self.observed().iter().map(|r| r.room_id.clone()).collect::<Vec<_>>(),
-                        "timeline": {"limit": 0}, "ephemeral": {"types": []},
-                        "account_data": {"types": []}, "state": {"lazy_load_members": false}
-                    },
-                    "presence": {"types": []}, "account_data": {"types": []}
-                })
-                .to_string();
-                let mut query = vec![
-                    ("timeout", "0"),
-                    ("full_state", "true"),
-                    ("filter", filter.as_str()),
-                ];
-                if let Some(cursor) = cursor.as_deref() {
-                    query.push(("since", cursor));
-                }
-                observe!(SyncHttp);
-                let value = self
-                    .http
-                    .request(&["_matrix", "client", "v3", "sync"], Some(&query), cancel)
-                    .await?
-                    .success()?;
-                let value = self.scope_sync(value)?;
-                observe!(SyncApply);
-                owner.sync(value).await?;
+                self.sync_observation(owner, cancel).await?;
             }
             drop(guard);
             if cancel.is_cancelled() {
@@ -754,6 +777,15 @@ impl Inner {
         if let Some(guard) = &self.config.as_guard {
             guard.check(cancel).await?;
         }
+        self.whoami_identity(cancel).await?;
+        if let Some(guard) = &self.config.as_guard {
+            guard.check(cancel).await?;
+        }
+        Ok(())
+    }
+    /// Identity read inside a larger read-only census. Its caller checks the
+    /// application-service authority once, after the final read and before use.
+    pub(crate) async fn whoami_identity(&self, cancel: &CancellationToken) -> Result<(), Error> {
         let value = self
             .http
             .request(
@@ -772,9 +804,6 @@ impl Inner {
                 .is_some_and(|v| v != &Value::Bool(false))
         {
             return Err(Error::Identity);
-        }
-        if let Some(guard) = &self.config.as_guard {
-            guard.check(cancel).await?;
         }
         Ok(())
     }

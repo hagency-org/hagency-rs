@@ -7,6 +7,7 @@ mod alerts;
 mod approval_bindings;
 mod approvals;
 mod assets;
+mod associations;
 mod authority;
 pub mod client;
 mod engagements;
@@ -131,6 +132,7 @@ pub(crate) fn router() -> Router {
                 .push(project_sides::router())
                 .push(side_registration::router())
                 .push(palpo_import::router())
+                .push(associations::router())
                 .push(server_engagements::router())
                 .push(side_budget::router())
                 .push(side_lifecycle::router())

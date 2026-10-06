@@ -246,6 +246,47 @@ async fn native_matrix_retains_undecryptable_event_until_late_room_key() {
         .unwrap()
         .crypto_messages(true, 1)
         .await;
+    // Provisioning reserves the cursor before the DM invite. Retain that
+    // reservation across restart, then exercise the activation/driver read
+    // that previously consumed the first DM with timeline limit zero.
+    let cancel = CancellationToken::new();
+    let (result, ()) = common::scripted(c.inner.reserve_intake_cursor(&cancel), async {
+        let request = fake.next().await;
+        assert!(request.target.contains("/sync?"));
+        request.json(200, common::sync("before_owner"));
+    })
+    .await;
+    result.unwrap();
+    stop_sdk(c).await;
+    let c = Collector::new(
+        config(&f, &fake.endpoint, f.identity.clone(), 1, true),
+        f.store.clone(),
+    )
+    .unwrap();
+    let (result, ()) = common::scripted(c.collect(&cancel), async {
+        fake.next().await.json(200, common::who());
+        let request = fake.next().await;
+        assert!(
+            request.target.ends_with("/state"),
+            "startup must not sync past the first DM"
+        );
+        request.json(200, state(true));
+    })
+    .await;
+    result.unwrap();
+    assert_eq!(
+        c.inner
+            .owner
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .cursor()
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("before_owner")
+    );
     // First sync: the event arrives, but its room key does not.
     let mut before_key = encrypted.clone();
     before_key["next_batch"] = json!("before_key");
@@ -261,17 +302,32 @@ async fn native_matrix_retains_undecryptable_event_until_late_room_key() {
         0
     );
     assert!(f.available().await);
+    stop_sdk(c).await;
+    let c = Collector::new(
+        config(&f, &fake.endpoint, f.identity.clone(), 1, true),
+        f.store.clone(),
+    )
+    .unwrap();
     // Second sync: ONLY the key arrives — the event is not re-delivered.
     let mut late_key = encrypted.clone();
     late_key["next_batch"] = json!("late_key");
     late_key["rooms"]["join"]["!project:example.test"]["timeline"]["events"] = json!([]);
-    let result = run(&c, &mut fake, late_key, true).await.unwrap();
+    let result = run(&c, &mut fake, late_key.clone(), true).await.unwrap();
     assert_eq!((result.admitted, result.rejected), (1, 0));
     let inbox = f.store.inbox("root".into(), 0, 10, None).await.unwrap();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].message.event_id, "$encrypted");
     assert_eq!(inbox[0].message.body, "小白：已验证的私聊，无需提及");
     assert!(inbox[0].wake);
+    assert_eq!(
+        run(&c, &mut fake, late_key, true).await.unwrap().admitted,
+        0
+    );
+    assert_eq!(
+        rows(&f, "admitted_messages"),
+        1,
+        "the first DM is admitted exactly once"
+    );
     assert!(f.available().await);
     c.close().await.unwrap();
     f.store.shutdown().await.unwrap();

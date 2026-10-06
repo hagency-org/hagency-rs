@@ -9,7 +9,7 @@ use hagency_core::{
     project::{Resource, identifier},
     qualification::{self, ConfigurationChoice, Tier},
 };
-use hagency_store::{CeilingChange, ProfileChange};
+use hagency_store::{CeilingChange, ProfileChange, ResourceEngagementChange};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -67,17 +67,19 @@ async fn observation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(store) = domain(depot, res) else {
         return;
     };
-    let result = store
-        .resource_configuration(id)
-        .await
-        .and_then(Observation::from);
+    let result = async {
+        let mut value = Observation::from(store.resource_configuration(id.clone()).await?)?;
+        value.resource.engagement_resources = store.resource_engagements(id).await?;
+        Ok::<_, hagency_store::Error>(value)
+    }
+    .await;
     if let Err(error) = recheck(depot) {
         failed(res, error);
         return;
     }
     match result {
         Ok(value) => bounded(res, &value),
-        Err(error) => failure(res, error),
+        Err(error) => super::server_engagements::failure(res, error),
     }
 }
 #[derive(Deserialize)]
@@ -87,6 +89,7 @@ struct Create {
     expected_revision: String,
     profile_change: ProfileChange,
     ceiling_change: CeilingChange,
+    engagement: Option<ResourceEngagementChange>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -94,6 +97,7 @@ struct Edit {
     expected_revision: String,
     profile_change: ProfileChange,
     ceiling_change: CeilingChange,
+    engagement: Option<ResourceEngagementChange>,
 }
 pub(super) struct PreparedInput {
     pub resource: String,
@@ -101,6 +105,7 @@ pub(super) struct PreparedInput {
     pub create: bool,
     pub profile: ProfileChange,
     pub ceiling: CeilingChange,
+    pub engagement: Option<ResourceEngagementChange>,
 }
 #[handler]
 pub(super) async fn create(req: &mut Request, depot: &mut Depot, res: &mut Response) {
@@ -125,10 +130,12 @@ async fn write(req: &mut Request, depot: &mut Depot, res: &mut Response, creatin
         {
             return Err(Error::Invalid);
         }
-        let bytes =
-            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), body(req, 2048))
-                .await
-                .map_err(|_| Error::Unavailable)??;
+        let bytes = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            body(req, 24 * 1024),
+        )
+        .await
+        .map_err(|_| Error::Unavailable)??;
         let input = if creating {
             let input: Create = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
             PreparedInput {
@@ -137,6 +144,7 @@ async fn write(req: &mut Request, depot: &mut Depot, res: &mut Response, creatin
                 create: true,
                 profile: input.profile_change,
                 ceiling: input.ceiling_change,
+                engagement: input.engagement,
             }
         } else {
             let input: Edit = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
@@ -146,6 +154,7 @@ async fn write(req: &mut Request, depot: &mut Depot, res: &mut Response, creatin
                 create: false,
                 profile: input.profile_change,
                 ceiling: input.ceiling_change,
+                engagement: input.engagement,
             }
         };
         let session = depot
@@ -174,6 +183,6 @@ async fn write(req: &mut Request, depot: &mut Depot, res: &mut Response, creatin
     }
     match result {
         Ok(value) => bounded(res, &value),
-        Err(error) => failure(res, error),
+        Err(error) => super::server_engagements::failure(res, error),
     }
 }

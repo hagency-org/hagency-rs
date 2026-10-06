@@ -93,6 +93,44 @@ async fn close_all(
     fake.close().await;
 }
 #[tokio::test]
+async fn native_provisioning_sdk_preserves_first_dm_cursor_before_activation() {
+    let (f, mut fake, c, account, mut peer) = observed().await;
+    let enrolled = drive(&account, &mut fake, &mut peer).await.unwrap();
+    let cursor = {
+        let guard = enrolled.inner.owner.lock().await;
+        let owner = guard.as_ref().unwrap();
+        assert!(
+            owner.intake_mode().await.unwrap(),
+            "enrollment must reserve the inbox cursor before the owner can join and send a DM"
+        );
+        owner
+            .cursor()
+            .await
+            .unwrap()
+            .expect("pre-invitation cursor")
+    };
+    // The owner can now join and send ciphertext while activation is still
+    // checking the rooms and starting the runner. Those checks must not run
+    // a timeline-less sync that advances past the first message or its key.
+    activate_fixture(&f).await;
+    let active = active_with(&account, &mut fake, &mut peer, |request, _| {
+        assert!(
+            !request.target.starts_with("/_matrix/client/v3/sync?"),
+            "only inbox intake may advance the reserved cursor"
+        );
+    })
+    .await
+    .unwrap();
+    let guard = active.inner.owner.lock().await;
+    assert_eq!(
+        guard.as_ref().unwrap().cursor().await.unwrap(),
+        Some(cursor)
+    );
+    drop(guard);
+    close_all(f, fake, c, &account).await;
+}
+
+#[tokio::test]
 async fn native_provisioning_sdk_active_handoff() {
     let (f, mut fake, c, account, mut peer) = observed().await;
     let enrolled = drive(&account, &mut fake, &mut peer).await.unwrap();

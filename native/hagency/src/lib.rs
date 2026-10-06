@@ -160,6 +160,7 @@ impl App {
         let status = bootstrap::palpo::StatusHandle::new(false);
         let live =
             bootstrap::palpo::Live::new(state, self.store.clone(), domain, status.clone(), false);
+        live.start_pairings();
         self.with_palpo(status).with_palpo_live(live)
     }
 

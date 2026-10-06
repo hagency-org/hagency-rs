@@ -11,6 +11,7 @@ use hagency_core::{
     allocation::{Ceiling, Tokens},
     qualification,
 };
+use palpo_hagency_contract as contract;
 use rusqlite::TransactionBehavior;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -30,6 +31,16 @@ pub enum CeilingChange {
     Preserve {},
     Clear {},
     Monthly { tokens: Tokens },
+}
+/// One engagement resource, configured with its model and budget in one commit.
+/// Allocation IDs remain stable for existing projects and agents.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ResourceEngagementChange {
+    pub server_engagement_id: contract::ServerEngagementId,
+    pub allocation_id: Option<contract::ResourceAllocationId>,
+    pub expected_revision: Option<contract::Revision>,
+    pub eligible_managers: Vec<contract::MatrixUserId>,
 }
 /// Trusted-host constructor only. Never owned by a read-only/publication grant.
 /// The inner access supplies the original finite gate, not publication authority.
@@ -111,6 +122,7 @@ impl ResourceConfigurationAccess {
             preset,
             profile,
             ceiling,
+            engagement: None,
         })
     }
 }
@@ -120,10 +132,25 @@ pub struct ResourceConfigurationCommand {
     preset: Option<String>,
     profile: ProfileChange,
     ceiling: CeilingChange,
+    engagement: Option<ResourceEngagementChange>,
 }
 impl ResourceConfigurationCommand {
+    pub fn with_engagement(mut self, change: ResourceEngagementChange) -> Result<Self, Error> {
+        if change.eligible_managers.is_empty()
+            || change.eligible_managers.len() > 64
+            || change.allocation_id.is_some() != change.expected_revision.is_some()
+            || (self.preset.is_some() && change.allocation_id.is_some())
+            || !matches!(self.ceiling, CeilingChange::Monthly { .. })
+        {
+            return Err(
+                hagency_core::InvalidInput("invalid engagement resource configuration").into(),
+            );
+        }
+        self.engagement = Some(change);
+        Ok(self)
+    }
     pub(crate) fn weight(&self) -> u32 {
-        2048
+        24 * 1024
     }
 }
 #[derive(Debug, Serialize)]
@@ -198,6 +225,63 @@ impl DomainRepository {
         if create {
             super::accounts::copy_association(&tx, &source, &resource)?;
         }
+        let grant = if let Some(change) = command.engagement {
+            let existing = super::coordinator::resource_grants(&tx, &resource.id())?;
+            let amount = resource
+                .ceiling
+                .as_ref()
+                .and_then(|c| c.tokens)
+                .ok_or(Error::NoCeiling)?;
+            let (id, revision) = if let Some(id) = change.allocation_id {
+                let previous = existing
+                    .iter()
+                    .find(|g| g.id == id)
+                    .ok_or(Error::Conflict)?;
+                if Some(previous.revision) != change.expected_revision
+                    || previous.server_engagement_id != change.server_engagement_id
+                {
+                    return Err(Error::Conflict);
+                }
+                (
+                    id,
+                    u64::from(previous.revision)
+                        .checked_add(1)
+                        .ok_or(Error::Capacity)?,
+                )
+            } else {
+                if !existing.is_empty() {
+                    return Err(Error::Conflict);
+                }
+                (
+                    serde_json::from_value(serde_json::json!(format!("grant_{}", resource.id())))?,
+                    1,
+                )
+            };
+            // Older installations may share one profile between several grants.
+            // Its compatibility ceiling is derived from those budgets, never a
+            // second user-controlled pool; identities and held agents stay put.
+            let total =
+                existing
+                    .iter()
+                    .filter(|g| g.id != id)
+                    .try_fold(u64::from(amount), |n, g| {
+                        n.checked_add(u64::from(g.allocated_tokens))
+                            .ok_or(Error::Capacity)
+                    })?;
+            resource.ceiling = Some(serde_json::from_value(
+                serde_json::json!({"tokens":total,"period":"monthly"}),
+            )?);
+            Some(super::coordinator::ResourceGrant {
+                id,
+                server_engagement_id: change.server_engagement_id,
+                resource_id: resource.id(),
+                revision: serde_json::from_value(serde_json::json!(revision))?,
+                allocated_tokens: serde_json::from_value(serde_json::json!(u64::from(amount)))?,
+                eligible_managers: change.eligible_managers,
+            })
+        } else {
+            None
+        };
         let resource = prepare_resource_write(&tx, &resource, create.then_some(true), create)?;
         let result = ResourceConfigurationResult {
             resource_id: resource.id(),
@@ -207,6 +291,14 @@ impl DomainRepository {
         check(clock())?;
         self.accounts.check_resource(&tx, &resource)?;
         write_resource_configuration(&tx, &resource, create)?;
+        if let Some(grant) = &grant {
+            super::coordinator::put_resource_transaction(
+                &tx,
+                &self.accounts,
+                grant,
+                super::graphs::now_ms()?,
+            )?;
+        }
         check(clock())?;
         self.accounts.check_resource(&tx, &resource)?;
         tx.commit()?;
