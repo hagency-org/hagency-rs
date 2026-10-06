@@ -15,6 +15,7 @@ use std::{
 
 const MAX_JOBS: usize = 16;
 mod factory;
+mod recovery;
 pub use factory::ProvisionedAgent;
 /// What one provisioning pass did, per engagement (ADR-182: one
 /// engagement's refusal never stops the others).
@@ -230,7 +231,9 @@ impl TokenProvisioningHost {
         &self,
         domain: &DomainStore,
     ) -> Result<Vec<String>, Error> {
-        Ok(domain.inline_factory_engagements().await?)
+        Ok(domain
+            .inline_factory_engagements(self.registration.clone())
+            .await?)
     }
     /// ADR-187 §A.5: the fleet's membership sweep, acting with the
     /// representative's credential instead of a coordinator's.
@@ -457,6 +460,9 @@ impl TokenProvisioningHost {
         activated: bool,
         result: Result<Arc<ProvisionedTokenAccount>, Error>,
     ) -> Result<Arc<ProvisionedTokenAccount>, Error> {
+        if matches!(result, Err(Error::AwaitingSetup)) {
+            return result;
+        }
         if matches!(result, Err(Error::AwaitingOwner)) {
             let mut since = job
                 .awaiting_since
@@ -574,11 +580,45 @@ impl TokenProvisioningHost {
             .into_iter()
             .map(|(engagement, _)| engagement)
             .collect();
+        let setup_waiting: Vec<String> = self
+            .jobs
+            .lock()
+            .map_err(|_| Error::OutcomeUnknown)?
+            .iter()
+            .filter_map(|(id, job)| {
+                matches!(
+                    job.result.lock().ok()?.as_ref(),
+                    Some(Err(Error::AwaitingSetup))
+                )
+                .then(|| id.strip_prefix("provision_").map(str::to_owned))
+                .flatten()
+            })
+            .collect();
         let pending = domain
             .pending_provisions(self.registration.fleet_id.clone())
             .await
             .map_err(|_| Error::Storage)?;
-        for engagement in waiting.into_iter().chain(pending) {
+        let uncertain = domain
+            .uncertain_provisions(self.registration.fleet_id.clone())
+            .await?;
+        for engagement in uncertain {
+            if self
+                .jobs
+                .lock()
+                .map_err(|_| Error::OutcomeUnknown)?
+                .contains_key(&format!("provision_{engagement}"))
+            {
+                continue;
+            }
+            match self.recover_enrolled(domain, &engagement, cancel).await {
+                Ok(()) => report.started.push(engagement),
+                Err(Error::AwaitingOwner | Error::AwaitingSetup) => {
+                    report.awaiting.push(engagement)
+                }
+                Err(error) => report.failed.push((engagement, error)),
+            }
+        }
+        for engagement in waiting.into_iter().chain(setup_waiting).chain(pending) {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -593,7 +633,9 @@ impl TokenProvisioningHost {
                 .await
             {
                 Ok(()) => report.started.push(engagement),
-                Err(Error::AwaitingOwner) => report.awaiting.push(engagement),
+                Err(Error::AwaitingOwner | Error::AwaitingSetup) => {
+                    report.awaiting.push(engagement)
+                }
                 Err(error) => report.failed.push((engagement, error)),
             }
         }
@@ -611,6 +653,11 @@ impl TokenProvisioningHost {
         &self,
         domain: &DomainStore,
     ) -> Result<usize, Error> {
+        // The independently supervised Palpo profile verifies full identity
+        // removal, including an account created before local credential save.
+        if self.as_namespace.is_some() {
+            return Ok(0);
+        }
         let pending = domain
             .pending_unattached_retirements(self.registration.fleet_id.clone())
             .await
@@ -679,7 +726,7 @@ impl TokenProvisioningHost {
                     .as_ref()
                 {
                     Some(Ok(_)) => return Ok(()),
-                    Some(Err(Error::AwaitingOwner)) => Some(job.clone()),
+                    Some(Err(Error::AwaitingOwner | Error::AwaitingSetup)) => Some(job.clone()),
                     Some(Err(error)) => return Err(error.clone()),
                     None => return Err(Error::OutcomeUnknown),
                 },

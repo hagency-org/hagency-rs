@@ -15,7 +15,7 @@ use tokio::{
     sync::Semaphore,
     time::{Instant, timeout_at},
 };
-mod custody;
+pub(super) mod custody;
 use custody::Custody;
 
 pub(super) struct Operation {
@@ -111,6 +111,33 @@ impl Operation {
             representative,
             representative_write,
         })
+    }
+    pub(super) async fn inspect_before_owner_invite(
+        &self,
+    ) -> Result<(Arc<Custody>, Vec<crate::HostRoom>), Error> {
+        hagency_store::private::open(&self.root.join("agent-rooms"), false)
+            .map_err(|_| Error::Storage)?;
+        let root = self.root.clone();
+        let binding = self.binding.clone();
+        let key = self.key;
+        let custody = Arc::new(
+            tokio::task::spawn_blocking(move || Custody::open(root, binding, key))
+                .await
+                .map_err(|_| Error::OutcomeUnknown)??,
+        );
+        let inspect = custody.clone();
+        let records = tokio::task::spawn_blocking(move || inspect.values())
+            .await
+            .map_err(|_| Error::OutcomeUnknown)??;
+        if records[..6].iter().any(Option::is_none)
+            || records[COMPLETE].is_some()
+            || records[AGENT_ROOMS].is_none()
+            || records[OWNER_INVITE_POSSIBLE..].iter().any(Option::is_some)
+        {
+            return Err(Error::OutcomeUnknown);
+        }
+        let dm = self.stored_dm(&records, AGENT_ROOMS)?;
+        Ok((custody, self.rooms(&dm)))
     }
     async fn writer(&self, cancel: &CancellationToken, deadline: Instant) -> Result<(), Error> {
         checkpoint(cancel, deadline)?;

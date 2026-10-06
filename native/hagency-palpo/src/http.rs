@@ -110,7 +110,7 @@ impl Http {
             return Err(Error::Cancelled);
         }
         let poll = suffix == "poll";
-        if !matches!(suffix, "poll" | "ack" | "updates")
+        if !matches!(suffix, "poll" | "ack" | "updates" | "retire-agent")
             || body.as_ref().is_some_and(|b| b.len() > 1024 * 1024)
         {
             return Err(Error::Config);

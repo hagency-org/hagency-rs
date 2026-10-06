@@ -3254,6 +3254,69 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn coordinator_updates(
+        &self,
+        identity: crate::outbound::RegistrationIdentity,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&identity)?, move |db| {
+            db.coordinator_updates(&identity)
+        })
+        .await
+    }
+    pub async fn coordinator_agent_usage(&self, id: String) -> Result<serde_json::Value, Error> {
+        self.call(weight(&id)?, move |db| db.coordinator_agent_usage(&id))
+            .await
+    }
+    pub async fn acknowledge_coordinator_updates(
+        &self,
+        identity: crate::outbound::RegistrationIdentity,
+        updates: Vec<serde_json::Value>,
+    ) -> Result<(), Error> {
+        self.call(weight(&updates)?, move |db| {
+            db.acknowledge_coordinator_updates(&identity, &updates)
+        })
+        .await
+    }
+    pub async fn server_engagements(
+        &self,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&after)?, move |db| {
+            db.server_engagements(&after, limit)
+        })
+        .await
+    }
+    pub async fn server_engagement_resources(
+        &self,
+        fleet: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&(&fleet, &after))?, move |db| {
+            db.server_engagement_resources(&fleet, &after, limit)
+        })
+        .await
+    }
+    pub async fn contribute_resource(
+        &self,
+        command: crate::coordinator::ResourceContributionCommand,
+    ) -> Result<(), Error> {
+        self.call(command.weight()?, move |db| {
+            db.contribute_resource(command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn import_coordinator_registration(
+        &self,
+        registration: Registration,
+        policy: Option<crate::coordinator::ServerEngagement>,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&registration, &policy))?, move |db| {
+            db.import_coordinator_registration(&registration, policy.as_ref())
+        })
+        .await
+    }
     pub async fn edit_resource(
         &self,
         resource: Resource,
@@ -3289,6 +3352,17 @@ impl DomainStore {
     pub async fn engagements(&self, after: String, limit: usize) -> Result<Vec<Engagement>, Error> {
         self.call(weight(&after)?, move |db| db.engagements(&after, limit))
             .await
+    }
+    pub async fn fleet_engagements(
+        &self,
+        fleet: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<Engagement>, Error> {
+        self.call(weight(&(&fleet, &after))?, move |db| {
+            db.fleet_engagements(&fleet, &after, limit)
+        })
+        .await
     }
     /// The console engagements list with its server-side `state` filter
     /// (board #60 item 3): one writer job, one bounded read — the projection
@@ -4041,6 +4115,15 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn resource_engagements(
+        &self,
+        id: String,
+    ) -> Result<Vec<crate::coordinator::ResourceGrant>, Error> {
+        if id.len() > 128 {
+            return Err(Error::Capacity);
+        }
+        self.call(512, move |db| db.resource_engagements(&id)).await
+    }
     pub async fn configure_resource(
         &self,
         command: crate::ResourceConfigurationCommand,
@@ -4269,6 +4352,237 @@ impl DomainStore {
         )
         .await
     }
+    pub async fn configure_coordinator(
+        &self,
+        authority: crate::coordinator::ServerEngagement,
+    ) -> Result<(), Error> {
+        self.call(weight(&authority)?, move |db| {
+            db.configure_coordinator(&authority)
+        })
+        .await
+    }
+
+    pub async fn coordinator_authority(
+        &self,
+        fleet: String,
+    ) -> Result<Option<crate::coordinator::ServerEngagement>, Error> {
+        self.call(weight(&fleet)?, move |db| db.coordinator_authority(&fleet))
+            .await
+    }
+
+    pub async fn change_coordinator(
+        &self,
+        command: crate::coordinator::DelegationCommand,
+    ) -> Result<crate::coordinator::ServerEngagement, Error> {
+        self.call(command.weight()?, move |db| {
+            db.change_coordinator(command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn put_coordinator_resource(
+        &self,
+        grant: crate::coordinator::ResourceGrant,
+    ) -> Result<(), Error> {
+        self.call(weight(&grant)?, move |db| {
+            db.put_coordinator_resource(&grant, writer_time()?)
+        })
+        .await
+    }
+    pub async fn approve_coordinator_project(
+        &self,
+        command: crate::coordinator::ProjectApproval,
+        definition: serde_json::Value,
+    ) -> Result<crate::coordinator::ProjectGrant, Error> {
+        self.call(weight(&(&command, &definition))?, move |db| {
+            db.approve_coordinator_project(&command, &definition, writer_time()?)
+        })
+        .await
+    }
+    pub async fn verify_coordinator_project(&self, proof: VerifiedRequest) -> Result<(), Error> {
+        self.call(
+            weight(&(proof.request(), proof.registration(), proof.audit()))?,
+            move |db| db.verify_coordinator_project(&proof, writer_time()?),
+        )
+        .await
+    }
+    pub async fn begin_project_setup(
+        &self,
+        command: crate::coordinator::ProjectSetupCommand,
+    ) -> Result<crate::coordinator::ProjectSetupWork, Error> {
+        self.call(weight(&command)?, move |db| {
+            db.begin_project_setup(&command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn validate_project_setup(
+        &self,
+        command: crate::coordinator::ProjectSetupCommand,
+    ) -> Result<(), Error> {
+        self.call(weight(&command)?, move |db| {
+            db.validate_project_setup(&command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn finish_project_setup(
+        &self,
+        command: crate::coordinator::ProjectSetupCommand,
+        reason: Option<String>,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&(&command, &reason))?, move |db| {
+            db.finish_project_setup(&command, reason.as_deref(), writer_time()?)
+        })
+        .await
+    }
+    pub async fn coordinator_project_ready(
+        &self,
+        observed: crate::coordinator::ProjectReadiness,
+    ) -> Result<crate::coordinator::ProjectGrant, Error> {
+        self.call(weight(&observed)?, move |db| {
+            db.coordinator_project_ready(&observed, writer_time()?)
+        })
+        .await
+    }
+    pub async fn approve_coordinated_agent(
+        &self,
+        command: crate::coordinator::AgentApproval,
+        proof: VerifiedRequest,
+    ) -> Result<Engagement, Error> {
+        self.call(
+            weight(&(
+                &command,
+                proof.request(),
+                proof.registration(),
+                proof.audit(),
+            ))?,
+            move |db| db.approve_coordinated_agent(&command, &proof, writer_time()?),
+        )
+        .await
+    }
+    pub async fn receive_coordinator_agent(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.receive_coordinator_agent(&fleet, &payload, writer_time()?)
+        })
+        .await
+    }
+    pub async fn control_coordinator_agent(
+        &self,
+        fleet: String,
+        command: crate::coordinator::AgentControl,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&(&fleet, &command))?, move |db| {
+            db.control_coordinator_agent(&fleet, &command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn coordinator_agent_lifecycle(
+        &self,
+        agent: String,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&agent)?, move |db| {
+            db.coordinator_agent_lifecycle(&agent)
+        })
+        .await
+    }
+    pub async fn matrix_agent_profile(&self, agent: String) -> Result<serde_json::Value, Error> {
+        self.call(weight(&agent)?, move |db| db.matrix_agent_profile(&agent))
+            .await
+    }
+    pub async fn observe_matrix_agent_profile(
+        &self,
+        agent: String,
+        desired: String,
+        verified: bool,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&agent, &desired))?, move |db| {
+            db.observe_matrix_agent_profile(&agent, &desired, verified, writer_time()?)
+        })
+        .await
+    }
+    pub async fn settle_coordinator_agent(
+        &self,
+        command: crate::coordinator::SettlementCommand,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(command.weight()?, move |db| {
+            db.settle_coordinator_agent(command, writer_time()?)
+        })
+        .await
+    }
+    pub async fn coordinator_settlement(&self, agent: String) -> Result<serde_json::Value, Error> {
+        self.call(weight(&agent)?, move |db| db.coordinator_settlement(&agent))
+            .await
+    }
+    pub async fn coordinator_command_outcome(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.coordinator_command_outcome(&fleet, &payload)
+        })
+        .await
+    }
+    pub async fn receive_coordinator_command(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.receive_coordinator_command(&fleet, &payload, writer_time()?)
+        })
+        .await
+    }
+    pub async fn refuse_coordinator_command(
+        &self,
+        fleet: String,
+        payload: serde_json::Value,
+        reason: String,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&payload)?, move |db| {
+            db.refuse_coordinator_command(&fleet, &payload, &reason, writer_time()?)
+        })
+        .await
+    }
+    pub async fn refuse_coordinator_agent(
+        &self,
+        id: String,
+        reason: String,
+    ) -> Result<serde_json::Value, Error> {
+        self.call(weight(&(&id, &reason))?, move |db| {
+            db.refuse_coordinator_agent(&id, &reason, writer_time()?)
+        })
+        .await
+    }
+    pub async fn coordinator_deliveries(
+        &self,
+        fleet: String,
+        after: String,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        self.call(weight(&(&fleet, &after))?, move |db| {
+            db.coordinator_deliveries(&fleet, &after, limit)
+        })
+        .await
+    }
+    pub async fn approve_coordinator_top_up(
+        &self,
+        command: crate::coordinator::TokenTopUpApproval,
+        proof: VerifiedRequest,
+    ) -> Result<Engagement, Error> {
+        self.call(
+            weight(&(
+                &command,
+                proof.request(),
+                proof.registration(),
+                proof.audit(),
+            ))?,
+            move |db| db.approve_coordinator_top_up(&command, &proof, writer_time()?),
+        )
+        .await
+    }
     /// ADR-186 §A: the console approval with an operator-chosen amount;
     /// `None` is the plain approval.
     pub async fn approve_allocating(
@@ -4334,6 +4648,19 @@ impl DomainStore {
     pub async fn claim_effect_for(&self, id: String) -> Result<Option<Effect>, Error> {
         self.call(weight(&id)?, move |db| db.claim_effect_for(&id))
             .await
+    }
+    pub async fn inspect_retirement_effect(&self, id: String) -> Result<Option<Effect>, Error> {
+        self.call(weight(&id)?, move |db| db.inspect_retirement_effect(&id))
+            .await
+    }
+    pub async fn pending_identity_retirements(
+        &self,
+        fleet_id: String,
+    ) -> Result<Vec<String>, Error> {
+        self.call(weight(&fleet_id)?, move |db| {
+            db.pending_identity_retirements(&fleet_id)
+        })
+        .await
     }
     /// Approved-but-unprovisioned engagements of one fleet (read-only).
     pub async fn pending_provisions(&self, fleet_id: String) -> Result<Vec<String>, Error> {
@@ -4463,6 +4790,43 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn effect(&self, id: String) -> Result<Effect, Error> {
+        self.call(weight(&id)?, move |db| db.effect(&id)).await
+    }
+    pub async fn uncertain_provisions(&self, fleet_id: String) -> Result<Vec<String>, Error> {
+        self.call(weight(&fleet_id)?, move |db| {
+            db.uncertain_provisions(&fleet_id)
+        })
+        .await
+    }
+    pub async fn validate_recoverable_provision(
+        &self,
+        effect: Effect,
+        registration: hagency_core::authority::Registration,
+    ) -> Result<(), Error> {
+        self.call(weight(&(&effect, &registration))?, move |db| {
+            db.validate_recoverable_provision(&effect, &registration)
+        })
+        .await
+    }
+    pub async fn inspect_provision_scope(
+        &self,
+        effect: Effect,
+        registration: hagency_core::authority::Registration,
+    ) -> Result<crate::OwnedProvisionScope, Error> {
+        self.call(weight(&(&effect, &registration))?, move |db| {
+            db.inspect_provision_scope(&effect, &registration)
+        })
+        .await
+    }
+    pub async fn resume_inspected_provision(
+        &self,
+        scope: crate::OwnedProvisionScope,
+    ) -> Result<(), Error> {
+        let size = weight(&scope.queue_value())?;
+        self.call(size, move |db| db.resume_inspected_provision(&scope))
+            .await
+    }
     pub async fn provision_runtime_scope(
         &self,
         effect: Effect,
@@ -4491,9 +4855,14 @@ impl DomainStore {
         })
         .await
     }
-    pub async fn inline_factory_engagements(&self) -> Result<Vec<String>, Error> {
-        self.call(weight(&())?, |db| db.inline_factory_engagements())
-            .await
+    pub async fn inline_factory_engagements(
+        &self,
+        registration: hagency_core::authority::Registration,
+    ) -> Result<Vec<String>, Error> {
+        self.call(weight(&registration)?, move |db| {
+            db.inline_factory_engagements(&registration)
+        })
+        .await
     }
     pub async fn provision_runtime_account(
         &self,

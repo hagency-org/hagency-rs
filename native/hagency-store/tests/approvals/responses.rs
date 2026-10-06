@@ -261,6 +261,7 @@ fn native_approval_response_recovery() {
     let sql = f.sql();
     let path = f.root.path().join("state");
     drop(f.db);
+    crate::common::remove_coordinator_schema(&sql);
     // Reconstruct the real preceding schema by removing only schema22 additions.
     // Rewinding below 33 also rebuilds runner_attempts to its pre-033 shape:
     // park_reason (MA-S2) existed only from schema 33 on, and its ALTER does

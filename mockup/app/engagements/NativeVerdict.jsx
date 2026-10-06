@@ -134,7 +134,7 @@ export default function NativeVerdict() {
     return () => { live = false; };
   }, [flash]);
   if (data.phase === 'error' || data.phase === 'access') return null;
-  const pending = (data.engagements ?? []).filter((e) => e.state === 'pending');
+  const pending = (data.engagements ?? []).filter((e) => e.state === 'pending' && e.coordinatorManaged !== true);
   return (
     <>
       <section className="panel" data-verdict-panel style={{ marginTop: 18 }}>

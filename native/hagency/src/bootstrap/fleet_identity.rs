@@ -70,6 +70,18 @@ struct Client {
     as_token: String,
     server_name: String,
 }
+fn matrix_client(state: &Path) -> Result<reqwest::Client, Error> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20));
+    if let Some(pem) = crate::bootstrap::config::matrix_root(state).map_err(|_| Error::Store)? {
+        builder = builder
+            .add_root_certificate(reqwest::Certificate::from_pem(&pem).map_err(|_| Error::Store)?);
+    }
+    builder.build().map_err(|_| Error::Unreachable)
+}
+
 impl Client {
     async fn send(
         &self,
@@ -256,12 +268,7 @@ pub(crate) async fn ensure(
     let homeserver = text(&appservice, "homeserver").ok_or(Error::Appservice)?;
     let as_token = text(&appservice, "as_token").ok_or(Error::Appservice)?;
     let client = Client {
-        http: reqwest::Client::builder()
-            .redirect(Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|_| Error::Unreachable)?,
+        http: matrix_client(state)?,
         origin: Url::parse(&homeserver).map_err(|_| Error::Appservice)?,
         as_token: as_token.clone(),
         server_name: server_name.to_owned(),
@@ -344,12 +351,7 @@ pub(crate) async fn owner_approval_device(
                 .map_err(|_| Error::Appservice)?;
             let appservice: Value = serde_json::from_slice(&raw).map_err(|_| Error::Appservice)?;
             let client = Client {
-                http: reqwest::Client::builder()
-                    .redirect(Policy::none())
-                    .connect_timeout(Duration::from_secs(5))
-                    .timeout(Duration::from_secs(20))
-                    .build()
-                    .map_err(|_| Error::Unreachable)?,
+                http: matrix_client(state)?,
                 origin: Url::parse(&text(&appservice, "homeserver").ok_or(Error::Appservice)?)
                     .map_err(|_| Error::Appservice)?,
                 as_token: text(&appservice, "as_token").ok_or(Error::Appservice)?,
@@ -446,12 +448,7 @@ pub(crate) async fn fetch_master_key(state: &Path, owner: &str) -> Result<Option
     )
     .map_err(|_| Error::Store)?;
     let client = Client {
-        http: reqwest::Client::builder()
-            .redirect(Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|_| Error::Unreachable)?,
+        http: matrix_client(state)?,
         origin: Url::parse(&homeserver).map_err(|_| Error::Appservice)?,
         as_token: String::new(),
         server_name: String::new(),

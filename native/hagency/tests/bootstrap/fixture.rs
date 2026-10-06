@@ -26,6 +26,9 @@ impl Running {
     pub fn from_child(child: Child) -> Self {
         Self(child)
     }
+    pub fn still_owned(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
 }
 #[cfg(unix)]
 impl Running {
@@ -35,9 +38,6 @@ impl Running {
             .status()
             .unwrap();
         assert!(result.success());
-    }
-    pub fn still_owned(&mut self) -> bool {
-        self.0.try_wait().unwrap().is_none()
     }
     pub async fn exited(&mut self) {
         let until = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -73,12 +73,14 @@ pub struct Fixture {
     /// a remote refusal or another account's identity. The harness's fault,
     /// injected at the homeserver, never in the product.
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fault: Option<Fault>,
     /// When each whoami arrived, for the backoff scenario.
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub whoami_at: Vec<std::time::Instant>,
 }
 /// A fault the fixture's homeserver answers with (ADR-183 scenarios).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug)]
 pub enum Fault {
     /// Every whoami answers this HTTP status.
@@ -93,6 +95,31 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 impl Fixture {
+    /// The readiness boundary's status code (`/ready`: 503 while any
+    /// component is not serving, 200 otherwise).
+    pub async fn ready(&self) -> u16 {
+        let mut stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /ready HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    self.address
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let head = String::from_utf8_lossy(&bytes);
+        head.split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status line in {head}"))
+    }
     pub async fn new(fenced: bool) -> Self {
         Self::with_account(fenced, false).await
     }
@@ -104,6 +131,7 @@ impl Fixture {
     /// backend-v2.js:2057-2075). The settings ride the production admission
     /// path (`agentDefinition` on the verified request) — not a serve-level
     /// or host-level switch.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub async fn with_worktree_agent(
         fenced: bool,
         worktrees_dir: PathBuf,
@@ -305,6 +333,7 @@ impl Fixture {
             fake,
             address,
             served: 0,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             fault: None,
             whoami_at: Vec::new(),
         }
@@ -619,31 +648,6 @@ impl Fixture {
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {}
             }
         }
-    }
-    /// The readiness boundary's status code (`/ready`: 503 while any
-    /// component is not serving, 200 otherwise).
-    pub async fn ready(&self) -> u16 {
-        let mut stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
-        stream
-            .write_all(
-                format!(
-                    "GET /ready HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                    self.address
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut bytes = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
-        let head = String::from_utf8_lossy(&bytes);
-        head.split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .unwrap_or_else(|| panic!("no status line in {head}"))
     }
     /// Keep the worker served for a while: for asserting that nothing
     /// happened, which no predicate can wait for.

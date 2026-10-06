@@ -13328,3 +13328,33 @@ Live, working-tree binary: kill -9 mid-round, restart ready in two seconds, both
 ### 2026-09-22/23 — evidence slice (ADR-181) built
 - Operator approved (a) reversing ADR-096's retained-owner rule, (b) the Matrix fence policy area (retry-before-fence now; post-fence choice asked when that slice comes), (c) the closing order. Evidence slice built as designed and shown: store (migration 037, runner_attempt_events, clocks, terminal_reason, lost writer), platform (StopRefusal + live rows + leader status + guardian exit, guardian stderr pipe), runtime (exit_identity, stderr_tail, tracing), execution (LostAuthority { site, cause } at every producer, phase notes, stop record), hagency (status authority_site/cause, driver claimed/failed/settled records, terminal_reason). Ten spec scenarios bound; bindings 1200 none missing; callers exit 0; inventory green. Gate chain running.
 - 2026-09-23: evidence slice committed (see git log: feat(native): every owned attempt leaves evidence…); ADR consistency review committed. Two test-pin fixes after the gate: the tracing capture must be the global default (the operation runs on its own thread) and fmt quotes str fields (phase="x"); a host-terminated runtime reads protocol:signal:15 in terminal_reason.
+
+
+### 2026-10-06 — Frank-Lee provisioning repair and current setup guides
+
+- Reproduced the setup failure from the original durable artifacts: completed
+  encryption enrollment, no owner invitation or runtime, and a timeout under
+  the old shared 60-second enrollment/initial-sync deadline. Implemented bounded
+  enrollment steps, same-owner transient-read resumption, fewer duplicate
+  authority reads, and strictly inspected pre-invite restart recovery.
+- Validation: 55 provisioning tests and 10 store provision-runtime tests pass.
+  Matrix's broader run passed 282/284; its two new/changed fixture expectations
+  were corrected and both passed in the final 55-test run. Configured fleet
+  passed 9/11 initially; the two failures passed individually with a stable
+  executable (two-agent encrypted rounds and survival of a refused handoff).
+  The first-DM-at-activation and restart/reattach cases passed in the broad run.
+  Strict Clippy for hagency/matrix/store all targets, formatting and whitespace
+  checks pass. No claim of an entirely green single broad test run.
+- Installed the built fix in the existing local human-test Hagency on port
+  13310 after an idle check, graceful stop and private state/binary backup.
+  Frank-Lee resumed the original effect/fence and 100,000-token allocation;
+  its original Matrix account/rooms/keys were reused and its owner DM invitation
+  was acknowledged. Setup now waits for the human owner to accept the invite.
+  Existing agents' transports remain available. No agent chat sent by Codex.
+- A delegated documentation agent updated English/Chinese Hagency READMEs and
+  user guides, plus Rinx READMEs, agent-chat guide and new bilingual Hagency
+  quick starts. Guides cover automatic association delivery, role-specific
+  Inbox decisions, unified resource configuration, project rooms, execution
+  readiness, owner DMs and common settings. Documented the existing fresh-state
+  source-configuration API prerequisite. Agent checked 158 local links/anchors,
+  47 shell blocks and 2 JSON payloads. All changes remain uncommitted.

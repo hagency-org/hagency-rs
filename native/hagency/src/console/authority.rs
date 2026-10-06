@@ -334,6 +334,84 @@ impl Authority {
     pub(super) fn can_configure(&self, session: &Session) -> Result<bool, Error> {
         self.logged_in(session)
     }
+    pub(super) fn contribution(
+        &self,
+        session: &Session,
+        grant: hagency_store::coordinator::ResourceGrant,
+    ) -> Result<hagency_store::coordinator::ResourceContributionCommand, Error> {
+        let state = self.0.lock().map_err(|_| Error::Unavailable)?;
+        if state.retired {
+            return Err(Error::Unavailable);
+        }
+        let now = Instant::now();
+        let access = state
+            .sessions
+            .iter()
+            .find(|s| matches(s, &session.0, now))
+            .and_then(|s| s.access.as_ref())
+            .ok_or(Error::Unauthorized)?;
+        access
+            .configuration
+            .prepare_contribution(grant, now + Duration::from_secs(15))
+            .map_err(|e| match e {
+                hagency_store::Error::Busy => Error::Busy,
+                hagency_store::Error::LocalAuthority => Error::Unauthorized,
+                hagency_store::Error::Invalid(_) => Error::Invalid,
+                _ => Error::Unavailable,
+            })
+    }
+    pub(super) fn delegation(
+        &self,
+        session: &Session,
+        change: hagency_store::coordinator::DelegationChange,
+    ) -> Result<hagency_store::coordinator::DelegationCommand, Error> {
+        let state = self.0.lock().map_err(|_| Error::Unavailable)?;
+        if state.retired {
+            return Err(Error::Unavailable);
+        }
+        let now = Instant::now();
+        let access = state
+            .sessions
+            .iter()
+            .find(|s| matches(s, &session.0, now))
+            .and_then(|s| s.access.as_ref())
+            .ok_or(Error::Unauthorized)?;
+        access
+            .configuration
+            .prepare_delegation(change, now + Duration::from_secs(15))
+            .map_err(|e| match e {
+                hagency_store::Error::Busy => Error::Busy,
+                hagency_store::Error::LocalAuthority => Error::Unauthorized,
+                hagency_store::Error::Invalid(_) => Error::Invalid,
+                _ => Error::Unavailable,
+            })
+    }
+    pub(super) fn settlement(
+        &self,
+        session: &Session,
+        change: hagency_store::coordinator::FinalUsage,
+    ) -> Result<hagency_store::coordinator::SettlementCommand, Error> {
+        let state = self.0.lock().map_err(|_| Error::Unavailable)?;
+        if state.retired {
+            return Err(Error::Unavailable);
+        }
+        let now = Instant::now();
+        let access = state
+            .sessions
+            .iter()
+            .find(|s| matches(s, &session.0, now))
+            .and_then(|s| s.access.as_ref())
+            .ok_or(Error::Unauthorized)?;
+        access
+            .configuration
+            .prepare_settlement(change, now + Duration::from_secs(15))
+            .map_err(|e| match e {
+                hagency_store::Error::Busy => Error::Busy,
+                hagency_store::Error::LocalAuthority => Error::Unauthorized,
+                hagency_store::Error::Invalid(_) => Error::Invalid,
+                _ => Error::Unavailable,
+            })
+    }
     pub(super) fn can_manage_accounts(&self, session: &Session) -> Result<bool, Error> {
         self.logged_in(session)
     }
@@ -401,6 +479,10 @@ impl Authority {
                 input.ceiling,
                 deadline,
             )
+            .and_then(|command| match input.engagement {
+                Some(change) => command.with_engagement(change),
+                None => Ok(command),
+            })
             .map_err(|e| match e {
                 hagency_store::Error::Busy => Error::Busy,
                 hagency_store::Error::LocalAuthority => Error::Unauthorized,
@@ -547,6 +629,7 @@ mod tests {
             create: false,
             profile: hagency_store::ProfileChange::Preserve {},
             ceiling: hagency_store::CeilingChange::Preserve {},
+            engagement: None,
         };
         let configuration = authority
             .configuration(&session, input(), now + Duration::from_secs(2))

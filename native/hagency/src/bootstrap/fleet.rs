@@ -50,6 +50,39 @@ fn lost(status: &super::Status) -> bool {
     status.error.is_some() && status.unresolved_dispatches == 0 && status.fenced.is_none()
 }
 impl Routes {
+    /// Current worker observation only; no private runtime details leave here.
+    pub(crate) fn agent_availability(&self, engagement: &str) -> &'static str {
+        if self.closed.load(Ordering::Acquire) || !self.running.load(Ordering::Acquire) {
+            return "unavailable";
+        }
+        let Ok(entries) = self.entries.lock() else {
+            return "unavailable";
+        };
+        let Some(entry) = entries.get(engagement) else {
+            return "not_attached";
+        };
+        let status = entry.status.get();
+        if status.fenced.is_some() || status.unresolved_dispatches > 0 {
+            return "blocked";
+        }
+        if status.error.is_some()
+            || status.matrix_error.is_some()
+            || matches!(
+                status.state,
+                "not_started"
+                    | "not_attached"
+                    | "awaiting_owner"
+                    | "closed"
+                    | "retiring"
+                    | "refresh_refused"
+                    | "awaiting_operator"
+                    | "launch_refused"
+            )
+        {
+            return "unavailable";
+        }
+        "available"
+    }
     pub(crate) async fn select(
         &self,
         cap: RunnerCapability,
@@ -708,6 +741,15 @@ mod tests {
         );
         assert_eq!(value["failed"], false);
         assert_eq!(fleet.routes.state(), "not_started");
+        assert_eq!(fleet.routes.agent_availability("en_healthy"), "unavailable");
+        fleet.routes.running.store(true, Ordering::Release);
+        assert_eq!(fleet.routes.agent_availability("en_healthy"), "available");
+        assert_eq!(fleet.routes.agent_availability("en_failed"), "blocked");
+        assert_eq!(fleet.routes.agent_availability("en_absent"), "not_attached");
+        healthy.not_attached(None);
+        assert_eq!(fleet.routes.agent_availability("en_healthy"), "unavailable");
+        healthy.phase("receiving");
+        fleet.routes.running.store(false, Ordering::Release);
         // A fenced agent is not lost either: its state word says so.
         failed.custody(0, Some("dispatch".into()));
         let value = fleet.routes.snapshot();

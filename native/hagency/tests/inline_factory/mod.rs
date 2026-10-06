@@ -100,8 +100,11 @@ pub struct Fixture {
     custody: hagency_store::Store,
     server: tokio::task::JoinHandle<()>,
     handle: salvo::server::ServerHandle,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     application_service: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     service_mode: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub address: std::net::SocketAddr,
 }
 impl Fixture {
@@ -401,8 +404,11 @@ impl Fixture {
             server,
             handle,
             fleet,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             application_service,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             service_mode,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             address,
         };
         {
@@ -429,7 +435,17 @@ impl Fixture {
     /// the same state, and the domain repository is reopened the way a real
     /// start reopens it. The fake homeserver and the owner's device keep their
     /// state, as the real ones would.
-    pub async fn restart(mut self) -> Self {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub async fn restart(self) -> Self {
+        self.rebuild(true).await
+    }
+    /// Replace a transport without replacing its process/domain writer.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub async fn reconnect(self) -> Self {
+        self.rebuild(false).await
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn rebuild(mut self, reopen_domain: bool) -> Self {
         if let Some(fleet) = &mut self.fleet {
             fleet.close().await.unwrap();
         }
@@ -441,7 +457,9 @@ impl Fixture {
         self.approvals.close().await.unwrap();
         self.handle.stop_graceful(Some(Duration::from_secs(1)));
         self.server.await.unwrap();
-        self.base.store.shutdown().await.unwrap();
+        if reopen_domain {
+            self.base.store.shutdown().await.unwrap();
+        }
         self.custody.shutdown().await.unwrap();
         assert!(self.foreign.is_none());
         let Self {
@@ -452,11 +470,13 @@ impl Fixture {
             service_mode,
             ..
         } = self;
-        base.store = hagency_store::DomainStore::start(
-            hagency_store::DomainRepository::open(&base.root.path().join("domain")).unwrap(),
-            32,
-        )
-        .unwrap();
+        if reopen_domain {
+            base.store = hagency_store::DomainStore::start(
+                hagency_store::DomainRepository::open(&base.root.path().join("domain")).unwrap(),
+                32,
+            )
+            .unwrap();
+        }
         Self::assemble(base, fake, peer, application_service, false, service_mode).await
     }
     pub async fn provision(&mut self) {
@@ -1000,7 +1020,9 @@ impl Peer {
                     (200, json!({"room_id":PROJECT}))
                 }
             } else if url.path().ends_with("/sync") {
-                assert!(!rep && !human && self.owner && self.joined);
+                // Provisioning reserves the inbox cursor before the owner
+                // invitation, so the first DM cannot precede that cursor.
+                assert!(!rep && !human && self.created && self.joined);
                 (
                     200,
                     json!({"next_batch":"factory-agent-active","rooms":{"join":{}},"to_device":{"events":[]}}),

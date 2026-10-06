@@ -34,7 +34,7 @@ struct Record {
     stage: String,
     value: Value,
 }
-pub(super) struct Custody {
+pub(crate) struct Custody {
     root: PathBuf,
     binding: String,
     cipher: StoreCipher,

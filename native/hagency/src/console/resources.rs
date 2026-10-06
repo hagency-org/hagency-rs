@@ -36,12 +36,14 @@ pub(super) struct ResourceRow {
     published: bool,
     roles: Vec<String>,
     revision: String,
+    pub(super) engagement_resources: Vec<hagency_store::coordinator::ResourceGrant>,
 }
 impl ResourceRow {
     pub(super) fn from_resource(
         resource: hagency_core::project::Resource,
     ) -> Result<Self, hagency_store::Error> {
         Ok(Self {
+            engagement_resources: Vec::new(),
             id: resource.id(),
             revision: resource_publication_revision(&resource)?,
             roles: resource.eligible_roles(),
@@ -131,11 +133,12 @@ async fn configurations(req: &mut Request, depot: &mut Depot, res: &mut Response
         let mut rows = store.resource_configurations(after, limit + 1).await?;
         let next_after = (rows.len() > limit).then(|| rows[limit - 1].id.clone());
         rows.truncate(limit);
-        let resources = rows
+        let mut resources = rows
             .into_iter()
             .map(|r| {
                 let revision = resource_publication_revision(&r.config)?;
                 Ok(ResourceRow {
+                    engagement_resources: Vec::new(),
                     id: r.id,
                     framework: r.config.framework,
                     model: r.config.model,
@@ -148,6 +151,9 @@ async fn configurations(req: &mut Request, depot: &mut Depot, res: &mut Response
                 })
             })
             .collect::<Result<Vec<_>, hagency_store::Error>>()?;
+        for row in &mut resources {
+            row.engagement_resources = store.resource_engagements(row.id.clone()).await?;
+        }
         let roles = store
             .role_publications()
             .await?

@@ -102,6 +102,8 @@ pub(crate) enum Command {
     Prepare(Value),
     Next,
     Possible(usize),
+    /// Only the original sender, before calling HTTP at all, can undo Possible.
+    NotSent(usize),
     Accept(usize, Value),
     Verify(Value),
     Finish,
@@ -361,6 +363,32 @@ impl Sdk {
                     return Err(Error::OutcomeUnknown);
                 }
                 write.phase = WritePhase::Possible;
+                self.persist_enrollment().await?;
+                Ok(View::Unit)
+            }
+            Command::NotSent(index) => {
+                let record = self.enrollment.as_mut().ok_or(Error::Storage)?;
+                if record.phase == Phase::Complete {
+                    return if self.enrollment_claim.is_some() && index == record.writes.len() {
+                        Ok(View::Unit)
+                    } else {
+                        Err(Error::Conflict)
+                    };
+                }
+                if record.phase != Phase::Writing
+                    || record
+                        .writes
+                        .iter()
+                        .position(|w| w.phase != WritePhase::Applied)
+                        != Some(index)
+                {
+                    return Err(Error::Conflict);
+                }
+                let write = &mut record.writes[index];
+                if write.phase != WritePhase::Possible || write.response.is_some() {
+                    return Err(Error::OutcomeUnknown);
+                }
+                write.phase = WritePhase::Prepared;
                 self.persist_enrollment().await?;
                 Ok(View::Unit)
             }

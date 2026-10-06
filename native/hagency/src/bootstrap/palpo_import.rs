@@ -4,8 +4,8 @@
 //!
 //! The download is `{fleetId, serverName, credentialVersion: 1, registration,
 //! transport}`: the App Service registration Palpo installed for this fleet and
-//! the outbound machine credential. The import writes three things and nothing
-//! else:
+//! the outbound machine credential. The import writes three credential files,
+//! guarded by a private pending marker during replacement:
 //! - the six-field fleet `registrations` row through the store's sole writer,
 //!   with the reception left UNBOUND — Palpo's connection probe binds it later
 //!   (`lib/fleet-protocol.js` sets `receptionRoomId` only there);
@@ -18,7 +18,7 @@
 use hagency_core::authority::Registration;
 use hagency_store::{DomainRepository, Repository, private};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -182,7 +182,11 @@ pub fn parse(raw: &str) -> Result<(Registration, Value, Value, String, u64), Err
     let endpoint = endpoint.as_str().trim_end_matches('/').to_owned();
     let row = Registration {
         fleet_id: fleet_id.to_owned(),
-        generation: 1,
+        generation: envelope
+            .get("engagement")
+            .and_then(|e| e.get("registrationGeneration"))
+            .and_then(Value::as_u64)
+            .unwrap_or(1),
         server_name: server_name.to_owned(),
         reception_room_id: String::new(),
         representative_mxid: format!("@{sender}:{server_name}"),
@@ -196,6 +200,41 @@ pub fn parse(raw: &str) -> Result<(Registration, Value, Value, String, u64), Err
     Ok((row, appservice, json!(machine), endpoint, generation))
 }
 
+/// Import is an explicit resource-owner delegation, not a machine command.
+/// A downloaded "verified" label cannot replace this installation's own probe.
+pub(crate) fn coordinator_profile(
+    raw: &str,
+    registration: &Registration,
+) -> Result<Option<hagency_store::coordinator::ServerEngagement>, Error> {
+    let envelope: Value = serde_json::from_str(raw).map_err(|_| Error::Invalid("json"))?;
+    let Some(value) = envelope.get("engagement") else {
+        return Ok(None);
+    };
+    let mut engagement: hagency_store::coordinator::ServerEngagement =
+        serde_json::from_value(value.clone()).map_err(|_| Error::Invalid("engagement"))?;
+    if engagement.id.as_str() != registration.fleet_id
+        || engagement.server.as_str() != registration.server_name
+        || u64::from(engagement.registration_generation) != registration.generation
+        || !matches!(
+            value["state"].as_str(),
+            Some("approved" | "configuring" | "verifying" | "verified")
+        )
+    {
+        return Err(Error::Invalid("engagement binding"));
+    }
+    engagement.state =
+        serde_json::from_value(json!(if registration.reception_room_id.is_empty() {
+            "configuring"
+        } else {
+            "verified"
+        }))
+        .map_err(|_| Error::Invalid("engagement state"))?;
+    // This runtime implements v1. Palpo cannot observe that capability until our
+    // authenticated heartbeat/probe; its pre-import projection may be false.
+    engagement.coordinator_approval_v1 = true;
+    Ok(Some(engagement))
+}
+
 /// The Matrix client API the fleet's App Service identities act through.
 pub(crate) fn homeserver(homeserver: &str) -> Result<String, Error> {
     let origin = reqwest::Url::parse(homeserver).map_err(|_| Error::Invalid("homeserver"))?;
@@ -205,8 +244,219 @@ pub(crate) fn homeserver(homeserver: &str) -> Result<String, Error> {
     Ok(origin.as_str().trim_end_matches('/').to_owned())
 }
 
-/// The three private files `serve --palpo-transport` reads; one writer for the
-/// CLI and the console import.
+/// Stable per-engagement credential directories. Keep the first legacy profile
+/// in place; a second profile must never overwrite it, even on the same server.
+pub(crate) fn profile_directory(state: &Path, fleet: &str) -> Result<PathBuf, Error> {
+    if fleet.len() != 35
+        || !fleet.starts_with("hf_")
+        || !fleet[3..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(Error::Invalid("fleetId"));
+    }
+    let legacy = state.join("palpo-transport.json");
+    if present(&legacy)? {
+        let raw = super::config::read(&legacy, 16 * 1024, "palpo-transport.json")
+            .map_err(|_| Error::Invalid("existing profile"))?;
+        let current: Value =
+            serde_json::from_slice(&raw).map_err(|_| Error::Invalid("existing profile"))?;
+        if current["registration"]["fleetId"] == fleet {
+            return Ok(state.to_owned());
+        }
+    } else if !present(&state.join("palpo-engagements"))? {
+        return Ok(state.to_owned());
+    }
+    let root = state.join("palpo-engagements");
+    private::directory(&root)?;
+    let directory = root.join(fleet);
+    if !present(&directory)?
+        && std::fs::read_dir(&root)
+            .map_err(|_| Error::Invalid("profile directory"))?
+            .count()
+            >= 32
+    {
+        return Err(Error::Invalid("too many engagements"));
+    }
+    private::directory(&directory)?;
+    Ok(directory)
+}
+
+/// An engagement ID as an engagement directory is named: `hf_` and 32
+/// lowercase hex digits.
+pub(crate) fn is_engagement_id(name: &str) -> bool {
+    name.len() == 35
+        && name.starts_with("hf_")
+        && name[3..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The profiles under a state directory. One bad entry never refuses the
+/// others: an engagement directory that cannot be used is `unusable` (that
+/// engagement is parked), any other entry is `ignored`, and hidden entries
+/// such as Finder's `.DS_Store` are not profiles and are not listed.
+#[derive(Debug, Default)]
+pub(crate) struct Profiles {
+    /// The first (legacy) profile at the root, then each engagement directory.
+    pub(crate) directories: Vec<PathBuf>,
+    pub(crate) unusable: Vec<String>,
+    pub(crate) ignored: Vec<String>,
+}
+
+pub(crate) fn profile_directories(state: &Path) -> Result<Profiles, Error> {
+    let mut result = Profiles::default();
+    if present(&state.join("palpo-transport.json"))? {
+        result.directories.push(state.to_owned());
+    }
+    let root = state.join("palpo-engagements");
+    if !present(&root)? {
+        return Ok(result);
+    }
+    private::directory(&root)?;
+    for entry in std::fs::read_dir(root).map_err(|_| Error::Invalid("profile directory"))? {
+        let entry = entry.map_err(|_| Error::Invalid("profile directory"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        if entry.file_name().to_str() != Some(name.as_str()) || !is_engagement_id(&name) {
+            result.ignored.push(name);
+            continue;
+        }
+        let transport = private::directory(&entry.path())
+            .map_err(|_| Error::Invalid("profile directory"))
+            .and_then(|_| present(&entry.path().join("palpo-transport.json")));
+        match transport {
+            Ok(true) => result.directories.push(entry.path()),
+            Ok(false) => {}
+            Err(_) => result.unusable.push(name),
+        }
+        if result.directories.len() > 33 {
+            return Err(Error::Invalid("too many engagements"));
+        }
+    }
+    result.directories.sort();
+    result.unusable.sort();
+    result.ignored.sort();
+    Ok(result)
+}
+
+fn present(path: &Path) -> Result<bool, Error> {
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(Error::Invalid("profile unreadable")),
+    }
+}
+
+const PENDING: &str = "palpo-profile-pending.json";
+
+fn profile_json(path: &Path) -> Result<Value, Error> {
+    let bytes = super::config::read(path, 64 * 1024, "Palpo profile")
+        .map_err(|_| Error::Invalid("private profile"))?;
+    serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("private profile"))
+}
+
+fn fingerprint(transport: &Value, appservice: &Value, machine: &Value) -> Result<String, Error> {
+    let mut transport = transport.clone();
+    // Reception is bound by a live probe, independent of credential rotation.
+    transport["registration"]["receptionRoomId"] = json!("");
+    hagency_core::canonical::digest(
+        &json!({"transport":transport,"appservice":appservice,"machine":machine}),
+    )
+    .map_err(|_| Error::Invalid("profile digest"))
+}
+
+fn transport(registration: &Registration, endpoint: &str, generation: u64) -> Value {
+    json!({"profile":"palpo_v2_resources_v1","endpoint":endpoint,"registration":registration,"machine_generation":generation})
+}
+
+/// Validate before importing domain authority as well as before replacing files.
+/// Same-generation retries must retain every credential and identity binding.
+pub(crate) fn validate_write(
+    state: &Path,
+    registration: &Registration,
+    appservice: &Value,
+    machine: &Value,
+    endpoint: &str,
+    generation: u64,
+) -> Result<(), Error> {
+    let desired = transport(registration, endpoint, generation);
+    let expected = fingerprint(&desired, appservice, machine)?;
+    if present(&state.join(PENDING))? {
+        let marker = profile_json(&state.join(PENDING))?;
+        if marker["state"] == "pending" {
+            if marker["digest"] != expected {
+                return Err(Error::Invalid("another profile import is pending"));
+            }
+            return Ok(());
+        }
+        if marker["state"] != "complete" {
+            return Err(Error::Invalid("profile import state"));
+        }
+    }
+    if !present(&state.join("palpo-transport.json"))? {
+        return Ok(());
+    }
+    let current = profile_json(&state.join("palpo-transport.json"))?;
+    let previous = current["machine_generation"]
+        .as_u64()
+        .ok_or(Error::Invalid("transport generation"))?;
+    let old_registration: Registration = serde_json::from_value(current["registration"].clone())
+        .map_err(|_| Error::Invalid("registration"))?;
+    if old_registration.fleet_id != registration.fleet_id
+        || registration.generation < old_registration.generation
+        || generation < previous
+    {
+        return Err(Error::Invalid("stale profile generation"));
+    }
+    let old_appservice = profile_json(&state.join("palpo-appservice.json"))?;
+    if registration.generation == old_registration.generation {
+        let mut old = old_registration.clone();
+        old.reception_room_id.clear();
+        let mut next = registration.clone();
+        next.reception_room_id.clear();
+        if old != next
+            || [
+                "as_token",
+                "hs_token",
+                "sender_localpart",
+                "namespace",
+                "homeserver",
+            ]
+            .iter()
+            .any(|key| old_appservice[*key] != appservice[*key])
+        {
+            return Err(Error::Invalid("registration generation conflict"));
+        }
+    }
+    if generation == previous {
+        let bytes = super::config::read(
+            &state.join("palpo.machine_token"),
+            4096,
+            "Palpo machine token",
+        )
+        .map_err(|_| Error::Invalid("private profile"))?;
+        let old_machine =
+            String::from_utf8(bytes).map_err(|_| Error::Invalid("private profile"))?;
+        if fingerprint(&current, &old_appservice, &json!(old_machine))? != expected {
+            return Err(Error::Invalid("transport generation conflict"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_committed(state: &Path) -> Result<(), Error> {
+    if present(&state.join(PENDING))? && profile_json(&state.join(PENDING))?["state"] != "complete"
+    {
+        return Err(Error::Invalid("retry the pending profile import"));
+    }
+    Ok(())
+}
+
+/// One writer for CLI and console. A pending marker prevents startup with mixed
+/// credential files after a crash; replaying the exact import repairs all files.
 pub(crate) fn write(
     state: &Path,
     registration: &Registration,
@@ -215,18 +465,32 @@ pub(crate) fn write(
     endpoint: &str,
     generation: u64,
 ) -> Result<(), Error> {
-    let transport = json!({
-        "profile": "palpo_v2_resources_v1", "endpoint": endpoint,
-        "registration": registration, "machine_generation": generation,
-    });
+    validate_write(
+        state,
+        registration,
+        appservice,
+        machine,
+        endpoint,
+        generation,
+    )?;
+    let transport = transport(registration, endpoint, generation);
     let encode =
         |value: &Value| serde_json::to_vec_pretty(value).map_err(|_| Error::Invalid("encode"));
+    let digest = fingerprint(&transport, appservice, machine)?;
+    private::replace(
+        &state.join(PENDING),
+        &encode(&json!({"state":"pending","digest":digest}))?,
+    )?;
     private::replace(&state.join("palpo-transport.json"), &encode(&transport)?)?;
     private::replace(
         &state.join("palpo.machine_token"),
         machine.as_str().unwrap_or_default().as_bytes(),
     )?;
     private::replace(&state.join("palpo-appservice.json"), &encode(appservice)?)?;
+    private::replace(
+        &state.join(PENDING),
+        &encode(&json!({"state":"complete","digest":digest}))?,
+    )?;
     Ok(())
 }
 
@@ -245,19 +509,32 @@ pub fn run(
     appservice["homeserver"] = json!(origin);
     let _custody = Repository::open(state)?;
     let mut domain = DomainRepository::open(state)?;
+    let accepted = domain.coordinator_authority(&registration.fleet_id)?;
+    super::association::validate_import(state, &raw, &origin, accepted.as_ref())
+        .map_err(|_| Error::Invalid("association binding"))?;
     // A re-import of the same fleet keeps a reception an earlier probe bound.
     let current = domain
         .provisioning_registration(&registration.fleet_id)
         .ok();
     let mut registration = registration;
-    if let Some(current) = current {
+    if let Some(current) = current.filter(|r| r.generation == registration.generation) {
         registration.reception_room_id = current.reception_room_id;
     } else if let Some(room) = reception {
         registration.reception_room_id = room.to_owned();
     }
-    domain.register(&registration)?;
+    let policy = coordinator_profile(&raw, &registration)?;
+    let profile = profile_directory(state, &registration.fleet_id)?;
+    validate_write(
+        &profile,
+        &registration,
+        &appservice,
+        &machine,
+        &endpoint,
+        generation,
+    )?;
+    domain.import_coordinator_registration(&registration, policy.as_ref())?;
     write(
-        state,
+        &profile,
         &registration,
         &appservice,
         &machine,
@@ -286,6 +563,259 @@ mod tests {
                     "aliases": [], "rooms": []}, "rate_limited": true, "receive_ephemeral": false},
             "transport": {"mode": "outbound", "url": format!("https://palpo.example/api/fleet/v2/{FLEET}"),
                 "token": "machine-token-0123456789", "generation": 1}})
+    }
+
+    #[test]
+    fn native_palpo_profile_rotation_refuses_stale_generation_and_recovers_partial_files() {
+        let root = tempfile::tempdir().unwrap();
+        let (registration, appservice, machine, endpoint, generation) =
+            parse(&download().to_string()).unwrap();
+        write(
+            root.path(),
+            &registration,
+            &appservice,
+            &machine,
+            &endpoint,
+            generation,
+        )
+        .unwrap();
+        let changed = json!("next-machine-token-0123456789");
+        assert!(
+            write(
+                root.path(),
+                &registration,
+                &appservice,
+                &changed,
+                &endpoint,
+                generation
+            )
+            .is_err()
+        );
+        let next = transport(&registration, &endpoint, generation + 1);
+        // Simulate process loss after the new transport file, before its token.
+        private::replace(&root.path().join(PENDING),&serde_json::to_vec(&json!({"state":"pending","digest":fingerprint(&next,&appservice,&changed).unwrap()})).unwrap()).unwrap();
+        private::replace(
+            &root.path().join("palpo-transport.json"),
+            &serde_json::to_vec(&next).unwrap(),
+        )
+        .unwrap();
+        assert!(super::super::palpo::Prepared::load(root.path()).is_err());
+        assert!(
+            write(
+                root.path(),
+                &registration,
+                &appservice,
+                &machine,
+                &endpoint,
+                generation
+            )
+            .is_err()
+        );
+        write(
+            root.path(),
+            &registration,
+            &appservice,
+            &changed,
+            &endpoint,
+            generation + 1,
+        )
+        .unwrap();
+        assert!(super::super::palpo::Prepared::load(root.path()).is_ok());
+        let before = std::fs::read(root.path().join("palpo-transport.json")).unwrap();
+        assert!(
+            write(
+                root.path(),
+                &registration,
+                &appservice,
+                &machine,
+                &endpoint,
+                generation
+            )
+            .is_err()
+        );
+        let mut impostor = appservice.clone();
+        impostor["as_token"] = json!("replacement-as-token");
+        assert!(
+            write(
+                root.path(),
+                &registration,
+                &impostor,
+                &changed,
+                &endpoint,
+                generation + 2
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("palpo-transport.json")).unwrap(),
+            before
+        );
+        assert_eq!(
+            private::read_secret(&root.path().join("palpo.machine_token")).unwrap(),
+            changed.as_str().unwrap().as_bytes()
+        );
+    }
+
+    #[test]
+    fn native_palpo_multiple_profiles_same_server_preserve_independent_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        let first = download();
+        let (mut one, as_one, machine_one, endpoint_one, generation) =
+            parse(&first.to_string()).unwrap();
+        // A verified profile includes the bound reception room. Real imports
+        // exceed the token reader's 512-byte limit; short unbound fixtures hid it.
+        one.reception_room_id = format!("!{}:example.test", "r".repeat(160));
+        let primary = profile_directory(root.path(), &one.fleet_id).unwrap();
+        assert_eq!(primary, root.path());
+        write(
+            &primary,
+            &one,
+            &as_one,
+            &machine_one,
+            &endpoint_one,
+            generation,
+        )
+        .unwrap();
+        assert!(
+            std::fs::metadata(primary.join("palpo-transport.json"))
+                .unwrap()
+                .len()
+                > 512
+        );
+        let saved = private::read_secret(&primary.join("palpo-appservice.json")).unwrap();
+        let mut second = first
+            .to_string()
+            .replace(FLEET, "hf_ffffffffffffffffffffffffffffffff");
+        second = second
+            .replace("as-token-value", "second-as-token")
+            .replace("hs-token-value", "second-hs-token");
+        let (two, as_two, machine_two, endpoint_two, generation) = parse(&second).unwrap();
+        let secondary = profile_directory(root.path(), &two.fleet_id).unwrap();
+        assert_ne!(primary, secondary);
+        write(
+            &secondary,
+            &two,
+            &as_two,
+            &machine_two,
+            &endpoint_two,
+            generation,
+        )
+        .unwrap();
+        assert_eq!(
+            profile_directory(root.path(), &one.fleet_id).unwrap(),
+            primary
+        );
+        assert_eq!(
+            profile_directory(root.path(), &two.fleet_id).unwrap(),
+            secondary
+        );
+        assert_eq!(
+            private::read_secret(&primary.join("palpo-appservice.json")).unwrap(),
+            saved
+        );
+        assert_eq!(
+            profile_directories(root.path()).unwrap().directories.len(),
+            2
+        );
+        assert_eq!(
+            super::super::palpo::Prepared::load_all(root.path())
+                .unwrap()
+                .prepared
+                .len(),
+            2
+        );
+        assert!(profile_directory(root.path(), "../wrong").is_err());
+    }
+
+    /// One unusable entry parks only itself. Finder's `.DS_Store` is not a
+    /// profile, a stray file is ignored, and an interrupted import or an
+    /// engagement directory that is not private is parked under its
+    /// engagement ID; the healthy engagement still loads.
+    #[cfg(unix)]
+    #[test]
+    fn native_palpo_one_unusable_profile_does_not_stop_the_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let first = download();
+        let (one, as_one, machine_one, endpoint_one, generation) =
+            parse(&first.to_string()).unwrap();
+        let primary = profile_directory(root.path(), &one.fleet_id).unwrap();
+        write(
+            &primary,
+            &one,
+            &as_one,
+            &machine_one,
+            &endpoint_one,
+            generation,
+        )
+        .unwrap();
+        let interrupted = "hf_ffffffffffffffffffffffffffffffff";
+        let second = first
+            .to_string()
+            .replace(FLEET, interrupted)
+            .replace("as-token-value", "second-as-token")
+            .replace("hs-token-value", "second-hs-token");
+        let (two, as_two, machine_two, endpoint_two, generation) = parse(&second).unwrap();
+        let secondary = profile_directory(root.path(), &two.fleet_id).unwrap();
+        write(
+            &secondary,
+            &two,
+            &as_two,
+            &machine_two,
+            &endpoint_two,
+            generation,
+        )
+        .unwrap();
+        // An import that stopped between its files.
+        private::replace(
+            &secondary.join(PENDING),
+            br#"{"state":"pending","digest":"interrupted"}"#,
+        )
+        .unwrap();
+        let engagements = root.path().join("palpo-engagements");
+        let shared = "hf_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        std::fs::create_dir(engagements.join(shared)).unwrap();
+        std::fs::set_permissions(
+            engagements.join(shared),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(engagements.join(".DS_Store"), b"finder").unwrap();
+        std::fs::write(engagements.join("notes.txt"), b"stray").unwrap();
+
+        let profiles = profile_directories(root.path()).unwrap();
+        assert_eq!(profiles.directories, vec![primary, secondary]);
+        assert_eq!(profiles.unusable, vec![shared.to_owned()]);
+        assert_eq!(profiles.ignored, vec!["notes.txt".to_owned()]);
+        let loaded = super::super::palpo::Prepared::load_all(root.path()).unwrap();
+        assert_eq!(loaded.prepared.len(), 1, "the healthy engagement loads");
+        let mut parked: Vec<&str> = loaded.parked.iter().map(|(k, _)| k.as_str()).collect();
+        parked.sort();
+        assert_eq!(parked, vec![shared, interrupted]);
+        assert_eq!(loaded.ignored, vec!["notes.txt".to_owned()]);
+
+        // With no engagement left to start, the broken configuration refuses
+        // the start, as a single broken profile always has.
+        private::replace(
+            &root.path().join(PENDING),
+            br#"{"state":"pending","digest":"interrupted"}"#,
+        )
+        .unwrap();
+        assert!(super::super::palpo::Prepared::load_all(root.path()).is_err());
+    }
+
+    #[test]
+    fn native_palpo_downloaded_verified_label_does_not_prove_connection() {
+        let mut envelope = download();
+        envelope["engagement"] = json!({"id":FLEET,"server":"example.test","owner":"@owner:example.test","coordinator":"@coordinator:example.test",
+            "registrationGeneration":2,"delegationRevision":1,"delegationExpiresAtMs":9000000000000u64,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true});
+        let raw = envelope.to_string();
+        let registration = parse(&raw).unwrap().0;
+        assert_eq!(registration.generation, 2);
+        let policy = coordinator_profile(&raw, &registration).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(policy.state).unwrap(), "configuring");
+        envelope["engagement"]["id"] = json!("different");
+        assert!(coordinator_profile(&envelope.to_string(), &registration).is_err());
     }
     #[test]
     fn native_palpo_import_accepts_the_owner_download_unbound() {

@@ -183,6 +183,7 @@ async fn native_configured_fleet_recurring_driver() {
 }
 use serde_json::json;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn queue_service_task(f: &Fixture, n: u32) {
     let task = format!("service_task_{n}");
     f.base
@@ -212,6 +213,7 @@ async fn queue_service_task(f: &Fixture, n: u32) {
 }
 /// Run the fleet until `done(completed dispatches, this agent's fleet row)`,
 /// then stop and close it cleanly. Returns the last fleet snapshot.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn run_fleet_until(
     f: &mut Fixture,
     label: &str,
@@ -300,6 +302,7 @@ async fn run_fleet_until(
     }
     last
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn fleet_snapshot(client: &reqwest::Client, url: &str) -> serde_json::Value {
     let response = client
         .get(url)
@@ -310,6 +313,7 @@ async fn fleet_snapshot(client: &reqwest::Client, url: &str) -> serde_json::Valu
     let value: serde_json::Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
     value["factory_service"].clone()
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn agent_row(snapshot: &serde_json::Value, engagement: &str) -> serde_json::Value {
     snapshot["agents"]
         .as_array()
@@ -433,7 +437,7 @@ async fn native_provisioning_waits_for_the_owner_without_a_deadline() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn native_configured_fleet_reattaches_after_restart() {
-    for case in ["reattached", "home_tampered"] {
+    for case in ["reattached", "live_reconnect", "home_tampered"] {
         let mut f = Fixture::new_service(false).await;
         f.provision().await;
         f.original_owner().await;
@@ -461,9 +465,13 @@ async fn native_configured_fleet_reattaches_after_restart() {
             )
             .unwrap();
         }
-        let mut f = f.restart().await;
+        let mut f = if case == "live_reconnect" {
+            f.reconnect().await
+        } else {
+            f.restart().await
+        };
         queue_service_task(&f, 2).await;
-        if case == "reattached" {
+        if case != "home_tampered" {
             let snapshot = run_fleet_until(&mut f, "after restart", &engagement, |completed, _| {
                 completed == 2
             })
@@ -681,6 +689,40 @@ async fn native_provisioning_session_route() {
         agent.close().await.unwrap();
         f.close().await;
     }
+}
+#[tokio::test]
+async fn native_factory_readiness_requires_current_dm_and_project_routes() {
+    let mut f = Fixture::new(true).await;
+    f.provision().await;
+    let id = f.engagement();
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    let profile = agent.claim_profile().await.unwrap();
+    agent.inboxes(profile).await.unwrap();
+    let lifecycle = f
+        .base
+        .store
+        .coordinator_agent_lifecycle(id.clone())
+        .await
+        .unwrap();
+    assert_eq!(lifecycle["provisionEffect"], "complete");
+    assert_eq!(lifecycle["matrixReady"], true);
+    f.base
+        .store
+        .invalidate_matrix_room(hagency_core::replies::MatrixRoomInvalidation {
+            engagement_id: id.clone(),
+            registration_generation: 1,
+            transport_generation: 1,
+            room_id: DM.into(),
+            generation: 2,
+            reason: "Recipient proof changed".into(),
+        })
+        .await
+        .unwrap();
+    let lifecycle = f.base.store.coordinator_agent_lifecycle(id).await.unwrap();
+    assert_eq!(lifecycle["provisionEffect"], "complete");
+    assert_eq!(lifecycle["matrixReady"], false);
+    agent.close().await.unwrap();
+    f.close().await;
 }
 #[tokio::test]
 async fn native_provisioning_factory_first_dispatch() {

@@ -7,6 +7,7 @@ mod alerts;
 mod approval_bindings;
 mod approvals;
 mod assets;
+mod associations;
 mod authority;
 pub mod client;
 mod engagements;
@@ -19,6 +20,7 @@ pub mod palpo_import;
 mod project_sides;
 mod resource_configuration;
 mod resources;
+mod server_engagements;
 mod setup;
 mod side_budget;
 mod side_lifecycle;
@@ -130,6 +132,8 @@ pub(crate) fn router() -> Router {
                 .push(project_sides::router())
                 .push(side_registration::router())
                 .push(palpo_import::router())
+                .push(associations::router())
+                .push(server_engagements::router())
                 .push(side_budget::router())
                 .push(side_lifecycle::router())
                 .push(approvals::router())
@@ -414,7 +418,13 @@ async fn asset(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let alerts_document = matches!(path, "/console/alerts" | "/console/alerts/");
     // The engagements document takes NO query: it is a paginated triage list
     // whose selection happens in-page, not a per-entity view like usage.
-    let engagements_document = matches!(path, "/console/engagements" | "/console/engagements/");
+    let engagements_document = matches!(
+        path,
+        "/console/engagements"
+            | "/console/engagements/"
+            | "/console/server-engagements"
+            | "/console/server-engagements/"
+    );
     let document = editor_document
         || resource_document
         || alerts_document

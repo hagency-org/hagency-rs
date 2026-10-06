@@ -7,7 +7,9 @@
  * service. That distinction is the point: a page can render perfectly and still
  * refuse the action, and only a real press finds out.
  *
- * Protocol, exactly the sibling walk's: one JSON line on stdin {base,url,shots}.
+ * Protocol: one JSON line on stdin {base,url,shots,projectManager} and an
+ * optional serverEngagementId. projectManager is a full Matrix user ID on
+ * the selected server; the resource wizard records it as an eligible manager.
  * The access link is never an argv, never printed, never logged — it carries the
  * one outstanding ticket, and the harness that minted it owns it.
  *
@@ -19,7 +21,7 @@
  * as soon as it is known, so a crash later still leaves the earlier steps.
  *
  * Run against the fake harness (feature-gated suite spawns this file) or a live
- * rig:  echo '{"base":"http://127.0.0.1:PORT","url":"<access link>","shots":"/tmp"}' | node live-actions.mjs
+ * rig: echo '{"base":"http://127.0.0.1:PORT","url":"<access link>","shots":"/tmp","projectManager":"@owner:example.org"}' | node live-actions.mjs
  */
 
 import { createInterface } from 'node:readline';
@@ -144,19 +146,23 @@ await step('1-login', async () => {
 await step('2-create-resource-configuration', async () => {
   await page.goto(`${cfg.base}/console/resources/`);
   await page.locator('[data-native-resource-state="ready"][aria-busy="false"]').waitFor();
-  const source = await page.locator('[data-resource-row]').first().getAttribute('data-resource-row');
-  if (!source) throw new Error('no source resource to derive a configuration from');
   const before = await page.locator('[data-resource-row]').count();
-  await page.goto(`${cfg.base}/console/resources/new/?source_resource_id=${encodeURIComponent(source)}`);
+  // Unassigned sources are intentionally absent from the configured-resource
+  // rows. Use the same creation link as the operator, including an empty list.
+  await page.locator('.page-head a[href*="/console/resources/new/"]').click();
   await page.locator('[data-native-configuration-id]').waitFor();
+  const source = await page.locator('[data-native-configuration-id]').getAttribute('data-native-configuration-id');
+  await page.locator('#configuration-engagement option').nth(1).waitFor({ state: 'attached' });
+  await page.locator('#configuration-engagement').selectOption(cfg.serverEngagementId ?? { index: 1 });
   // Two Next clicks reach the budget step (NATIVE_STEPS is model, reasoning,
   // budget); the name is prefilled from the source, and a monthly ceiling is
   // the one shape `save` accepts natively.
   await name(/^(Next|下一步)$/).click();
   await name(/^(Next|下一步)$/).click();
-  await page.locator('#configuration-ceiling').selectOption('monthly');
   await page.locator('#wz-tokens').fill('40000');
-  await name(/^(Create another configuration|创建另一项配置)$/).click();
+  if (!cfg.projectManager) throw new Error('projectManager must name an eligible Matrix user on the selected server');
+  await page.locator('#configuration-managers').fill(cfg.projectManager);
+  await name(/^(Create resource|创建资源)$/).click();
   await page.locator('[data-configuration-action="saved"]').waitFor();
   await page.goto(`${cfg.base}/console/resources/`);
   await page.locator('[data-native-resource-state="ready"][aria-busy="false"]').waitFor();
@@ -196,6 +202,8 @@ await step('4-agents-stop-then-start', async () => {
   // locator PER ROW, so it must be the bare locator — `.first()` would match
   // every row (each has a first stop) and trip strict mode.
   const row = page.locator('tbody tr').filter({ has: stop }).first();
+  const engagement = await row.getAttribute('data-engagement-id');
+  if (!engagement) throw new Error('the lifecycle row has no engagement binding');
   const before = (await row.innerText()).replace(/\s+/g, ' ');
   await stop.first().click();
   await page.locator('[data-stop-action="saved"], [data-stop-action="refused"], [data-stop-action="unknown"]').waitFor({ timeout: 20_000 });
@@ -204,18 +212,17 @@ await step('4-agents-stop-then-start', async () => {
   // The stop is an awaited mutation that refreshes the roster itself, so the
   // state change to observe is the row's own return to serving.
   await ready();
-  const start = page.locator('[data-lifecycle-action="start"]');
-  if ((await start.count()) === 0) {
-    throw new Error(`stopped an agent (row was ${JSON.stringify(before.slice(0, 100))}); the service accepted the stop and the roster re-read, but the row offers no start control — the operator cannot bring the agent back`);
-  }
-  await start.first().click();
+  // The mutation receipt can render before the follow-up roster fetch. Wait
+  // for this exact agent's new control, not another ready panel or agent row.
+  const currentRow = page.locator(`tbody tr[data-engagement-id="${engagement}"]`);
+  const start = currentRow.locator('[data-lifecycle-action="start"]');
+  await start.waitFor({ state: 'visible', timeout: 20_000 });
+  await start.click();
   await page.locator('[data-start-action="saved"], [data-start-action="refused"], [data-start-action="unknown"]').waitFor({ timeout: 20_000 });
   const restarted = await page.locator('[data-start-action]').first().getAttribute('data-start-action');
   if (restarted !== 'saved') throw new Error(`the start returned "${restarted}"`);
   await ready();
-  if ((await page.locator('[data-lifecycle-action="stop"]').count()) === 0) {
-    throw new Error('the agent was started but no Stop control came back — it is not serving again');
-  }
+  await currentRow.locator('[data-lifecycle-action="stop"]').waitFor({ state: 'visible', timeout: 20_000 });
   return 'stopped an agent and started it again';
 });
 

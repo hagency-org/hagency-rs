@@ -1,0 +1,251 @@
+//! Resource-owner setup. These routes reserve owned capacity; project and agent
+//! human decisions remain in the authenticated Palpo/Rinx coordinator workflow.
+use super::{Error, Session, body, console, failed, recheck, resources::bounded, usage::query};
+use crate::resources::domain;
+use hagency_store::coordinator::ResourceGrant;
+use salvo::prelude::*;
+use serde_json::json;
+
+pub(super) fn router() -> Router {
+    Router::with_path("server-engagements")
+        .get(list)
+        .push(Router::with_path("{id}/decisions").get(decisions))
+        .push(Router::with_path("{id}/delegation").put(delegation))
+        .push(
+            Router::with_path("{id}/resources")
+                .get(resources)
+                .put(contribute),
+        )
+}
+#[handler]
+async fn delegation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let prepared = async {
+        query(req, &[], 0)?;
+        let session = depot
+            .get_typed::<Session>()
+            .map_err(|_| Error::Unauthorized)?;
+        let access = console(depot)?;
+        if !access.0.authority.can_configure(session)? {
+            return Err(Error::ConfigurationForbidden);
+        }
+        let raw = body(req, 8192).await?;
+        let change: hagency_store::coordinator::DelegationChange =
+            serde_json::from_slice(&raw).map_err(|_| Error::Invalid)?;
+        if req.param::<String>("id").as_deref() != Some(change.server_engagement_id.as_str()) {
+            return Err(Error::Invalid);
+        }
+        // Suspension and revocation must remain possible while Matrix is down.
+        if matches!(
+            change.state,
+            hagency_store::coordinator::DelegationState::Active
+        ) {
+            let live = depot
+                .get_typed::<crate::App>()
+                .ok()
+                .and_then(|app| app.palpo_live())
+                .ok_or(Error::Unavailable)?;
+            if !live
+                .verify_coordinator(
+                    change.server_engagement_id.as_str(),
+                    change.coordinator_mxid.as_str(),
+                )
+                .await
+            {
+                return Err(Error::Invalid);
+            }
+        }
+        access.0.authority.delegation(session, change)
+    }
+    .await;
+    let command = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = store.change_coordinator(command).await;
+    if let Err(e) = recheck(depot) {
+        failed(res, e);
+        return;
+    }
+    match result {
+        Ok(value) => res.render(Json(
+            json!({"ok":true,"engagement":value,"publication":"queued"}),
+        )),
+        Err(e) => failure(res, e),
+    }
+}
+#[handler]
+async fn decisions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let (after, limit) = match page(req) {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let id = req.param::<String>("id").unwrap_or_default();
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = page_value("decisions", after, limit, |after, limit| {
+        store.coordinator_deliveries(id.clone(), after, limit)
+    })
+    .await;
+    if let Err(e) = recheck(depot) {
+        failed(res, e);
+        return;
+    }
+    match result {
+        Ok(value) => bounded(res, &value),
+        Err(e) => failure(res, e),
+    }
+}
+async fn page_value<F, Fut>(
+    key: &str,
+    after: String,
+    limit: usize,
+    fetch: F,
+) -> Result<serde_json::Value, hagency_store::Error>
+where
+    F: Fn(String, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<serde_json::Value>, hagency_store::Error>>,
+{
+    let rows = fetch(after, limit).await?;
+    // Resource pages can also stop at their byte budget, so even
+    // a short page needs a lookahead before advertising another page.
+    let next = match rows.last().and_then(|row| row["id"].as_str()) {
+        Some(last) if !fetch(last.to_owned(), 1).await?.is_empty() => Some(last),
+        _ => None,
+    };
+    Ok(json!({(key):rows,"nextCursor":next}))
+}
+fn page(req: &Request) -> Result<(String, usize), Error> {
+    query(req, &["after", "limit"], 300)?;
+    let after = req.query::<String>("after").unwrap_or_default();
+    if !after.is_empty() {
+        hagency_core::project::identifier(&after, 128).map_err(|_| Error::Invalid)?;
+    }
+    let limit = match req.query::<String>("limit") {
+        None => 25,
+        Some(s) if s.bytes().all(|b| b.is_ascii_digit()) => {
+            s.parse().map_err(|_| Error::Invalid)?
+        }
+        Some(_) => return Err(Error::Invalid),
+    };
+    if limit == 0 || limit > 50 {
+        return Err(Error::Invalid);
+    }
+    Ok((after, limit))
+}
+pub(super) fn failure(res: &mut Response, error: hagency_store::Error) {
+    match error {
+        hagency_store::Error::InsufficientCapacity | hagency_store::Error::OverCommit { .. } => {
+            crate::refusal(res, StatusCode::CONFLICT, "contribution_capacity_exceeded")
+        }
+        hagency_store::Error::Generation => {
+            crate::refusal(res, StatusCode::CONFLICT, "engagement_authority_changed")
+        }
+        hagency_store::Error::NoCeiling => {
+            crate::refusal(res, StatusCode::CONFLICT, "resource_ceiling_required")
+        }
+        hagency_store::Error::Capacity => {
+            crate::refusal(res, StatusCode::BAD_REQUEST, "contribution_limit_exceeded")
+        }
+        e => super::resources::failure(res, e),
+    }
+}
+#[handler]
+async fn list(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let (after, limit) = match page(req) {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = page_value("engagements", after, limit, |after, limit| {
+        store.server_engagements(after, limit)
+    })
+    .await;
+    if let Err(e) = recheck(depot) {
+        failed(res, e);
+        return;
+    }
+    match result {
+        Ok(value) => bounded(res, &value),
+        Err(e) => failure(res, e),
+    }
+}
+#[handler]
+async fn resources(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let (after, limit) = match page(req) {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let id = req.param::<String>("id").unwrap_or_default();
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = page_value("resources", after, limit, |after, limit| {
+        store.server_engagement_resources(id.clone(), after, limit)
+    })
+    .await;
+    if let Err(e) = recheck(depot) {
+        failed(res, e);
+        return;
+    }
+    match result {
+        Ok(value) => bounded(res, &value),
+        Err(e) => failure(res, e),
+    }
+}
+#[handler]
+async fn contribute(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let prepared = async {
+        query(req, &[], 0)?;
+        let session = depot
+            .get_typed::<Session>()
+            .map_err(|_| Error::Unauthorized)?;
+        let access = console(depot)?;
+        if !access.0.authority.can_configure(session)? {
+            return Err(Error::ConfigurationForbidden);
+        }
+        let raw = body(req, 64 * 1024).await?;
+        let grant: ResourceGrant = serde_json::from_slice(&raw).map_err(|_| Error::Invalid)?;
+        if req.param::<String>("id").as_deref() != Some(grant.server_engagement_id.as_str()) {
+            return Err(Error::Invalid);
+        }
+        access.0.authority.contribution(session, grant)
+    }
+    .await;
+    let command = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            failed(res, e);
+            return;
+        }
+    };
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let result = store.contribute_resource(command).await;
+    if let Err(e) = recheck(depot) {
+        failed(res, e);
+        return;
+    }
+    match result {
+        Ok(()) => res.render(Json(json!({"ok":true}))),
+        Err(e) => failure(res, e),
+    }
+}

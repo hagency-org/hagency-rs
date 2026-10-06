@@ -5,7 +5,9 @@
 mod adapter;
 mod config;
 mod http;
+mod retirement;
 mod wire;
+pub use retirement::RetirementClient;
 
 pub use adapter::{Adapter, ProbeReceipts, Step};
 pub use config::{HostConfig, Limits};

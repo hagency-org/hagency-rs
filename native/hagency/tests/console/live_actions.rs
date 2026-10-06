@@ -68,6 +68,21 @@ fn driver() -> PathBuf {
 async fn native_console_live_actions_walk() {
     let address = address();
     let f = super::fixture::Fixture::new(address, Some(&built()));
+    // The current resource wizard binds each new resource to a verified
+    // engagement and its eligible Matrix project managers.
+    f.domain
+        .configure_coordinator(
+            serde_json::from_value(serde_json::json!({
+                "id":super::fixture::common::registration().fleet_id,
+                "server":"example.test","owner":"@provider:example.test",
+                "coordinator":"@coordinator:example.test","registrationGeneration":1,
+                "delegationRevision":1,"delegationExpiresAtMs":super::fixture::now()+3600000,
+                "state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
     hagency_store::private::write_new(
         &f.root.path().join("state/operator.token"),
         super::fixture::TOKEN.as_bytes(),
@@ -103,7 +118,7 @@ async fn native_console_live_actions_walk() {
         .write_all(
             format!(
                 "{}\n",
-                serde_json::json!({"base":format!("http://{address}"),"url":url,"shots":shots})
+                serde_json::json!({"base":format!("http://{address}"),"url":url,"shots":shots,"projectManager":"@owner:example.test"})
             )
             .as_bytes(),
         )

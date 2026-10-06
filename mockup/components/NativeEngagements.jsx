@@ -17,6 +17,8 @@
  */
 import { useMemo, useState } from 'react';
 import PageHead from '@/components/PageHead';
+import NativeServerEngagements from '@/components/NativeServerEngagements';
+import NativeSettlement from '@/components/NativeSettlement';
 import NativeStatusStrip from '@/components/NativeStatusStrip';
 import { NativeAccessNotice } from '@/components/NativeUsage';
 import { useT } from '@/components/Prefs';
@@ -77,7 +79,7 @@ export default function NativeEngagements({ lead = null, pending = null, other =
   const retryable = (e) => e.state === 'revoked' && ['pending', 'uncertain'].includes(e.cleanup);
   /* ADR-186 §C: only an engagement that holds an allocation can be topped
    * up — the store's own reserved/active guard; a paused one is active. */
-  const raisable = (e) => ['reserved', 'active'].includes(e.state);
+  const raisable = (e) => e.coordinatorManaged !== true && ['reserved', 'active'].includes(e.state);
 
   async function addTokens(id) {
     if (busy || topUp?.id !== id) return;
@@ -132,7 +134,7 @@ export default function NativeEngagements({ lead = null, pending = null, other =
   }
   /* Item 6: the access notice with the CLI command, not a blank screen. */
   if (phase === 'access') return <>
-    <PageHead title={t('nav.engagements')} sub={t('ng.readonly')}><NativeStatusStrip /></PageHead>
+    <PageHead title={t('se.agentAllocations')} sub={t('ng.readonly')}><NativeStatusStrip /></PageHead>
     <NativeAccessNotice />
   </>;
 
@@ -142,7 +144,8 @@ export default function NativeEngagements({ lead = null, pending = null, other =
 
       {/* Item 1: one heading per page — the h1 carries the title, the
        * read-only note rides its `sub`, and the duplicate h2 is gone. */}
-      <PageHead title={t('nav.engagements')} sub={t('ng.readonly')}><NativeStatusStrip /></PageHead>
+      <PageHead title={t('se.agentAllocations')} sub={t('ng.readonly')}><NativeStatusStrip /></PageHead>
+      <NativeServerEngagements decisionsOnly />
       {lead}
       <div className="eng-list" hidden={listHidden}>
 
@@ -218,7 +221,8 @@ export default function NativeEngagements({ lead = null, pending = null, other =
                   <td>
                     {/* The agent name reaches the usage page for THIS engagement
                         — the drill-down the reader expects a triage row to have. */}
-                    <a href={`/console/usage/?engagement_id=${encodeURIComponent(e.id)}`}>{e.agentName}</a>
+                    <a href={`/console/usage/?engagement_id=${encodeURIComponent(e.id)}`}>{e.matrixProfile?.observedName ?? e.agentName}</a>
+                    {e.matrixProfile && <small className="dim" data-matrix-profile>{e.agentName} · {e.matrixProfile.state === 'verified' ? 'Matrix name verified' : e.matrixProfile.state === 'failed' ? 'Matrix name verification failed · retrying' : 'Matrix name pending'}{e.matrixProfile.state !== 'verified' && ` · ${e.matrixProfile.desiredName}`}</small>}
                   </td>
                   <td>{e.projectName ?? '—'}</td>
                   <td>{e.role}</td>
@@ -239,6 +243,7 @@ export default function NativeEngagements({ lead = null, pending = null, other =
                   <td>
                     {/* #44 item 10 — the row links to its own usage detail. */}
                     <a href={`/console/usage/?engagement_id=${encodeURIComponent(e.id)}`}>{t('ng.viewUsage')}</a>{' '}
+                    {e.coordinatorManaged && e.state === 'revoked' && <NativeSettlement agent={e} onSaved={data.refresh} />}
                     {/* Exile + confirm (AgentActions.jsx, lane apwait #45): the
                         confirmation names THIS row's id, so a slip on one row
                         can never retire another. Both fixes share the cell. */}

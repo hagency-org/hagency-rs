@@ -490,8 +490,14 @@ async fn native_private_approval_startup_wrong_anchor() {
     assert_eq!(f.attempts(), 0);
     assert!(peer.events.is_empty());
     assert!(!f.work.join("approval-mcp.requests").exists());
-    child.request_shutdown();
-    child.exited().await;
+    #[cfg(unix)]
+    {
+        child.request_shutdown();
+        child.exited().await;
+    }
+    // Windows verifies the refusal/readiness above; dropping the fixture is
+    // cleanup, not evidence of Unix graceful shutdown.
+    drop(child);
     f.fake.close().await;
 }
 

@@ -121,9 +121,8 @@ export default function Rail() {
  * job it does, and nothing it cannot open. The retained SECTIONS above keep
  * describing the legacy rail. */
 const NATIVE_SECTIONS = [
-  { head: 'rail.secResource', rows: [{ key: 'setup', icon: 'check' }, { key: 'resources', icon: 'layers' }, { key: 'workforce', icon: 'users' }, { key: 'accounts', icon: 'key' }] },
-  { head: 'rail.secEngagement', rows: [{ key: 'engagements', icon: 'swap' }, { key: 'approvals', icon: 'check' }, { key: 'invites', icon: 'mail' }, { key: 'projectSides', icon: 'link' }] },
-  { head: 'rail.secWork', rows: [{ key: 'tasks', icon: 'list' }, { key: 'projectBoard', icon: 'columns' }, { key: 'taskGraphs', icon: 'graph' }] },
+  { head: 'rail.secResource', rows: [{ key: 'setup', icon: 'check' }, { key: 'resources', icon: 'layers' }, { key: 'workforce', icon: 'users' }] },
+  { head: 'rail.secEngagement', rows: [{ key: 'serverEngagements', icon: 'link' }, { key: 'engagements', icon: 'swap' }, { key: 'approvals', icon: 'check' }, { key: 'invites', icon: 'mail' }] },
   { head: 'rail.secMonitor', rows: [{ key: 'usage', icon: 'gauge' }, { key: 'alerts', icon: 'bell' }] },
 ];
 /* One 16px stroke icon set for the native rail (paths in a 24px box). */
@@ -142,7 +141,7 @@ const ICON_PATHS = {
   bell: 'M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15L6 16ZM10 20.5a2 2 0 0 0 4 0',
 };
 const RailIcon = ({ name }) => <svg className="ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={ICON_PATHS[name]} /></svg>;
-const NATIVE_PATHS = { workforce: '/console/agents/', taskGraphs: '/console/task-graphs/', projectSides: '/console/project-sides/', projectBoard: '/console/project-board/' };
+const NATIVE_PATHS = { serverEngagements: '/console/server-engagements/', workforce: '/console/agents/' };
 const nativeHref = (key) => NATIVE_PATHS[key] ?? `/console/${key}/`;
 const nativeCurrent = (path, key) => {
   const href = nativeHref(key).replace(/^\/console/, '').replace(/\/$/, '') || '/';
@@ -175,7 +174,7 @@ function NativeRail() {
     <div className="rail-fleet">{NATIVE_SECTIONS.map((sec) => <div key={sec.head}>
       <h2 className="rail-sec">{t(sec.head)}</h2>
       <ul className="rail-list">{sec.rows.map((row) => <li key={row.key}>
-        {['setup', 'usage', 'resources', 'alerts', 'engagements', 'workforce', 'tasks', 'taskGraphs', 'accounts', 'approvals', 'invites', 'projectSides', 'projectBoard'].includes(row.key) ? <a className="fleet-row" href={nativeHref(row.key)} aria-current={nativeCurrent(path, row.key) ? 'page' : undefined}><RailIcon name={row.icon} /><span className="grow">{t(`nav.${row.key}`)}</span></a>
+        {['serverEngagements', 'setup', 'usage', 'resources', 'alerts', 'engagements', 'workforce', 'approvals', 'invites'].includes(row.key) ? <a className="fleet-row" href={nativeHref(row.key)} aria-current={nativeCurrent(path, row.key) ? 'page' : undefined}><RailIcon name={row.icon} /><span className="grow">{t(row.key === 'engagements' ? 'se.agentAllocations' : `nav.${row.key}`)}</span></a>
           : <span className="fleet-row" aria-disabled="true" title={t('nu.unavailableRoute')}><span className="ico">{row.icon}</span><span className="grow">{t(`nav.${row.key}`)}</span><span>—</span></span>}
       </li>)}</ul>
     </div>)}</div>

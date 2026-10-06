@@ -32,7 +32,7 @@ for (const name of ['components', 'lib', 'package.json', 'jsconfig.json', 'next.
  * redirect(), which a static export cannot honour. The served-binary test
  * (tests/console/rail.rs) parses Rail.jsx and GETs every native href, so a
  * rail page can never go missing from this list again (board #88). */
-const ROUTES = ['usage', 'resources', 'alerts', 'engagements', 'accounts', 'agents', 'project-sides', 'approvals', 'tasks', 'project-board', 'task-graphs', 'invites', 'setup'];
+const ROUTES = ['server-engagements', 'usage', 'resources', 'alerts', 'engagements', 'accounts', 'agents', 'project-sides', 'approvals', 'tasks', 'project-board', 'task-graphs', 'invites', 'setup'];
 for (const route of ROUTES) await cp(join(source, 'app', route), join(staged, 'app', route), { recursive: true });
 await rm(join(staged, 'app', 'agents', '[name]'), { recursive: true, force: true });
 /* app/page.jsx IS 我的资源 — the front door the rail's root row marks current. */
@@ -66,14 +66,25 @@ Object.assign(env, { NEXT_TELEMETRY_DISABLED: '1', NEXT_PUBLIC_HAGENCY_NATIVE_CO
 if (cacheAt >= 0) {
   const cache = resolve(args[cacheAt + 1]);
   const families = { Roboto: [], 'Noto Sans SC': [] };
-  for (const file of await readdir(join(cache, 'static', 'chunks'))) {
-    if (!file.endsWith('.css')) continue;
-    const cssPath = join(cache, 'static', 'chunks', file);
+  // Turbopack emits CSS in chunks; webpack emits it in css.
+  const styles = [];
+  for (const directory of ['chunks', 'css']) {
+    const folder = join(cache, 'static', directory);
+    for (const file of await readdir(folder).catch(e => { if (e.code === 'ENOENT') return []; throw e; })) {
+      if (file.endsWith('.css')) styles.push(join(folder, file));
+    }
+  }
+  for (const cssPath of styles) {
     const css = await readFile(cssPath, 'utf8');
     for (const match of css.matchAll(/@font-face\{[^}]+\}/g)) {
       const family = /font-family:([^;]+);/.exec(match[0])?.[1]?.replaceAll('"', '').replaceAll("'", '').trim();
       if (!families[family] || !match[0].includes('src:url(')) continue;
-      const block = match[0].replace(/src:url\(([^)]+)\)/, (_, path) => `src: url(${resolve(dirname(cssPath), path)})`).replaceAll(';', ';\n');
+      const block = match[0].replace(/src:url\(([^)]+)\)/, (_, path) => {
+        const asset = path.replaceAll('"', '').replaceAll("'", '');
+        const publicAt = asset.indexOf('/_next/');
+        const local = publicAt >= 0 ? resolve(cache, asset.slice(publicAt + 7)) : resolve(dirname(cssPath), asset);
+        return `src: url(${local})`;
+      }).replaceAll(';', ';\n');
       families[family].push(block);
     }
   }

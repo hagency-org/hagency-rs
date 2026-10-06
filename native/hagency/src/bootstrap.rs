@@ -1,7 +1,9 @@
 //! Explicit one-attempt development startup; no production scheduler or file tool.
 pub mod accounts;
 mod approval;
+pub mod association;
 mod config;
+pub mod coordinator_migration;
 mod driver;
 pub(crate) mod engagement_notice;
 pub mod fleet;
@@ -9,8 +11,10 @@ pub(crate) mod fleet_identity;
 pub(crate) mod fleet_service;
 pub mod intake_refusal;
 pub mod invites;
+pub(crate) mod pairing;
 pub(crate) mod palpo;
 pub mod palpo_import;
+mod palpo_retirement;
 mod palpo_work;
 pub mod probe;
 pub mod provision;
@@ -838,6 +842,7 @@ pub(crate) fn matrix_error_label(error: &hagency_matrix::Error) -> &'static str 
         Cancelled => "cancelled",
         Timeout => "timeout",
         AwaitingOwner => "awaiting_owner",
+        AwaitingSetup => "awaiting_setup",
         Transport => "transport",
         Redirect => "redirect",
         Headers => "headers",
@@ -1333,7 +1338,7 @@ pub struct Bootstrap {
     app: crate::App,
     listen: SocketAddr,
     prepared: Option<config::Prepared>,
-    palpo_prepared: Option<palpo::Prepared>,
+    palpo_prepared: Vec<palpo::Prepared>,
     palpo: palpo::Live,
     driver: Option<driver::Driver>,
     fleet: Option<fleet::Service>,
@@ -1428,16 +1433,27 @@ impl Bootstrap {
         // A fresh install has no imported fleet yet: it waits for the console
         // import instead of refusing to start.
         let palpo_imported = options.palpo_transport && palpo::imported(&state)?;
-        let palpo_prepared = if palpo_imported {
-            Some(palpo::Prepared::load(&state)?)
+        let palpo_loaded = if palpo_imported {
+            palpo::Prepared::load_all(&state)?
         } else {
-            None
+            palpo::Loaded::default()
         };
         let palpo_status = if options.palpo_transport && !palpo_imported {
             palpo::StatusHandle::awaiting()
         } else {
             palpo::StatusHandle::new(options.palpo_transport)
         };
+        // A profile that cannot load is parked with its repair; the other
+        // engagements, the console and the operator API still start, and an
+        // import of the parked engagement starts it without a restart.
+        for entry in &palpo_loaded.ignored {
+            tracing::warn!(entry = %entry, "palpo-engagements holds an entry that is not an engagement directory; it is ignored");
+        }
+        for (engagement, failure) in &palpo_loaded.parked {
+            palpo_status.park(engagement);
+            tracing::error!(engagement = %engagement, error = %failure, "Palpo profile parked; the other engagements start");
+        }
+        let palpo_prepared = palpo_loaded.prepared;
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: custody_entered");
         let store = Store::start(
             Repository::open(&state).map_err(|_| Failure::Startup)?,
@@ -1831,9 +1847,10 @@ impl Bootstrap {
         // or helper can try to connect; no fixture-only readiness setter.
         tokio::select! { biased; result=&mut serving=>{result.map_err(|_|Failure::Server)?;return Err(Failure::Server);}, _=tokio::task::yield_now()=>{} }
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: driver_entered");
-        if let Some(prepared) = self.palpo_prepared.take() {
+        for prepared in std::mem::take(&mut self.palpo_prepared) {
             self.palpo.start(prepared).await?;
         }
+        self.palpo.start_pairings();
         if let Some(pump) = self.approval.as_ref() {
             // ADR-183 decision 0: a component refusal does not exit the
             // process. The listener/router stay polled while the approval

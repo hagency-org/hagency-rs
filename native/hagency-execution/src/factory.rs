@@ -181,7 +181,7 @@ impl WarmHostPlan {
             if Instant::now() >= until {
                 return Err(Failure::Deadline);
             }
-            scope.claim_warm().map_err(|_| Failure::Admission)?;
+            let runtime_lease = scope.claim_runtime().map_err(|_| Failure::Admission)?;
             let workspace = format!("work_{}", scope.engagement_id());
             let work = home.workdir_path().map_err(|_| Failure::Admission)?;
             let mut environment = environment;
@@ -225,8 +225,14 @@ impl WarmHostPlan {
                 host = host.with_retained_local_codex(local)?;
             }
             let root = host.reattach_root(&scope, &home, &workspace)?;
-            let binding =
-                crate::warm::Binding::reattached(scope, home, root, workspace, local_codex);
+            let binding = crate::warm::Binding::reattached(
+                scope,
+                runtime_lease,
+                home,
+                root,
+                workspace,
+                local_codex,
+            );
             Ok(FactoryRuntime {
                 host: host.into_shared(),
                 domain,

@@ -43,80 +43,9 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM engagements WHERE id=?1)",
-            [engagement],
-            |r| r.get(0),
-        )?;
-        if !exists {
-            return Err(Error::NotFound);
-        }
-        let mut dispatches = live_dispatches(&tx, engagement)?;
-        // A stop row the fence-only route left unsettled is resolved by this
-        // operator stop too — the retained route waited for the same cleanup.
-        let mut legacy: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT s.dispatch_id FROM dispatch_stops s \
-                 JOIN runner_dispatches d ON d.id=s.dispatch_id \
-                 JOIN runner_sessions n ON n.id=d.session_id \
-                 WHERE n.engagement_id=?1 AND s.settled_at IS NULL ORDER BY s.dispatch_id",
-            )?;
-
-            stmt.query_map([engagement], |r| r.get(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        for dispatch in &legacy {
-            if !dispatches.contains(dispatch) {
-                dispatches.push(dispatch.clone());
-            }
-        }
-        legacy.clear();
-        for dispatch in &dispatches {
-            conversation_lifecycle::fence_dispatch(&tx, dispatch, engagement, now)?;
-            // A dispatch the fence left uncertain is settled by this host's
-            // own stop decision — the retained route's confirmed cleanup.
-            let uncertain: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runner_dispatches WHERE id=?1 AND state='outcome_unknown')",
-                [dispatch],
-                |r| r.get(0),
-            )?;
-            if uncertain {
-                let fence: u64 = tx.query_row(
-                    "SELECT fence FROM runner_dispatches WHERE id=?1",
-                    [dispatch],
-                    |r| r.get(0),
-                )?;
-                let evidence = format!("operator stop of {engagement} at {now}");
-                conversation_lifecycle::settle_stop_in_transaction(
-                    &tx, dispatch, fence, &evidence, now, true,
-                )
-                .or_else(|error| match error {
-                    Error::State | Error::Conflict | Error::RunnerAuthority => Ok(()),
-                    other => Err(other),
-                })?;
-            }
-        }
-        // The operator's stop IS the resolution ADR-182 waits for.
-        tx.execute(
-            "UPDATE agent_fences SET cleared_at=?2,cleared_by='operator-stop' \
-             WHERE engagement_id=?1 AND cleared_at IS NULL",
-            params![engagement, now],
-        )?;
-        tx.execute(
-            "INSERT INTO agent_lifecycle(engagement_id,stopped_at,reason,operator,started_at) \
-             VALUES(?1,?2,'operator-stopped',?3,NULL) \
-             ON CONFLICT(engagement_id) DO UPDATE SET stopped_at=excluded.stopped_at,\
-             reason='operator-stopped',operator=excluded.operator,started_at=NULL",
-            params![engagement, now, operator],
-        )?;
+        let result = stop_in_transaction(&tx, engagement, operator, now)?;
         tx.commit()?;
-        Ok(json!({
-            "ok": true,
-            "stopped": true,
-            "engagement_id": engagement,
-            "cancelled_dispatches": dispatches,
-            "state": "stopped",
-        }))
+        Ok(result)
     }
 
     /// Start — TS parity backend-v2.js:12712: refuses while lifecycle cleanup
@@ -129,40 +58,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let stopped: Option<u64> = tx
-            .query_row(
-                "SELECT stopped_at FROM agent_lifecycle WHERE engagement_id=?1 AND started_at IS NULL",
-                [engagement],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if stopped.is_none() {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM engagements WHERE id=?1)",
-                [engagement],
-                |r| r.get(0),
-            )?;
-            return Err(if exists {
-                Error::Conflict
-            } else {
-                Error::NotFound
-            });
-        }
-        let pending: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM dispatch_stops s JOIN runner_dispatches d ON d.id=s.dispatch_id \
-             JOIN runner_sessions n ON n.id=d.session_id \
-             WHERE n.engagement_id=?1 AND s.settled_at IS NULL) \
-             OR EXISTS(SELECT 1 FROM agent_fences WHERE engagement_id=?1 AND cleared_at IS NULL)",
-            [engagement],
-            |r| r.get(0),
-        )?;
-        if pending {
-            return Err(Error::State);
-        }
-        tx.execute(
-            "UPDATE agent_lifecycle SET started_at=?2 WHERE engagement_id=?1",
-            params![engagement, now],
-        )?;
+        start_in_transaction(&tx, engagement, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -249,4 +145,143 @@ fn tier_word(resource: &hagency_core::project::Resource) -> serde_json::Value {
         .0
         .and_then(|tier| serde_json::to_value(tier).ok())
         .unwrap_or(serde_json::Value::Null)
+}
+
+/// A scoped owner pause fences work but cannot resolve unknown runtime cleanup
+/// or clear an operator inspection fence. Resume still checks those receipts.
+pub(super) fn pause_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    engagement: &str,
+    actor: &str,
+    now: u64,
+) -> Result<(), Error> {
+    for dispatch in live_dispatches(tx, engagement)? {
+        conversation_lifecycle::fence_dispatch(tx, &dispatch, engagement, now)?;
+    }
+    tx.execute("INSERT INTO agent_lifecycle(engagement_id,stopped_at,reason,operator,started_at) VALUES(?1,?2,'operator-stop-requested',?3,NULL) ON CONFLICT(engagement_id) DO UPDATE SET stopped_at=excluded.stopped_at,reason=excluded.reason,operator=excluded.operator,started_at=NULL",params![engagement,now,actor])?;
+    Ok(())
+}
+
+pub(super) fn stop_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    engagement: &str,
+    operator: &str,
+    now: u64,
+) -> Result<serde_json::Value, Error> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM engagements WHERE id=?1)",
+        [engagement],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Err(Error::NotFound);
+    }
+    let mut dispatches = live_dispatches(tx, engagement)?;
+    // A stop row the fence-only route left unsettled is resolved by this
+    // operator stop too — the retained route waited for the same cleanup.
+    let mut legacy: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT s.dispatch_id FROM dispatch_stops s \
+                 JOIN runner_dispatches d ON d.id=s.dispatch_id \
+                 JOIN runner_sessions n ON n.id=d.session_id \
+                 WHERE n.engagement_id=?1 AND s.settled_at IS NULL ORDER BY s.dispatch_id",
+        )?;
+
+        stmt.query_map([engagement], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for dispatch in &legacy {
+        if !dispatches.contains(dispatch) {
+            dispatches.push(dispatch.clone());
+        }
+    }
+    legacy.clear();
+    for dispatch in &dispatches {
+        conversation_lifecycle::fence_dispatch(tx, dispatch, engagement, now)?;
+        // A dispatch the fence left uncertain is settled by this host's
+        // own stop decision — the retained route's confirmed cleanup.
+        let uncertain: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runner_dispatches WHERE id=?1 AND state='outcome_unknown')",
+                [dispatch],
+                |r| r.get(0),
+            )?;
+        if uncertain {
+            let fence: u64 = tx.query_row(
+                "SELECT fence FROM runner_dispatches WHERE id=?1",
+                [dispatch],
+                |r| r.get(0),
+            )?;
+            let evidence = format!("operator stop of {engagement} at {now}");
+            conversation_lifecycle::settle_stop_in_transaction(
+                tx, dispatch, fence, &evidence, now, true,
+            )
+            .or_else(|error| match error {
+                Error::State | Error::Conflict | Error::RunnerAuthority => Ok(()),
+                other => Err(other),
+            })?;
+        }
+    }
+    // The operator's stop IS the resolution ADR-182 waits for.
+    tx.execute(
+        "UPDATE agent_fences SET cleared_at=?2,cleared_by='operator-stop' \
+             WHERE engagement_id=?1 AND cleared_at IS NULL",
+        params![engagement, now],
+    )?;
+    tx.execute(
+        "INSERT INTO agent_lifecycle(engagement_id,stopped_at,reason,operator,started_at) \
+             VALUES(?1,?2,'operator-stopped',?3,NULL) \
+             ON CONFLICT(engagement_id) DO UPDATE SET stopped_at=excluded.stopped_at,\
+             reason='operator-stopped',operator=excluded.operator,started_at=NULL",
+        params![engagement, now, operator],
+    )?;
+    Ok(json!({
+        "ok": true,
+        "stopped": true,
+        "engagement_id": engagement,
+        "cancelled_dispatches": dispatches,
+        "state": "stopped",
+    }))
+}
+
+pub(super) fn start_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    engagement: &str,
+    now: u64,
+) -> Result<(), Error> {
+    let stopped: Option<u64> = tx
+        .query_row(
+            "SELECT stopped_at FROM agent_lifecycle WHERE engagement_id=?1 AND started_at IS NULL",
+            [engagement],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if stopped.is_none() {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engagements WHERE id=?1)",
+            [engagement],
+            |r| r.get(0),
+        )?;
+        return Err(if exists {
+            Error::Conflict
+        } else {
+            Error::NotFound
+        });
+    }
+    let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dispatch_stops s JOIN runner_dispatches d ON d.id=s.dispatch_id \
+             JOIN runner_sessions n ON n.id=d.session_id \
+             WHERE n.engagement_id=?1 AND s.settled_at IS NULL) \
+             OR EXISTS(SELECT 1 FROM agent_fences WHERE engagement_id=?1 AND cleared_at IS NULL)",
+            [engagement],
+            |r| r.get(0),
+        )?;
+    if pending {
+        return Err(Error::State);
+    }
+    tx.execute(
+        "UPDATE agent_lifecycle SET started_at=?2 WHERE engagement_id=?1",
+        params![engagement, now],
+    )?;
+
+    Ok(())
 }

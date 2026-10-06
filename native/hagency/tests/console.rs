@@ -10,6 +10,8 @@ mod alerts;
 mod approval_bindings;
 #[path = "console/approvals.rs"]
 mod approvals;
+#[path = "console/associations.rs"]
+mod associations;
 #[path = "console/browser.rs"]
 #[cfg(feature = "native-console-browser")]
 mod browser;
@@ -55,6 +57,8 @@ mod real_agent;
 mod registration;
 #[path = "console/resources.rs"]
 mod resources;
+#[path = "console/server_engagements.rs"]
+mod server_engagements;
 #[path = "console/setup_page.rs"]
 mod setup_page;
 #[path = "console/side_budget.rs"]

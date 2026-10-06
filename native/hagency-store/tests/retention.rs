@@ -932,6 +932,7 @@ async fn native_retained_corpus_schema_upgrade() {
     drop(f.db);
     {
         let sql = Connection::open(state.join("domain.sqlite3")).unwrap();
+        common::remove_coordinator_schema(&sql);
         // 032's ADD COLUMN is not replay-idempotent: the rewind replays it
         // over a receipts table that already carries the column, so strip it
         // first (the 025 replay posture; cf. updated_at in file_delivery.rs).

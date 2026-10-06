@@ -935,6 +935,7 @@ pub struct Agent {
     /// an empty (machine-generated-equivalent) profile.
     displayname: Option<String>,
     created: bool,
+    created_at: u64,
     invited: bool,
     joined: bool,
     owner: bool,
@@ -962,6 +963,7 @@ impl Agent {
             downloads: Vec::new(),
             displayname: None,
             created: false,
+            created_at: 0,
             invited: false,
             joined: false,
             owner: false,
@@ -980,7 +982,7 @@ impl Agent {
         assert!(self.created);
         let mut state = json!([member(&self.user,"join"),encrypted(),
         {"type":"m.room.join_rules","state_key":"","content":{"join_rule":"invite"}},
-        {"type":"m.room.create","state_key":"","sender":self.user,"content":{"creator":self.user,"m.federate":false}},
+        {"type":"m.room.create","state_key":"","sender":self.user,"origin_server_ts":self.created_at,"content":{"creator":self.user,"m.federate":false}},
         {"type":"m.room.history_visibility","state_key":"","content":{"history_visibility":"invited"}}]);
         if self.owner_invited {
             state
@@ -1004,6 +1006,7 @@ pub struct Peer {
     pub verdicts: usize,
     owner_keyed: bool,
     provision_targets: bool,
+    pub first_dm_on_join: bool,
     interleave: Interleave,
 }
 /// Forces the order ADR178's superseded-plan amendment is about. A poll resolves
@@ -1046,6 +1049,7 @@ impl Peer {
             verdicts: 0,
             owner_keyed: false,
             provision_targets: true,
+            first_dm_on_join: false,
             interleave: Interleave::default(),
         }
     }
@@ -1430,6 +1434,23 @@ impl Peer {
             let agent = &mut self.agents[index];
             assert!(agent.created && agent.owner_invited && !agent.owner);
             agent.owner = true;
+            if self.first_dm_on_join {
+                // The owner writes immediately, before activation or the
+                // driver's first refresh. Genuine encryption, no @mention.
+                let room: ruma::OwnedRoomId = agent.dm.clone().try_into().unwrap();
+                let mut batch = agent.crypto.inbound_room_key(&room).await;
+                let mut event = agent
+                    .crypto
+                    .owner_event(
+                        &room,
+                        json!({"msgtype":"m.text","body":"首条私聊，无需提及，请直接回复"}),
+                    )
+                    .await;
+                event["event_id"] = json!(format!("$fleet_input_{index}_1"));
+                event["origin_server_ts"] = json!(now());
+                batch["rooms"] = json!({"join":{&agent.dm:{"timeline":{"events":[event],"limited":false},"state":{"events":[]}}}});
+                assert!(agent.pending.replace(batch).is_none());
+            }
             (200, json!({"room_id":agent.dm}))
         } else {
             let index = self
@@ -1485,6 +1506,7 @@ impl Peer {
                     "ADR-184: the DM is created agent-only"
                 );
                 agent.created = true;
+                agent.created_at = now();
                 agent.room_posts += 1;
                 (200, json!({"room_id":agent.dm}))
             } else if path.ends_with("/invite")
@@ -1510,8 +1532,9 @@ impl Peer {
                 agent.room_posts += 1;
                 (200, json!({"room_id":PROJECT}))
             } else if path.ends_with("/sync") {
-                // Respect the service's real timeline filter. A zero-limit
-                // initial state sync cannot consume an owner's pending input.
+                // A zero-limit sync still advances the homeserver cursor and
+                // delivers keys. It cannot save omitted ciphertext for the
+                // next request once the client acknowledges that cursor.
                 let filter: Value = serde_json::from_str(
                     &url.query_pairs()
                         .find(|(key, _)| key == "filter")
@@ -1521,8 +1544,13 @@ impl Peer {
                 .unwrap();
                 let timeline = filter["room"]["timeline"]["limit"].as_u64().unwrap() > 0;
                 agent.sync += 1;
-                let mut batch = if timeline { agent.pending.take() } else { None }
+                let mut batch = agent
+                    .pending
+                    .take()
                     .unwrap_or_else(|| json!({"rooms":{"join":{}},"to_device":{"events":[]}}));
+                if !timeline {
+                    batch["rooms"] = json!({"join":{}});
+                }
                 batch["next_batch"] = json!(format!("agent-{index}-{}", agent.sync));
                 (200, batch)
             } else if request.method == "PUT" && path.contains("/typing/") {

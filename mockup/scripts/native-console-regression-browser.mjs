@@ -61,21 +61,24 @@ try {
   await page.locator('[data-native-state="ready"]').waitFor();
   assert(!/private_|operator\.token/.test(await page.locator('main').innerText()), 'no credential value on screen');
 
-  /* --- Part 1: every rail entry opens its page (heading, no blank, no error). */
+  /* --- Part 1: rail navigation opens each selected page, without stale content. */
   const PAGES = [
-    ['usage', /usage|用量/],
-    ['resources', /resources|资源/],
-    ['alerts', /alert|告警/],
-    ['engagements', /engagement|接洽/],
-    ['agents', /workforce|员工名册|roster|projections/],
+    ['usage', /usage|用量/i],
+    ['resources', /resources|资源/i],
+    ['alerts', /alert|告警/i],
+    ['server-engagements', /server engagements|服务器关联/i],
+    ['engagements', /agent allocations|Agent 配额/i],
+    ['agents', /workforce|员工名册|roster|projections/i],
   ];
   const headings = {};
   for (const [key, pattern] of PAGES) {
     await page.locator(`nav.rail a[href$="/${key}/"]`).click();
-    // The resources page marks readiness on its own panel attribute; every
-    // other page uses the generic one. Either proves the page painted.
-    await page.locator('[data-native-state], [data-native-resource-state]').first().waitFor();
-    const head = await page.locator('.page-head h1').innerText();
+    await page.waitForURL(`${config.base}/console/${key}/`);
+    // Resource and server-engagement pages have their own panel attributes.
+    await page.locator('[data-native-state], [data-native-resource-state], [data-server-engagements]').first().waitFor();
+    const heading = page.locator('.page-head h1').filter({ hasText: pattern });
+    await heading.waitFor({ state: 'visible' });
+    const head = await heading.innerText();
     assert(head && head.trim().length > 0, `${key}: the page renders an h1 heading`);
     assert(pattern.test(head) || pattern.test(await page.locator('main').innerText()), `${key}: heading matches its page`);
     assert((await page.locator('main').innerText()).trim().length > 0, `${key}: not a blank page`);
@@ -90,6 +93,7 @@ try {
     await route.continue();
   });
   await page.locator('nav.rail a[href$="/engagements/"]').click();
+  await page.waitForURL(`${config.base}/console/engagements/`);
   await page.locator('p[role="status"]').first().waitFor();
   await page.unroute('**/console/api/**');
   await page.locator('[data-native-state="ready"]').waitFor();
@@ -166,29 +170,12 @@ try {
   await page.locator(`[data-engagement-id="${config.engagement}"] [data-lifecycle-action="stop"]`).click();
   await page.locator('[data-stop-action="saved"]').waitFor();
 
-  /* (e) GENERATE a side registration (download, lifecycle scope): the
-   * written host path, mode and fingerprints render; no token value does. */
+  /* (e) The retired manual project-side connection page redirects to the
+   * server-engagement flow; registration APIs retain their backend tests. */
   await page.goto(`${config.base}/console/project-sides/`);
-  await page.locator('[data-native-state="ready"]').waitFor();
-  await page.locator('[data-side-registration] input').first().fill(config.registrationUrl);
-  // The side selector's state locks to '' when the panel mounts before the
-  // sides read lands (useState captures the empty list and never re-runs);
-  // an operator picks the side from the dropdown — so does the driver,
-  // rather than depending on a default that never arrives.
-  await page.locator('[data-side-registration] select').selectOption({ index: 0 });
-  await page.getByRole('button', { name: /^(Generate registration|生成注册文件)$/ }).click();
-  // The issue failure renders as a note naming the server's refusal word —
-  // dump the panel so the failure mode is named, not guessed.
-  try {
-    await page.locator('[data-side-registration] .mono-s').first().waitFor({ timeout: 15_000 });
-  } catch (error) {
-    const panel = await page.locator('[data-side-registration]').innerText().catch(() => '(no registration panel)');
-    throw new Error(`the issued registration never rendered; panel says:\n${panel}\n${error.message}`);
-  }
-  const registrationText = await page.locator('[data-side-registration]').innerText();
-  assert(/state\/registrations\//.test(registrationText), 'the written host path renders');
-  assert(/0600|Staged|暂存/.test(registrationText), 'the issue outcome renders — written at 0600, or staged behind the live credential');
-  assert(!/(as|hs)_token_/.test(registrationText), 'no token VALUE renders, only fingerprints');
+  await page.waitForURL(/\/console\/server-engagements\/?$/);
+  await page.locator('[data-server-engagements]').waitFor();
+  assert.equal(await page.locator('[data-palpo-import], [data-side-registration]').count(), 0);
 
   /* (f) CLEAR-DIRTY on the configuration wizard (configuration scope): edit
    * the draft's ceiling, then Reload discards it and restores the observed
@@ -204,14 +191,12 @@ try {
   await page.locator(`[data-native-configuration-id="${config.resource}"][aria-busy="false"]`).waitFor();
   await page.getByRole('button', { name: /^(Next|下一步)$/ }).click();
   await page.getByRole('button', { name: /^(Next|下一步)$/ }).click();
-  await page.locator('#configuration-ceiling').selectOption('monthly');
   await page.locator('#wz-tokens').fill('777777');
   await page.getByRole('button', { name: /(Reload configuration and discard draft|重新读取配置并放弃草稿)/ }).click();
   await page.locator(`[data-native-configuration-id="${config.resource}"][aria-busy="false"]`).waitFor();
   // The tokens input carries its value only under the monthly arm — the
   // same select-then-read the configuration lane uses after its reload.
-  await page.locator('#configuration-ceiling').selectOption('monthly');
-  assert.equal(await page.locator('#wz-tokens').inputValue(), '5000', 'the draft was discarded and the observed ceiling restored');
+  assert.equal(await page.locator('#wz-tokens').inputValue(), '', 'an unassigned account configuration does not preallocate a resource budget');
 
   /* (g) ALERT TRANSITION (configuration scope): the fixture's open ceiling
    * alert resolves; the row leaves the open list and the no-open state
@@ -238,7 +223,7 @@ try {
   // the wire assertion backing the console filters above: every refused
   // response was one of the two named structural noises, anything else
   // fails here by name.
-  assert.deepEqual(failures, [], `console errors: ${failures.join(' | ')}`);
+  assert.deepEqual(failures, [], `console errors: ${failures.join(' | ')}; responses: ${refused.join(' | ')}`);
   assert.deepEqual(refused, [], `refused responses beyond the named noises: ${refused.join(' | ')}`);
   assert(urls.every((url) => !url.includes('access=')), 'no ticket value in a request URL');
   console.log('PASS native console regression browser');

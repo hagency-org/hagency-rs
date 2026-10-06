@@ -3,6 +3,7 @@
 import { remember } from './labels';
 
 export const NATIVE_MODE = process.env.NEXT_PUBLIC_HAGENCY_NATIVE_CONSOLE === '1';
+export function serverEngagementsView(location) { return /^\/console\/server-engagements\/?$/.test(location.pathname); }
 const ROOT = '/console';
 
 /* Build-time constants (ADR-145): the workspace version and the binary's
@@ -43,6 +44,14 @@ export function validateReport(v, selected) {
     || !evidence(s.evidence) || !period(v.daily) || !period(v.monthly)) throw new Error('invalid_native_response');
   return v;
 }
+function validMatrixProfile(p) {
+  const label = (s) => typeof s === 'string' && [...s].length > 0 && [...s].length <= 128;
+  return object(p, ['desiredName', 'observedName', 'state', 'lastError', 'observedAtMs'])
+    && label(p.desiredName) && (p.observedName === null || label(p.observedName))
+    && ['pending', 'failed', 'verified'].includes(p.state)
+    && (p.lastError === null || p.lastError === 'matrix_profile_unverified')
+    && (p.observedAtMs === null || number(p.observedAtMs));
+}
 export function validateEngagements(v) {
   /* projectName is bounded in Unicode SCALAR VALUES (code points), not JS
    * string length (UTF-16 code units): the server truncates at verification
@@ -55,7 +64,8 @@ export function validateEngagements(v) {
    * implementation accident of `slice`, not a designed rule; the native
    * verifier's scalar bound is the contract. */
   if (!object(v, ['engagements', 'next_after']) || !Array.isArray(v.engagements) || v.engagements.length > 16
-    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup', 'agentRemainingTokens', 'ownerBindingRequired', 'createdAtMs', 'endedAtMs', 'allocatedTokens', 'spentTokens', 'quotaPaused'])
+    || !(v.next_after === null || id(v.next_after)) || v.engagements.some((e) => !object(e, ['id', 'agentName', 'projectName', 'role', 'requestedTokens', 'state', 'cleanup', 'agentRemainingTokens', 'ownerBindingRequired', 'createdAtMs', 'endedAtMs', 'allocatedTokens', 'spentTokens', 'quotaPaused', ...(Object.hasOwn(e, 'coordinatorManaged') ? ['coordinatorManaged'] : []), ...(Object.hasOwn(e, 'matrixProfile') ? ['matrixProfile'] : [])]) || (Object.hasOwn(e, 'coordinatorManaged') && typeof e.coordinatorManaged !== 'boolean')
+      || (Object.hasOwn(e, 'matrixProfile') && !validMatrixProfile(e.matrixProfile))
       || !id(e.id) || typeof e.agentName !== 'string' || e.agentName.length > 128
       || !(e.projectName === null || (typeof e.projectName === 'string' && [...e.projectName].length <= 255))
       || typeof e.role !== 'string' || e.role.length > 128 || !number(e.requestedTokens) || !STATES.includes(e.state) || !CLEANUP.includes(e.cleanup)
@@ -73,7 +83,7 @@ export function validateEngagements(v) {
       || typeof e.quotaPaused !== 'boolean')) throw new Error('invalid_native_response');
   return v;
 }
-const RECOVERY_ERRORS = { agent_lifecycle_scope_required: 403, resolution_conflict: 409, dispatch_not_resolvable: 409, invalid_console_request: 400 };
+const RECOVERY_ERRORS = { contribution_capacity_exceeded: 409, engagement_authority_changed: 409, resource_ceiling_required: 409, contribution_limit_exceeded: 400, agent_lifecycle_scope_required: 403, resolution_conflict: 409, dispatch_not_resolvable: 409, invalid_console_request: 400 };
 /* End access revokes the credential this page holds. From the moment it
  * starts until a new ticket is exchanged, no console read or write leaves the
  * page: a multi-step load already in flight (the fleet panel's per-side budget
@@ -99,7 +109,7 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (!response.ok) {
       if (value?.code === 'console_busy' && response.status === 429) throw new Error('busy');
-      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503 };
+      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, invalid_engagement_id: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503 };
       if (known[value?.code] === response.status || RECOVERY_ERRORS[value?.code] === response.status) {
         // ADR-186 §A2: a refusal may carry the store's human explanation of
         // the binding limit beside its code; it rides the error as `detail`.
@@ -111,9 +121,9 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     }
     return value;
   } catch (error) {
-    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
+    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'invalid_engagement_id', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
     if (options.method === 'DELETE') throw new Error('logout_unknown');
-    if (['POST', 'PATCH'].includes(options.method) && (path.startsWith('/api/resources') || path.startsWith('/api/accounts') || path.startsWith('/api/agents/'))) throw new Error('outcome_unknown');
+    if (['POST', 'PATCH'].includes(options.method) && (path.startsWith('/api/resources') || path.startsWith('/api/accounts') || path.startsWith('/api/agents/') || path.startsWith('/api/engagements/'))) throw new Error('outcome_unknown');
     throw new Error('native_unavailable');
   } finally { clearTimeout(timer); }
 }
@@ -581,6 +591,21 @@ export async function refuseEngagement(engagementId, commandId) {
 export async function retireEngagement(engagementId, commandId) {
   return validateEngagementReceipt(await request(`/api/engagements/${encodeURIComponent(engagementId)}/retire`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commandId }) }));
 }
+function validateSettlement(v) {
+  if (!v || !['awaiting_final_usage', 'settled', 'late_usage_charged'].includes(v.state)
+    || !id(v.agentAllocationId) || !id(v.resourceAllocationId) || !Number.isSafeInteger(v.allocatedTokens)
+    || typeof v.period !== 'string' || typeof v.periodKey !== 'string'
+    || (v.state !== 'awaiting_final_usage' && (!Number.isSafeInteger(v.consumedTokens) || !Number.isSafeInteger(v.releasedTokens)))) throw new Error('invalid_native_response');
+  return v;
+}
+export async function fetchAgentSettlement(engagementId) {
+  return validateSettlement(await request(`/api/engagements/${encodeURIComponent(engagementId)}/settlement`));
+}
+export async function settleAgentUsage(body) {
+  return validateSettlement(await request(`/api/engagements/${encodeURIComponent(body.agentAllocationId)}/settlement`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }));
+}
 /* ADR-186 §C: add tokens to a reserved or active engagement's allocation.
  * Checked by the store like an approval; a refusal carries the store's
  * explanation as `error.detail`. The answer is the bounded receipt. */
@@ -775,9 +800,14 @@ const optionalText = (v, max) => v === null || text(v, max);
 const optionalScalarText = (v, max) => v === null || (typeof v === 'string' && [...v].length <= max);
 const periodFields = (v) => !Object.hasOwn(v, 'period') || v.period === null || text(v.period, 64 * 1024);
 const ceiling = (v) => v === null || (v && Object.keys(v).every((k) => ['tokens', 'period'].includes(k)) && (v.tokens === null || number(v.tokens)) && periodFields(v));
-const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'published', 'roles', 'revision'])
+const validResourceBindings = (bindings, resourceId) => Array.isArray(bindings) && bindings.every(g =>
+  object(g, ['id', 'serverEngagementId', 'resourceId', 'revision', 'allocatedTokens', 'eligibleManagers'])
+  && id(g.id) && id(g.serverEngagementId) && g.resourceId === resourceId && number(g.revision) && g.revision >= 1
+  && number(g.allocatedTokens) && Array.isArray(g.eligibleManagers) && g.eligibleManagers.length <= 64
+  && g.eligibleManagers.every(m => text(m, 255)));
+const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'published', 'roles', 'revision', 'engagementResources'])
       || !id(r.id) || !text(r.framework, 64) || !text(r.model, 256) || !optionalText(r.provider, 128) || !optionalText(r.reasoning, 128)
-      || !ceiling(r.ceiling) || typeof r.published !== 'boolean' || !Array.isArray(r.roles) || r.roles.length > 64 || !r.roles.every((v) => text(v, 64)) || !revision(r.revision));
+      || !validResourceBindings(r.engagementResources, r.id) || !ceiling(r.ceiling) || typeof r.published !== 'boolean' || !Array.isArray(r.roles) || r.roles.length > 64 || !r.roles.every((v) => text(v, 64)) || !revision(r.revision));
 export function validateResources(value) {
   if (!object(value, ['resources', 'roles', 'next_after', 'permissions']) || !Array.isArray(value.resources) || value.resources.length > 16
     || !(value.next_after === null || id(value.next_after)) || !object(value.permissions, ['publishResource', 'configureResource']) || typeof value.permissions.publishResource !== 'boolean' || typeof value.permissions.configureResource !== 'boolean'
@@ -824,10 +854,21 @@ export function validateBudget(v) {
 export async function fetchResources(selected, after = '') {
   if ((selected !== null && !id(selected)) || (after && !id(after))) throw new Error('invalid_selection');
   const list = validateResources(await request(`/api/resources?limit=16${after ? `&after=${after}` : ''}`));
-  const chosen = selected ?? list.resources[0]?.id ?? null;
+  const chosen = selected ?? list.resources.find(r => r.engagementResources.length)?.id ?? list.resources[0]?.id ?? null;
   const budget = chosen === null ? null : validateBudget(await request(`/api/resources/${chosen}/budget`));
   for (const r of list.resources) remember(r.id, [r.framework, r.model, r.reasoning].filter(Boolean).join(' · '));
-  return { ...list, selected: chosen, budget, resourceConsole: true };
+  const editor = chosen === null ? null : validateConfiguration(await request(`/api/resources/${chosen}/configuration`), chosen);
+  const coordinatorResources = (await fetchServerEngagements()).engagements.length > 0;
+  const engagementResources = [];
+  for (const fleet of new Set(editor?.resource.engagementResources.map(g => g.serverEngagementId) ?? [])) {
+    let after = '';
+    do {
+      const page = await fetchEngagementResources(fleet, after);
+      engagementResources.push(...page.resources.filter(g => g.resourceId === chosen));
+      after = page.nextCursor;
+    } while (after);
+  }
+  return { ...list, selected: chosen, budget, editor, engagementResources, coordinatorResources, resourceConsole: true };
 }
 export async function publishResource(resource, published) {
   const value = await request(`/api/resources/${resource.id}/publication`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: resource.revision, published }) });
@@ -851,7 +892,7 @@ export function validateConfiguration(value, selected) {
 }
 export async function fetchConfiguration(entry, after = '') {
   const value = await fetchResources(entry.id, after);
-  const editor = value.selected === null ? null : validateConfiguration(await request(`/api/resources/${value.selected}/configuration`), value.selected);
+  const editor = value.editor;
   return { ...value, editor, configurationConsole: true, editing: entry.mode === 'edit' };
 }
 export async function configureResource(resource, create, changes) {
@@ -1186,4 +1227,67 @@ export async function offerResource(model, reasoning, tokens) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ADR-191 owner ledger and delivered approvals. Every call uses the native
+// session adapter above; runtime credentials never enter these read models.
+function engagementPage(value, key, fields) {
+  if (!object(value, [key, 'nextCursor']) || !Array.isArray(value[key]) || value[key].length > 50
+      || !(value.nextCursor === null || id(value.nextCursor))
+      || value[key].some(row => !object(row, fields) || !id(row.id))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchServerEngagements(after = '') {
+  if (after && !id(after)) throw new Error('invalid_selection');
+  return engagementPage(await request(`/api/server-engagements?limit=50${after ? `&after=${after}` : ''}`), 'engagements',
+    ['id', 'serverName', 'ownerMxid', 'coordinatorMxid', 'state', 'registrationGeneration', 'delegationRevision', 'delegationExpiresAtMs', 'allowSelfApproval', 'exportMxids', 'delegationPublication']);
+}
+export async function changeEngagementDelegation(change) {
+  if (!id(change.serverEngagementId) || !number(change.expectedRevision) || change.expectedRevision < 1) throw new Error('invalid_selection');
+  const value = await request(`/api/server-engagements/${change.serverEngagementId}/delegation`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
+  });
+  if (!object(value, ['ok', 'engagement', 'publication']) || value.ok !== true || !value.engagement || value.engagement.id !== change.serverEngagementId) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchEngagementResources(fleet, after = '') {
+  if (!id(fleet) || after && !id(after)) throw new Error('invalid_selection');
+  return engagementPage(await request(`/api/server-engagements/${fleet}/resources?limit=50${after ? `&after=${after}` : ''}`), 'resources',
+    ['id', 'serverEngagementId', 'resourceId', 'revision', 'allocatedTokens', 'retainedTokens', 'remainingTokens', 'overdrawn', 'period', 'periodKey', 'eligibleManagers']);
+}
+export async function fetchCoordinatorDecisions(fleet, after = '') {
+  if (!id(fleet) || after && !id(after)) throw new Error('invalid_selection');
+  return engagementPage(await request(`/api/server-engagements/${fleet}/decisions?limit=50${after ? `&after=${after}` : ''}`), 'decisions',
+    ['id', 'serverEngagementId', 'requestId', 'agentAllocationId', 'agentName', 'projectId', 'projectOwner', 'decidedBy', 'approvedAtMs', 'resourceAllocationId', 'resourceId', 'requestedTokens', 'approvedTokens', 'state', 'reason', 'receivedAtMs', 'updatedAtMs']);
+}
+export async function fetchAllocationResources(after = '') {
+  if (after && !id(after)) throw new Error('invalid_selection');
+  return validateResources(await request(`/api/resources?limit=16${after ? `&after=${after}` : ''}`));
+}
+export async function contributeEngagementResource(grant) {
+  if (!id(grant.serverEngagementId) || !id(grant.id) || !id(grant.resourceId)
+      || !number(grant.allocatedTokens) || !number(grant.revision) || grant.revision < 1) throw new Error('invalid_selection');
+  const value = await request(`/api/server-engagements/${grant.serverEngagementId}/resources`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(grant),
+  });
+  if (!object(value, ['ok']) || value.ok !== true) throw new Error('invalid_native_response');
+  return value;
+}
+
+export async function fetchAssociations() {
+  const value = await request('/api/palpo/associations');
+  const fields = ['id', 'actionId', 'name', 'homeserver', 'ownerMxid', 'coordinatorMxid', 'phase', 'imported', 'transportEnabled', 'expiresAtMs', 'problem'];
+  if (!object(value, ['associations']) || !Array.isArray(value.associations) || value.associations.length > 100
+      || value.associations.some(row => !object(row, fields) || !/^hf_[a-f0-9]{32}$/.test(row.id)
+        || !/^action_[a-f0-9]{32}$/.test(row.actionId)
+        || !['name', 'homeserver', 'ownerMxid', 'coordinatorMxid'].every(key => typeof row[key] === 'string')
+        || !['contacting', 'awaiting_owner', 'awaiting_admin', 'awaiting_connection', 'connected', 'setup_failed', 'rejected', 'expired', 'unavailable'].includes(row.phase)
+        || typeof row.imported !== 'boolean' || typeof row.transportEnabled !== 'boolean' || !number(row.expiresAtMs)
+        || ![null, 'retrying', 'profile_binding'].includes(row.problem))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function startAssociation(input) {
+  const value = await request('/api/palpo/associations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  if (!object(value, ['id']) || !/^hf_[a-f0-9]{32}$/.test(value.id)) throw new Error('invalid_native_response');
+  return value;
 }

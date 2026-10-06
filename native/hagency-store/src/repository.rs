@@ -18,6 +18,22 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// Offline owner work must exclude the custody writer without recovering
+    /// or rewriting its deliveries. Keep this guard until all domain work ends.
+    pub fn lock_for_migration(directory: &Path) -> Result<File, Error> {
+        crate::private::directory(directory)?;
+        let path = directory.join("owner.lock");
+        let lock = match crate::private::open(&path, true) {
+            Ok(lock) => lock,
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                crate::private::open(&path, false)?
+            }
+            Err(e) => return Err(e),
+        };
+        lock.try_lock().map_err(|_| Error::Locked)?;
+        Ok(lock)
+    }
+
     pub fn open(directory: &Path) -> Result<Self, Error> {
         let database = crate::database::open(
             directory,

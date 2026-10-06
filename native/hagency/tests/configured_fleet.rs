@@ -72,6 +72,11 @@ async fn native_configured_local_codex_fleet() {
 }
 #[cfg(unix)]
 #[tokio::test]
+async fn native_configured_fleet_first_dm_during_activation() {
+    qualify_startup(false, true, true).await;
+}
+#[cfg(unix)]
+#[tokio::test]
 async fn native_configured_fleet_project_mentions() {
     let f = Fixture::profile(false, false, true).await;
     project_mentions(f).await;
@@ -762,7 +767,10 @@ async fn qualify(media: bool) {
     qualify_profile(media, false).await;
 }
 async fn qualify_profile(media: bool, local: bool) {
-    for application_service in if local {
+    qualify_startup(media, local, false).await;
+}
+async fn qualify_startup(media: bool, local: bool, first_dm_on_join: bool) {
+    for application_service in if local && !first_dm_on_join {
         vec![false]
     } else {
         vec![false, true]
@@ -772,11 +780,14 @@ async fn qualify_profile(media: bool, local: bool) {
         } else {
             Fixture::new(application_service, media).await
         };
+        f.peer.first_dm_on_join = first_dm_on_join;
         f.until("two genuine Active factories",|f|f.count("SELECT COUNT(*) FROM engagements WHERE request_id LIKE 'fleet_target_%' AND state='active'")==2
             && f.count("SELECT COUNT(*) FROM current_approval_bindings b JOIN engagements e ON e.id=b.engagement_id WHERE e.request_id LIKE 'fleet_target_%'")==2
             && f.count("SELECT COUNT(*) FROM current_matrix_routes r JOIN runner_sessions s ON s.id=r.session_id JOIN engagements e ON e.id=s.engagement_id WHERE e.request_id LIKE 'fleet_target_%' AND json_extract(s.binding,'$.room_id') LIKE '!fleet_dm_%'")==2
             && (0..2).all(|i|f.work(i).join("owned-mcp.warm-initialized").is_file())).await;
-        assert_eq!(f.count("SELECT COUNT(*) FROM canonical_tasks"), 0);
+        if !first_dm_on_join {
+            assert_eq!(f.count("SELECT COUNT(*) FROM canonical_tasks"), 0);
+        }
         assert_eq!(
             f.count("SELECT COUNT(*) FROM effects WHERE state='complete'"),
             3,
@@ -800,7 +811,9 @@ async fn qualify_profile(media: bool, local: bool) {
         for round in 1..=2 {
             // Genuine owner encryption enters the real SDK/intake path. No
             // task/session/claim/Started/completion API is called by the test.
-            f.peer.queue_owner_round(round).await;
+            if round != 1 || !first_dm_on_join {
+                f.peer.queue_owner_round(round).await;
+            }
             f.until("both original native helpers are in flight", |f| {
                 (0..2).all(|i| {
                     f.work(i).join("owned-mcp.fleet-ready").is_file()

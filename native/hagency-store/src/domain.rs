@@ -23,6 +23,7 @@ mod agent_fences;
 mod agent_lifecycle;
 mod agent_message_leftovers;
 mod console_feed;
+pub mod coordinator;
 pub use agent_fences::{AgentFence, FenceReason};
 pub use agent_message_leftovers::{
     DeliveryEventRow, NewOperatorMessage, OperatorMessage, SuppressOutcome, Suppression, Tombstone,
@@ -97,7 +98,7 @@ pub use peers::{
     PEER_RECEIPT_CEILING, PEER_RETENTION_CEILING, PEER_RETENTION_FLOOR, PeerRetentionStatus,
     PeerSweepOutcome,
 };
-pub use provision_runtime::OwnedProvisionScope;
+pub use provision_runtime::{OwnedProvisionScope, OwnedRuntimeLease};
 pub use side_registration::{IssueSideRegistration, IssueSideRegistrationRequest, SideCredential};
 pub(crate) mod file_delivery;
 mod peers;
@@ -133,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 60;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 68;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -360,6 +361,9 @@ pub struct AgentRosterRow {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngagementLabel {
+    pub coordinator_managed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix_profile: Option<Value>,
     pub id: String,
     pub agent_name: String,
     pub project_name: Option<String>,
@@ -713,6 +717,15 @@ fn budget(
     exclude_engagement_id: Option<&str>,
     for_auto_join: bool,
 ) -> Result<Budget, Error> {
+    budget_with_grant(db, resource, exclude_engagement_id, for_auto_join, None)
+}
+fn budget_with_grant(
+    db: &Connection,
+    resource: &Resource,
+    exclude_engagement_id: Option<&str>,
+    for_auto_join: bool,
+    within_grant: Option<&str>,
+) -> Result<Budget, Error> {
     let declaration: Option<String> = db
         .query_row(
             "SELECT config FROM seats WHERE id=?1",
@@ -747,6 +760,11 @@ fn budget(
             fulfillment: None,
         });
     }
+    commitments.extend(coordinator::additional_commitments(
+        db,
+        resource,
+        within_grant,
+    )?);
     Ok(allocation::resource_budget(&allocation::Input {
         preset: allocation::Preset {
             id: resource.preset_id.clone(),
@@ -774,14 +792,30 @@ struct Headroom {
     period_mismatch: bool,
 }
 fn headroom(db: &Connection, resource: &Resource, at: u64) -> Result<Headroom, Error> {
+    headroom_with_grant(db, resource, at, None)
+}
+fn headroom_with_grant(
+    db: &Connection,
+    resource: &Resource,
+    at: u64,
+    within_grant: Option<&str>,
+) -> Result<Headroom, Error> {
     let report = usage::ceiling_report(db, &resource.id(), at)?;
-    let spent_budget = budget(db, resource, None, false)?;
+    let spent_budget = budget_with_grant(db, resource, None, false, within_grant)?;
     // backend-v2.js:14057: a seat declaration whose period mismatches the
     // pool's nulls the whole figure rather than falling back to the pool.
     let period_mismatch = spent_budget.seat.status == allocation::SeatStatus::PeriodMismatch;
+    let credit = within_grant
+        .map(|id| coordinator::unused_grant(db, id, resource))
+        .transpose()?
+        .unwrap_or(0);
+    let effective_draw = report
+        .reserved
+        .saturating_sub(credit)
+        .max(report.spent.unwrap_or(0));
     let by_ceiling = report
         .ceiling_tokens
-        .map(|c| c.saturating_sub(report.drawn));
+        .map(|c| c.saturating_sub(effective_draw));
     let remaining = [
         by_ceiling,
         spent_budget.seat.remaining.map(u64::from),
@@ -809,6 +843,17 @@ fn check_grant(
     granted: u64,
     now: u64,
 ) -> Result<(), Error> {
+    check_grant_within(tx, resource, agent, granted, now, None)
+}
+
+fn check_grant_within(
+    tx: &Connection,
+    resource: &Resource,
+    agent: &str,
+    granted: u64,
+    now: u64,
+    within_grant: Option<&str>,
+) -> Result<(), Error> {
     // Admission uses the drawn ceiling (backend-v2.js:14036-14060), and
     // approve is the operator verdict path, so `for_auto_join` is false —
     // auto-join is the other remainingFor caller, not this one.
@@ -817,7 +862,7 @@ fn check_grant(
         by_ceiling,
         remaining,
         period_mismatch,
-    } = headroom(tx, resource, now)?;
+    } = headroom_with_grant(tx, resource, now, within_grant)?;
     if period_mismatch {
         return Err(Error::NoCeiling);
     }
@@ -902,6 +947,15 @@ impl DomainRepository {
         }).collect()
     }
     pub fn open(directory: &Path) -> Result<Self, Error> {
+        Self::open_mode(directory, true)
+    }
+    /// Offline owner operations retain the same exclusive writer lock but do
+    /// not run crash recovery or advance runtime clocks during an inventory.
+    /// Runtime startup must always use `open` and perform its normal recovery.
+    pub fn open_for_migration(directory: &Path) -> Result<Self, Error> {
+        Self::open_mode(directory, false)
+    }
+    fn open_mode(directory: &Path, recover: bool) -> Result<Self, Error> {
         let mut database = database::open(
             directory,
             database::Schema {
@@ -1066,9 +1120,46 @@ impl DomainRepository {
                     (59, include_str!("migrations/059-owner-anchors.sql")),
                     // ADR-188: rooms an agent joined by invitation.
                     (60, include_str!("migrations/074-joined-rooms.sql")),
+                    (
+                        61,
+                        include_str!("migrations/075-coordinator-engagements.sql"),
+                    ),
+                    (
+                        62,
+                        include_str!("migrations/062-coordinator-deliveries.sql"),
+                    ),
+                    (
+                        63,
+                        include_str!("migrations/063-coordinator-delegations.sql"),
+                    ),
+                    (64, include_str!("migrations/064-coordinator-refusals.sql")),
+                    (
+                        65,
+                        include_str!("migrations/065-coordinator-settlements.sql"),
+                    ),
+                    (
+                        66,
+                        include_str!("migrations/066-coordinator-agent-profiles.sql"),
+                    ),
+                    (
+                        67,
+                        include_str!("migrations/067-coordinator-project-setup.sql"),
+                    ),
+                    (
+                        68,
+                        include_str!("migrations/068-coordinator-legacy-adoption.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
+                    "SELECT id,engagement_id,digest,receipt,accepted_at FROM coordinator_migrations LIMIT 0",
+                    "SELECT id,engagement_id,project_id,digest,command,result FROM coordinator_project_setup_attempts LIMIT 0",
+                    "SELECT engagement_id,project_id,attempt_id,observation FROM coordinator_project_setup LIMIT 0",
+                    "SELECT id,digest,command,definition,state,reason,agent_id,received_at,updated_at FROM coordinator_deliveries LIMIT 0",
+                    "SELECT engagement_id,revision,digest,change,authority,accepted_at FROM coordinator_delegations LIMIT 0",
+                    "SELECT id,engagement_id,digest,receipt,refused_at FROM coordinator_refusals LIMIT 0",
+                    "SELECT agent_id,command_id,digest,receipt,accepted_at FROM coordinator_settlements LIMIT 0",
+                    "SELECT agent_id,command_id,desired_name,confirmed_name,last_error,updated_at,observed_at FROM coordinator_agent_profiles LIMIT 0",
                     "SELECT allocated_tokens FROM engagements LIMIT 0",
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
@@ -1143,29 +1234,31 @@ impl DomainRepository {
         if !transport_trigger {
             return Err(Error::Schema);
         }
-        // A previous owner died after an intent became externally executable. Inspection,
-        // not automatically repeating that effect, is the only safe default.
-        let tx = database
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("UPDATE engagements SET projection=json_set(projection,'$.cleanup','uncertain') WHERE id IN (SELECT engagement_id FROM effects WHERE kind='retire' AND state='started')",[])?;
-        tx.execute(
-            "UPDATE effects SET state='uncertain' WHERE state='started'",
-            [],
-        )?;
-        graphs::reconcile(&tx, graphs::now_ms()?)?;
-        replies::reconcile(&tx, graphs::now_ms()?, true)?;
-        notice_custody::reconcile(&tx, graphs::now_ms()?, true)?;
-        execution::recover_all(&tx, graphs::now_ms()?)?;
-        approvals::recover(&tx)?;
-        tx.execute("UPDATE approval_responses SET state='outcome_unknown' WHERE state IN ('authorized','response_may_send')", [])?;
-        tx.execute("UPDATE received_files SET state='outcome_unknown',failure='outcome_unknown' WHERE state IN ('reserved','write_possible')", [])?;
-        tx.execute(
-            "UPDATE managed_accounts SET state='uncertain' WHERE state='preparing'",
-            [],
-        )?;
-        accounts::reconcile_login_attempts(&tx, graphs::now_ms()?)?;
-        tx.commit()?;
+        if recover {
+            // A previous owner died after an intent became externally executable. Inspection,
+            // not automatically repeating that effect, is the only safe default.
+            let tx = database
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute("UPDATE engagements SET projection=json_set(projection,'$.cleanup','uncertain') WHERE id IN (SELECT engagement_id FROM effects WHERE kind='retire' AND state='started')",[])?;
+            tx.execute(
+                "UPDATE effects SET state='uncertain' WHERE state='started'",
+                [],
+            )?;
+            graphs::reconcile(&tx, graphs::now_ms()?)?;
+            replies::reconcile(&tx, graphs::now_ms()?, true)?;
+            notice_custody::reconcile(&tx, graphs::now_ms()?, true)?;
+            execution::recover_all(&tx, graphs::now_ms()?)?;
+            approvals::recover(&tx)?;
+            tx.execute("UPDATE approval_responses SET state='outcome_unknown' WHERE state IN ('authorized','response_may_send')", [])?;
+            tx.execute("UPDATE received_files SET state='outcome_unknown',failure='outcome_unknown' WHERE state IN ('reserved','write_possible')", [])?;
+            tx.execute(
+                "UPDATE managed_accounts SET state='uncertain' WHERE state='preparing'",
+                [],
+            )?;
+            accounts::reconcile_login_attempts(&tx, graphs::now_ms()?)?;
+            tx.commit()?;
+        }
         let accounts = accounts::Registry::open(&database.connection, directory)?;
         Ok(Self {
             accounts,
@@ -1176,12 +1269,20 @@ impl DomainRepository {
         })
     }
     pub fn register(&mut self, registration: &Registration) -> Result<(), Error> {
-        registration.validate()?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::register_transaction(&tx, registration)?;
+        tx.commit()?;
+        Ok(())
+    }
+    fn register_transaction(
+        tx: &Transaction<'_>,
+        registration: &Registration,
+    ) -> Result<(), Error> {
+        registration.validate()?;
         bounded_row(
-            &tx,
+            tx,
             "registrations",
             "fleet_id",
             &registration.fleet_id,
@@ -1207,9 +1308,8 @@ impl DomainRepository {
         }
         tx.execute("INSERT INTO registrations(fleet_id,generation,config) VALUES(?1,?2,?3) ON CONFLICT(fleet_id) DO UPDATE SET generation=excluded.generation,config=excluded.config",
             params![registration.fleet_id,registration.generation,serialize(registration)?])?;
-        graphs::reconcile(&tx, graphs::now_ms()?)?;
-        matrix_routes::reconcile(&tx, graphs::now_ms()?)?;
-        tx.commit()?;
+        graphs::reconcile(tx, graphs::now_ms()?)?;
+        matrix_routes::reconcile(tx, graphs::now_ms()?)?;
         Ok(())
     }
     /// Bind the fleet's reception room after a verified connection probe (TS
@@ -1238,6 +1338,8 @@ impl DomainRepository {
             return Err(Error::Generation);
         }
         if registration.reception_room_id == room {
+            coordinator::verified_after_probe(&tx, fleet_id, generation)?;
+            tx.commit()?;
             return Ok(());
         }
         if !registration.reception_room_id.is_empty() {
@@ -1249,6 +1351,7 @@ impl DomainRepository {
             "UPDATE registrations SET config=?2 WHERE fleet_id=?1",
             params![fleet_id, serialize(&registration)?],
         )?;
+        coordinator::verified_after_probe(&tx, fleet_id, generation)?;
         matrix_routes::reconcile(&tx, graphs::now_ms()?)?;
         tx.commit()?;
         Ok(())
@@ -1375,6 +1478,24 @@ impl DomainRepository {
             .map(|s| Ok(serde_json::from_str(&s?)?))
             .collect()
     }
+    /// Transport pages are scoped by registration, never by server hostname.
+    pub fn fleet_engagements(
+        &self,
+        fleet: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<Engagement>, Error> {
+        if limit == 0 || limit > 100 {
+            return Err(InvalidInput("page limit must be 1..100").into());
+        }
+        let mut query = self.db.prepare(
+            "SELECT projection FROM engagements WHERE fleet_id=?1 AND id>?2 ORDER BY id LIMIT ?3",
+        )?;
+        query
+            .query_map(params![fleet, after, limit], |r| r.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect()
+    }
     /// The console engagements list (board #60 item 3): the label the triage
     /// list already rendered, widened to the figures TS's `/api/engagements`
     /// (`backend-v2.js:14964-14975`) carries and native was dropping, and a
@@ -1444,9 +1565,18 @@ impl DomainRepository {
             // Compare before the state moves into the label.
             let pending = engagement.state == EngagementState::Pending;
             let allocated_tokens = u64::from(engagement.allocation());
-            let spent_tokens = quota_holds::spend(&self.db, &engagement.id)?;
+            let observed_tokens = quota_holds::spend(&self.db, &engagement.id)?;
+            let accounted_tokens: Option<u64> = self.db.query_row(
+                "SELECT json_extract(receipt,'$.consumedTokens') FROM coordinator_settlements WHERE agent_id=?1",
+                [&engagement.id], |row| row.get(0)).optional()?;
+            let spent_tokens = match (observed_tokens, accounted_tokens) {
+                (Some(observed), Some(accounted)) => Some(observed.max(accounted)),
+                (observed, accounted) => observed.or(accounted),
+            };
             let quota_paused = quota_holds::paused(&self.db, &engagement.id)?;
             labels.push(EngagementLabel {
+                matrix_profile: {let profile=self.matrix_agent_profile(&engagement.id)?; (profile["state"]!="default").then_some(profile)},
+                coordinator_managed:self.db.query_row("SELECT EXISTS(SELECT 1 FROM coordinator_engagements c JOIN engagements e ON e.fleet_id=c.id WHERE e.id=?1)",[&engagement.id],|r|r.get(0))?,
                 id: engagement.id.clone(),
                 agent_name: engagement.agent_name.as_str().to_owned(),
                 project_name: engagement.project_name.clone(),
@@ -2127,6 +2257,16 @@ impl DomainRepository {
         now: u64,
         allocated: Option<u64>,
     ) -> Result<Engagement, Error> {
+        self.approve_allocating_inner(command_id, proof, now, allocated, None)
+    }
+    fn approve_allocating_inner(
+        &mut self,
+        command_id: &str,
+        proof: &VerifiedRequest,
+        now: u64,
+        allocated: Option<u64>,
+        coordinator: Option<&coordinator::AgentApproval>,
+    ) -> Result<Engagement, Error> {
         let allocated = allocated
             .map(|value| {
                 if value == 0 {
@@ -2143,6 +2283,18 @@ impl DomainRepository {
         authority(&tx, proof, now)?;
         project_authority(&tx, proof)?;
         let request = proof.request();
+        if let Some(command) = coordinator {
+            coordinator::check_agent(&tx, command, proof, now)?;
+            if let Some(value) =
+                coordinator::replay(&tx, command_id, &coordinator::command_digest(command)?)?
+            {
+                return Ok(value);
+            }
+        } else if coordinator::binding(&tx, &request.fleet_id)?.is_some() {
+            // An old console endpoint cannot add a second verdict or bypass the
+            // explicit coordinator once this engagement has migrated.
+            return Err(Error::LocalAuthority);
+        }
         let id = request.engagement_id()?;
         let (stored_digest, generation): (String, u64) = tx
             .query_row(
@@ -2158,9 +2310,13 @@ impl DomainRepository {
         if generation != proof.registration().generation {
             return Err(Error::Generation);
         }
-        let digest = match allocated {
-            None => decision_digest("approve", &id)?,
-            Some(amount) => canonical::digest(&json!(["approve", id, u64::from(amount)]))?,
+        let digest = if let Some(command) = coordinator {
+            coordinator::command_digest(command)?
+        } else {
+            match allocated {
+                None => decision_digest("approve", &id)?,
+                Some(amount) => canonical::digest(&json!(["approve", id, u64::from(amount)]))?,
+            }
         };
         if let Some(value) = replay_decision(&tx, command_id, &digest)? {
             return Ok(value);
@@ -2180,7 +2336,14 @@ impl DomainRepository {
         // The engagement being decided is still pending, so it holds nothing
         // yet and the headroom is exactly the retained decide() figure with
         // `excludeEngagementId: id`.
-        check_grant(&tx, &resource, value.agent_name.as_str(), granted, now)?;
+        check_grant_within(
+            &tx,
+            &resource,
+            value.agent_name.as_str(),
+            granted,
+            now,
+            coordinator.map(|c| c.request.resource_allocation_id.as_str()),
+        )?;
         value.state = EngagementState::Reserved;
         value.project_name = proof.project_name().map(str::to_owned);
         value.allocated_tokens = allocated;
@@ -2198,6 +2361,9 @@ impl DomainRepository {
             &value,
             Some("engagement.approved"),
         )?;
+        if let Some(command) = coordinator {
+            coordinator::commit_agent(&tx, command, &value)?;
+        }
         tx.commit()?;
         Ok(value)
     }
@@ -2240,6 +2406,13 @@ impl DomainRepository {
             return Ok(value);
         }
         let mut value = read_engagement(&tx, id)?;
+        let fleet: String =
+            tx.query_row("SELECT fleet_id FROM engagements WHERE id=?1", [id], |r| {
+                r.get(0)
+            })?;
+        if coordinator::binding(&tx, &fleet)?.is_some() {
+            return Err(Error::LocalAuthority);
+        }
         if !matches!(
             value.state,
             EngagementState::Reserved | EngagementState::Active
@@ -2281,7 +2454,24 @@ impl DomainRepository {
         })
     }
     pub fn reject(&mut self, command_id: &str, id: &str) -> Result<Engagement, Error> {
-        self.end(command_id, id, false)
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Like approve and top-up: once a coordinator decides this fleet's
+        // requests, a console rejection would be a second verdict on them.
+        let fleet: Option<String> = tx
+            .query_row("SELECT fleet_id FROM engagements WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if let Some(fleet) = fleet
+            && coordinator::binding(&tx, &fleet)?.is_some()
+        {
+            return Err(Error::LocalAuthority);
+        }
+        let value = end_in_transaction(&tx, command_id, id, false)?;
+        tx.commit()?;
+        Ok(value)
     }
     pub fn revoke(&mut self, command_id: &str, id: &str) -> Result<Engagement, Error> {
         self.end(command_id, id, true)
@@ -2312,59 +2502,7 @@ impl DomainRepository {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let digest = decision_digest(if revoke { "revoke" } else { "reject" }, id)?;
-        if let Some(value) = replay_decision(&tx, command_id, &digest)? {
-            return Ok(value);
-        }
-        let mut value = read_engagement(&tx, id)?;
-        if !matches!(
-            value.state,
-            EngagementState::Pending | EngagementState::Reserved | EngagementState::Active
-        ) || !revoke && value.state != EngagementState::Pending
-        {
-            return Err(Error::State);
-        }
-        let effect: Option<(String, String)> = tx
-            .query_row(
-                "SELECT state,payload FROM effects WHERE engagement_id=?1 AND kind='provision'",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((state, payload)) = effect {
-            tx.execute("UPDATE effects SET state='cancelled',fence=fence+1 WHERE engagement_id=?1 AND kind='provision'", [id])?;
-            if state != "pending" {
-                value.cleanup = CleanupState::Pending;
-                tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'retire','pending',?3)", params![format!("retire_{id}"),id,payload])?;
-            }
-        }
-        value.state = if revoke {
-            EngagementState::Revoked
-        } else {
-            EngagementState::Rejected
-        };
-        write_engagement(&tx, &value)?;
-        // ADR-095 Slice 6: the ended-at instant is advisory metadata on the
-        // side table (never a column here), read by the engagements phase's
-        // receipt payload. First terminal transition wins.
-        tx.execute(
-            "INSERT INTO engagement_ends(engagement_id,ended_at) VALUES(?1,?2) \
-             ON CONFLICT(engagement_id) DO NOTHING",
-            params![value.id, graphs::now_ms()?],
-        )?;
-        graphs::reconcile(&tx, graphs::now_ms()?)?;
-        matrix_routes::reconcile(&tx, graphs::now_ms()?)?;
-        record_decision(
-            &tx,
-            command_id,
-            &digest,
-            &value,
-            Some(if revoke {
-                "engagement.revoked"
-            } else {
-                "engagement.rejected"
-            }),
-        )?;
+        let value = end_in_transaction(&tx, command_id, id, revoke)?;
         tx.commit()?;
         Ok(value)
     }
@@ -2392,6 +2530,15 @@ impl DomainRepository {
         )?;
         let rows = statement.query_map([fleet_id], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+    /// Candidates only; encrypted Matrix custody decides whether any can resume.
+    pub fn uncertain_provisions(&self, fleet_id: &str) -> Result<Vec<String>, Error> {
+        project::identifier(fleet_id, 128)?;
+        let mut statement = self.db.prepare(
+            "SELECT e.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.fleet_id=?1 AND f.kind='provision' AND f.state='uncertain' AND e.state='reserved' AND e.generation=r.generation ORDER BY f.id LIMIT 16")?;
+        Ok(statement
+            .query_map([fleet_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?)
     }
     /// Revoked engagements of one fleet whose retirement is still pending and
     /// whose agent never published a Matrix transport (read-only). No worker
@@ -2518,12 +2665,27 @@ impl DomainRepository {
         Ok(result)
     }
     pub fn pending_unattached_retirements(&self, fleet_id: &str) -> Result<Vec<String>, Error> {
+        self.pending_retirements(fleet_id, true)
+    }
+    /// Appservice identity cleanup also survives a lost live worker or restart.
+    /// Completing it never settles runner custody or refunds unknown usage.
+    pub fn pending_identity_retirements(&self, fleet_id: &str) -> Result<Vec<String>, Error> {
+        self.pending_retirements(fleet_id, false)
+    }
+    fn pending_retirements(&self, fleet_id: &str, unattached: bool) -> Result<Vec<String>, Error> {
         project::identifier(fleet_id, 128)?;
         let mut statement = self.db.prepare(
-            "SELECT e.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.fleet_id=?1 AND f.kind='retire' AND f.state='pending' AND e.state='revoked' AND e.generation=r.generation AND NOT EXISTS(SELECT 1 FROM matrix_transports t WHERE t.engagement_id=e.id) ORDER BY f.id LIMIT 16",
+            "SELECT e.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.fleet_id=?1 AND f.kind='retire' AND (f.state='pending' OR (?2=0 AND f.state='uncertain')) AND e.state='revoked' AND e.generation=r.generation AND (?2=0 OR NOT EXISTS(SELECT 1 FROM matrix_transports t WHERE t.engagement_id=e.id)) ORDER BY f.id LIMIT 16",
         )?;
-        let rows = statement.query_map([fleet_id], |r| r.get(0))?;
+        let rows = statement.query_map(params![fleet_id, unattached], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+    /// Inspect the original uncertain retirement for an idempotent remote
+    /// identity check. This cannot rearm provisioning, execution or local IO.
+    pub fn inspect_retirement_effect(&self, id: &str) -> Result<Option<Effect>, Error> {
+        project::identifier(id, 128)?;
+        let effect: Option<String> = self.db.query_row("SELECT f.id FROM effects f JOIN engagements e ON e.id=f.engagement_id JOIN registrations r ON r.fleet_id=e.fleet_id WHERE e.id=?1 AND e.state='revoked' AND f.kind='retire' AND f.state='uncertain' AND e.generation=r.generation",[id],|r|r.get(0)).optional()?;
+        effect.map(|id| read_effect(&self.db, &id)).transpose()
     }
     fn claim_matching_effect(&mut self, expected: Option<&str>) -> Result<Option<Effect>, Error> {
         let tx = self
@@ -2634,6 +2796,67 @@ fn observe_effect_transaction(
         params![id, state, digest],
     )?;
     write_engagement(tx, &value)?;
+    Ok(value)
+}
+pub(super) fn end_in_transaction(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    id: &str,
+    revoke: bool,
+) -> Result<Engagement, Error> {
+    let digest = decision_digest(if revoke { "revoke" } else { "reject" }, id)?;
+    if let Some(value) = replay_decision(tx, command_id, &digest)? {
+        return Ok(value);
+    }
+    let mut value = read_engagement(tx, id)?;
+    if !matches!(
+        value.state,
+        EngagementState::Pending | EngagementState::Reserved | EngagementState::Active
+    ) || !revoke && value.state != EngagementState::Pending
+    {
+        return Err(Error::State);
+    }
+    let effect: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state,payload FROM effects WHERE engagement_id=?1 AND kind='provision'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((state, payload)) = effect {
+        tx.execute("UPDATE effects SET state='cancelled',fence=fence+1 WHERE engagement_id=?1 AND kind='provision'", [id])?;
+        if state != "pending" {
+            value.cleanup = CleanupState::Pending;
+            tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'retire','pending',?3)", params![format!("retire_{id}"),id,payload])?;
+        }
+    }
+    value.state = if revoke {
+        EngagementState::Revoked
+    } else {
+        EngagementState::Rejected
+    };
+    write_engagement(tx, &value)?;
+    // ADR-095 Slice 6: the ended-at instant is advisory metadata on the
+    // side table (never a column here), read by the engagements phase's
+    // receipt payload. First terminal transition wins.
+    tx.execute(
+        "INSERT INTO engagement_ends(engagement_id,ended_at) VALUES(?1,?2) \
+             ON CONFLICT(engagement_id) DO NOTHING",
+        params![value.id, graphs::now_ms()?],
+    )?;
+    graphs::reconcile(tx, graphs::now_ms()?)?;
+    matrix_routes::reconcile(tx, graphs::now_ms()?)?;
+    record_decision(
+        tx,
+        command_id,
+        &digest,
+        &value,
+        Some(if revoke {
+            "engagement.revoked"
+        } else {
+            "engagement.rejected"
+        }),
+    )?;
     Ok(value)
 }
 fn read_effect(db: &Connection, id: &str) -> Result<Effect, Error> {

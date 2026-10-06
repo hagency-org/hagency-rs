@@ -210,6 +210,85 @@ async fn native_catalog_outbound_retirement() {
 }
 
 #[tokio::test]
+async fn native_coordinator_publication_replays_frozen_grant_and_keeps_a_later_top_up() {
+    let mut fake = Fake::start(true).await;
+    let ctx = Context::new(&fake.endpoint).await;
+    let cancel = CancellationToken::new();
+    let policy = json!({"id":FLEET,"server":"matrix.example.test","owner":"@provider:matrix.example.test","coordinator":"@coordinator:matrix.example.test",
+        "registrationGeneration":7,"delegationRevision":1,"delegationExpiresAtMs":now()+3600000,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true});
+    ctx.domain
+        .configure_coordinator(serde_json::from_value(policy).unwrap())
+        .await
+        .unwrap();
+    ctx.domain.put_resource(resource()).await.unwrap();
+    let grant = |amount, revision| {
+        serde_json::from_value(json!({"id":"grant_fixture","serverEngagementId":FLEET,"resourceId":resource().id(),
+        "revision":revision,"allocatedTokens":amount,"eligibleManagers":["@manager:matrix.example.test"]})).unwrap()
+    };
+    ctx.domain
+        .put_coordinator_resource(grant(600, 1))
+        .await
+        .unwrap();
+    let mut original = Vec::new();
+    let (lost, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            let value = check(&request, 1);
+            assert_eq!(value["capabilities"]["coordinatorApprovalV1"], true);
+            assert_eq!(
+                value["coordinatorUpdates"][0]["payload"]["resource"]["allocatedTokens"],
+                600
+            );
+            original = request.body.clone();
+            drop(request);
+        }
+    );
+    assert_eq!(lost, Err(Error::Transport));
+    ctx.domain
+        .put_coordinator_resource(grant(700, 2))
+        .await
+        .unwrap();
+    let (retry, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            assert_eq!(request.body, original);
+            request.json(200, json!({"ok":true}));
+        }
+    );
+    assert_eq!(retry, Ok(Step::Published));
+    let (next, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            let value = check(&request, 2);
+            assert_eq!(
+                value["coordinatorUpdates"][0]["payload"]["resource"]["allocatedTokens"],
+                700
+            );
+            assert_eq!(
+                value["coordinatorUpdates"][0]["payload"]["resource"]["revision"],
+                2
+            );
+            request.json(200, json!({"ok":true}));
+        }
+    );
+    assert_eq!(next, Ok(Step::Published));
+    let (after, ()) = tokio::join!(
+        ctx.adapter.publish_resources_once(&ctx.domain, &cancel),
+        async {
+            let request = fake.next().await;
+            assert!(check(&request, 3).get("coordinatorUpdates").is_none());
+            request.json(200, json!({"ok":true}));
+        }
+    );
+    assert_eq!(after, Ok(Step::Published));
+    ctx.close().await;
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn native_catalog_outbound_queued_rotation() {
     use hagency_store::outbound::{Command, Reply};
     use std::time::Duration;

@@ -91,9 +91,6 @@ async fn import(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                 "error": format!("this is not the Hagency configuration downloaded from Palpo ({field})"),
             })));
         }
-        Err(ImportError::OtherFleet) => {
-            refusal(res, StatusCode::CONFLICT, "palpo_fleet_conflict");
-        }
         Err(ImportError::Store(_) | ImportError::Start(_) | ImportError::Closed) => {
             refusal(
                 res,

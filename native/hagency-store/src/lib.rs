@@ -1,13 +1,14 @@
 //! A single SQLite owner on a dedicated bounded worker; no IO in async handlers.
 pub use domain::resource_configuration::{
     CeilingChange, ProfileChange, ResourceConfigurationAccess, ResourceConfigurationCommand,
-    ResourceConfigurationResult,
+    ResourceConfigurationResult, ResourceEngagementChange,
 };
 pub mod agent_home;
 pub mod backup;
 mod database;
 mod domain;
 pub use domain::DOMAIN_SCHEMA_VERSION;
+pub use domain::coordinator;
 pub use domain::joined_rooms::{JoinedRoom, JoinedRoomState, MAX_JOINED_ROOMS};
 pub use domain::owner_anchors::OwnerAnchor;
 mod domain_worker;
@@ -35,15 +36,16 @@ pub use domain::{
     OVER_BUDGET_NOTICE_KIND, OfferBook, OfferResource, OfferRole, OfferServing, OperatorMessage,
     OperatorTask, OperatorTaskComment, OverBudgetNotice, OwnedClaimProfile, OwnedClaimRoom,
     OwnedCompletion, OwnedDispatchScope, OwnedFailure, OwnedObservation, OwnedProvisionScope,
-    PEER_RECEIPT_CEILING, PEER_RETENTION_CEILING, PEER_RETENTION_FLOOR, PeerRetentionStatus,
-    PeerSweepOutcome, PendingInvite, Preview, ProjectSide, QuotaStatus, Reminder, ReminderReceipt,
-    ReminderSweep, Representative, RetentionStatus, RoleOffer, RuntimeProfile, RuntimeProfileRole,
-    SideBudget, SideCommitment, SideCredential, SideProject, SideProjectRecord, SideRecord,
-    SourceUsage, SuppressOutcome, Suppression, SweepOutcome, TASK_GRANULARITIES, TASK_PRIORITIES,
-    TASK_STATUSES, TaskFilters, Tombstone, UploadAdmission, UploadClaim, UploadIdentity,
-    UploadPreparation, UploadSend, UsageCeiling, UsageEvidence, UsagePeriod, UsagePeriodKind,
-    UsageReceipt, UsageReport, UsageSource, UsageSummary, UsageTotals, WhitelistEntry,
-    allowed_transitions, operator_transitions, over_budget_notice_body,
+    OwnedRuntimeLease, PEER_RECEIPT_CEILING, PEER_RETENTION_CEILING, PEER_RETENTION_FLOOR,
+    PeerRetentionStatus, PeerSweepOutcome, PendingInvite, Preview, ProjectSide, QuotaStatus,
+    Reminder, ReminderReceipt, ReminderSweep, Representative, RetentionStatus, RoleOffer,
+    RuntimeProfile, RuntimeProfileRole, SideBudget, SideCommitment, SideCredential, SideProject,
+    SideProjectRecord, SideRecord, SourceUsage, SuppressOutcome, Suppression, SweepOutcome,
+    TASK_GRANULARITIES, TASK_PRIORITIES, TASK_STATUSES, TaskFilters, Tombstone, UploadAdmission,
+    UploadClaim, UploadIdentity, UploadPreparation, UploadSend, UsageCeiling, UsageEvidence,
+    UsagePeriod, UsagePeriodKind, UsageReceipt, UsageReport, UsageSource, UsageSummary,
+    UsageTotals, WhitelistEntry, allowed_transitions, operator_transitions,
+    over_budget_notice_body,
 };
 pub use domain::{DeliveryFeedback, DeliveryWarning, DirectTarget, MentionState, MentionTarget};
 pub use domain::{OutcomeAction, OutcomeResolution};

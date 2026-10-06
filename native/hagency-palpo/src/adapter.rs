@@ -32,6 +32,8 @@ pub trait ProbeReceipts: Send + Sync {
     fn statuses(&self) -> Vec<Value> {
         Vec::new()
     }
+    /// Advance a bounded status page only after those exact frozen bytes were accepted.
+    fn statuses_published(&self, _statuses: &[Value]) {}
 }
 
 /// One host transport instance. At most one active request per Matrix/work/

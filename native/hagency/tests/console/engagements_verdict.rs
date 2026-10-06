@@ -163,6 +163,60 @@ async fn native_engagement_verdict_refuse_rejects_pending() {
     f.close().await;
 }
 
+/// Scenario: once the fleet has a coordinator (ADR-191), the console can
+/// neither refuse nor approve its pending request; either would be a second
+/// verdict on the coordinator's decision. The request stays pending.
+#[tokio::test]
+async fn native_engagement_verdict_leaves_a_coordinator_request_to_the_coordinator() {
+    let f = Fixture::new("127.0.0.1:13300".parse().unwrap(), None);
+    let service = f.service();
+    let pending = f.new_engagement().await;
+    let fleet = common::registration().fleet_id;
+    f.domain
+        .configure_coordinator(
+            serde_json::from_value(json!({"id":fleet,"server":"example.test",
+                "owner":"@provider:example.test","coordinator":"@coordinator:example.test",
+                "registrationGeneration":1,"delegationRevision":1,
+                "delegationExpiresAtMs":now()+3600000,"state":"verified",
+                "allowSelfApproval":false,"coordinatorApprovalV1":true}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = lifecycle_session(&service).await;
+    let mut refused = post(&format!("/console/api/agents/{pending}/refuse"), &cookie)
+        .json(&json!({"commandId": "cmd_refuse_coordinated"}))
+        .send(&service)
+        .await;
+    assert_eq!(refused.status_code, Some(StatusCode::CONFLICT));
+    assert_eq!(
+        refused.take_json::<Value>().await.unwrap()["code"],
+        "coordinator_managed"
+    );
+    let mut approved = post(
+        &format!("/console/api/engagements/{pending}/approve"),
+        &cookie,
+    )
+    .json(&json!({"commandId": "cmd_approve_coordinated"}))
+    .send(&service)
+    .await;
+    assert_eq!(approved.status_code, Some(StatusCode::CONFLICT));
+    assert_eq!(
+        approved.take_json::<Value>().await.unwrap()["code"],
+        "coordinator_managed"
+    );
+    let state: String = rusqlite::Connection::open(f.root.path().join("state/domain.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT state FROM engagements WHERE id=?1",
+            [&pending],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "pending");
+    f.close().await;
+}
+
 /// Scenario: the audit read lists the newest decisions newest-first with the
 /// retained entry shape (backend-v2.js:14980-14983, listAudit
 /// lib/engagement-store.js:804-806).

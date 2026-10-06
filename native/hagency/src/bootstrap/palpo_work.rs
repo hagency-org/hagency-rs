@@ -9,11 +9,12 @@
 //!   transaction. It is then re-read as the representative, the room must be
 //!   invite-only, unencrypted and joined by the representative, and the room is
 //!   bound as the fleet's reception. The receipt rides the next `/updates`.
-//! - Work lane, `request`: not processed here yet; it stays in custody, never
-//!   dropped.
+//! - Work lane, `request`: fresh Matrix evidence precedes admission. Delegated
+//!   coordinator decisions reserve capacity and queue normal provisioning;
+//!   legacy requests retain their explicitly configured console workflow.
 //!
-//! A failure is retried later, never turned into a terminal refusal: the bridge
-//! does not decide the connection is dead.
+//! Transport/read failures retry. A deterministic coordinator admission refusal
+//! has a durable receipt; it does not assert that the connection is dead.
 use super::probe::{PROBE_EVENT, ProbeError, ProbeReceipt, decide};
 use hagency_core::custody::{Kind, Lane};
 use hagency_palpo::{Adapter, CancellationToken, ProbeReceipts};
@@ -31,18 +32,49 @@ pub(super) struct Appservice {
     homeserver: String,
     as_token: String,
     representative: String,
+    matrix_root: Option<Vec<u8>>,
 }
 impl Appservice {
     pub(super) fn load(state: &Path, server_name: &str) -> Option<Self> {
-        let raw = private::read_secret(&state.join("palpo-appservice.json")).ok()?;
+        let raw = private_json(&state.join("palpo-appservice.json"), 65536)?;
         let value: Value = serde_json::from_slice(&raw).ok()?;
         let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
         Some(Self {
             homeserver: text("homeserver")?,
             as_token: text("as_token")?,
             representative: format!("@{}:{server_name}", text("sender_localpart")?),
+            matrix_root: crate::bootstrap::config::matrix_root(state).ok()?,
         })
     }
+}
+
+fn private_json(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = private::open(path, false).ok()?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= limit).then_some(bytes)
+}
+
+pub(super) async fn verify_coordinator_account(state: &Path, server: &str, user: &str) -> bool {
+    if !user.starts_with('@')
+        || user.starts_with("@hf_")
+        || user.split_once(':').map(|(_, s)| s) != Some(server)
+    {
+        return false;
+    }
+    let Some(aservice) = Appservice::load(state, server) else {
+        return false;
+    };
+    let Some(reader) = Reader::new(&aservice) else {
+        return false;
+    };
+    matches!(
+        reader
+            .get(&["_matrix", "client", "v3", "profile", user])
+            .await,
+        Ok(Some(_))
+    )
 }
 
 /// Durable probe bookkeeping: push receipts seen on the Matrix lane and the
@@ -56,6 +88,8 @@ pub(super) struct Probes {
     requests: PathBuf,
     lock: Mutex<()>,
     statuses: Mutex<Vec<Value>>,
+    status_cursor: Mutex<String>,
+    runtime: Mutex<Option<super::fleet::Routes>>,
 }
 impl Probes {
     pub(super) fn new(state: &Path) -> Arc<Self> {
@@ -65,11 +99,23 @@ impl Probes {
             requests: state.join("palpo-requests.json"),
             lock: Mutex::new(()),
             statuses: Mutex::new(Vec::new()),
+            status_cursor: Mutex::new(String::new()),
+            runtime: Mutex::new(None),
         })
     }
+    pub(super) fn attach_runtime(&self, routes: super::fleet::Routes) {
+        *self.runtime.lock().unwrap_or_else(|e| e.into_inner()) = Some(routes);
+    }
+    fn runtime_availability(&self, agent: &str) -> &'static str {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|runtime| runtime.agent_availability(agent))
+            .unwrap_or("not_attached")
+    }
     fn read(path: &Path) -> Vec<Value> {
-        private::read_secret(path)
-            .ok()
+        private_json(path, 1024 * 1024)
             .and_then(|raw| serde_json::from_slice::<Vec<Value>>(&raw).ok())
             .unwrap_or_default()
     }
@@ -127,6 +173,12 @@ impl ProbeReceipts for Probes {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    fn statuses_published(&self, statuses: &[Value]) {
+        let mut pending = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.as_slice() == statuses {
+            pending.clear();
+        }
+    }
     fn published(&self, receipts: &[Value]) {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut rows = Self::read(&self.outbox);
@@ -144,13 +196,15 @@ struct Reader {
 }
 impl Reader {
     fn new(appservice: &Appservice) -> Option<Self> {
+        let mut client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20));
+        if let Some(pem) = &appservice.matrix_root {
+            client = client.add_root_certificate(reqwest::Certificate::from_pem(pem).ok()?);
+        }
         Some(Self {
-            client: reqwest::Client::builder()
-                .redirect(Policy::none())
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(20))
-                .build()
-                .ok()?,
+            client: client.build().ok()?,
             origin: Url::parse(&appservice.homeserver).ok()?,
             token: appservice.as_token.clone(),
             user: appservice.representative.clone(),
@@ -332,18 +386,19 @@ impl Reader {
 /// Admit one Palpo agent request (TS `POST /api/fleet/v1/requests`): the source
 /// event is re-read, the reception, target project and private approval room
 /// are observed fresh, and the port's own `verify_request` decides. An admitted
-/// request becomes a pending engagement for the operator's console verdict.
-async fn admit_request(
+/// request becomes a pending engagement. A scoped coordinator decision reserves
+/// capacity and queues provisioning here; only legacy requests await the console.
+async fn verify_project_request(
     reader: &Reader,
     domain: &DomainStore,
     fleet: &str,
     payload: &Value,
-) -> Result<String, String> {
+) -> Result<hagency_core::authority::VerifiedRequest, AdmissionError> {
     use hagency_core::authority::{
         ProjectRequest, RequestObservation, SourceObservation, verify_request,
     };
-    let request: ProjectRequest =
-        serde_json::from_value(payload.clone()).map_err(|e| format!("request shape: {e}"))?;
+    let request: ProjectRequest = serde_json::from_value(payload.clone())
+        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
     let registration = domain
         .provisioning_registration(fleet.to_owned())
         .await
@@ -413,12 +468,171 @@ async fn admit_request(
         project,
         owner_room,
     };
-    let verified = verify_request(&registration, request, observation)
-        .map_err(|e| format!("verification: {}", e.0))?;
-    let engagement = domain
-        .admit(verified, now)
+    verify_request(&registration, request, observation)
+        .map_err(|_| AdmissionError::Refused("invalid_request"))
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AdmissionError {
+    #[error("{0}")]
+    Pending(String),
+    #[error("{0}")]
+    Refused(&'static str),
+}
+impl From<String> for AdmissionError {
+    fn from(error: String) -> Self {
+        Self::Pending(error)
+    }
+}
+impl From<&str> for AdmissionError {
+    fn from(error: &str) -> Self {
+        Self::Pending(error.into())
+    }
+}
+impl From<AdmissionError> for String {
+    fn from(error: AdmissionError) -> Self {
+        error.to_string()
+    }
+}
+impl From<hagency_store::Error> for AdmissionError {
+    fn from(error: hagency_store::Error) -> Self {
+        match hagency_store::coordinator::coordinator_refusal_reason(&error) {
+            Some(code) => Self::Refused(code),
+            None => Self::Pending(error.to_string()),
+        }
+    }
+}
+/// Each attempt uses the original approved rooms. Matrix failures are durable
+/// setup results; another authenticated recovery can retry without a new grant.
+async fn run_project_setup(
+    reader: &Reader,
+    domain: &DomainStore,
+    command: hagency_store::coordinator::ProjectSetupCommand,
+) -> Result<Value, AdmissionError> {
+    let work = domain
+        .begin_project_setup(command.clone())
         .await
-        .map_err(|e| format!("admission: {e:?}"))?;
+        .map_err(AdmissionError::from)?;
+    if let Some(done) = work.completed {
+        return Ok(done);
+    }
+    let result = async {
+        let fleet = command.context.server_engagement_id.as_str();
+        let registration = domain
+            .provisioning_registration(fleet.to_owned())
+            .await
+            .map_err(|_| "setup_unavailable")?;
+        for (user, room, reason) in [
+            (
+                &registration.representative_mxid,
+                &work.definition.room_id,
+                "project_membership_pending",
+            ),
+            (
+                &registration.approval_bot_mxid,
+                &work.definition.owner_dm_room_id,
+                "private_membership_pending",
+            ),
+        ] {
+            domain
+                .validate_project_setup(command.clone())
+                .await
+                .map_err(|_| "authority_changed")?;
+            reader
+                .call_as(
+                    user,
+                    reqwest::Method::POST,
+                    &["_matrix", "client", "v3", "join", room],
+                    &[],
+                    Some(json!({})),
+                )
+                .await
+                .map_err(|_| reason)?
+                .ok_or(reason)?;
+        }
+        domain
+            .validate_project_setup(command.clone())
+            .await
+            .map_err(|_| "authority_changed")?;
+        let project = reader
+            .observe(
+                &registration.representative_mxid,
+                &work.definition.room_id,
+                Some(fleet),
+            )
+            .await
+            .map_err(|_| "project_room_unreadable")?;
+        domain
+            .validate_project_setup(command.clone())
+            .await
+            .map_err(|_| "authority_changed")?;
+        let owner_room = reader
+            .observe(
+                &registration.approval_bot_mxid,
+                &work.definition.owner_dm_room_id,
+                None,
+            )
+            .await
+            .map_err(|_| "private_room_unreadable")?;
+        domain
+            .validate_project_setup(command.clone())
+            .await
+            .map_err(|_| "authority_changed")?;
+        let observed_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "setup_unavailable")?
+            .as_millis() as u64;
+        domain
+            .coordinator_project_ready(hagency_store::coordinator::ProjectReadiness {
+                registration,
+                project_id: command.project_id.as_str().into(),
+                observed_at_ms,
+                project,
+                owner_room,
+            })
+            .await
+            .map_err(|_| "room_authority_changed")?;
+        Ok::<(), &str>(())
+    }
+    .await;
+    domain
+        .finish_project_setup(command, result.err().map(String::from))
+        .await
+        .map_err(AdmissionError::from)
+}
+
+async fn admit_request(
+    reader: &Reader,
+    domain: &DomainStore,
+    fleet: &str,
+    payload: &Value,
+) -> Result<String, AdmissionError> {
+    let verified = verify_project_request(reader, domain, fleet, payload).await?;
+    if payload.get("coordinatorApproval").is_some() {
+        domain
+            .verify_coordinator_project(verified.clone())
+            .await
+            .map_err(AdmissionError::from)?;
+    }
+    let engagement = domain
+        .admit(
+            verified.clone(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or_default(),
+        )
+        .await
+        .map_err(AdmissionError::from)?;
+    if let Some(command) = payload.get("coordinatorApproval") {
+        let command: hagency_store::coordinator::AgentApproval =
+            serde_json::from_value(command.clone())
+                .map_err(|_| AdmissionError::Refused("invalid_request"))?;
+        domain
+            .approve_coordinated_agent(command, verified)
+            .await
+            .map_err(AdmissionError::from)?;
+    }
     Ok(engagement.id)
 }
 
@@ -544,18 +758,251 @@ async fn work_once(
         }
     };
     if work.kind == Kind::Request {
+        if work.payload["operation"] == "coordinator_agent_control" {
+            let result = async {
+                let command: hagency_store::coordinator::AgentControl =
+                    serde_json::from_value(work.payload["command"].clone())
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
+                if let Some(outcome) = domain
+                    .coordinator_command_outcome(fleet.into(), work.payload.clone())
+                    .await
+                    .map_err(AdmissionError::from)?
+                {
+                    return Ok(outcome);
+                }
+                domain
+                    .control_coordinator_agent(fleet.into(), command)
+                    .await
+                    .map_err(AdmissionError::from)
+            }
+            .await;
+            let result = match result {
+                Ok(receipt) => Ok(receipt),
+                Err(AdmissionError::Refused(reason)) => domain
+                    .refuse_coordinator_command(fleet.into(), work.payload.clone(), reason.into())
+                    .await
+                    .map_err(AdmissionError::from),
+                Err(e) => Err(e),
+            };
+            return match result {
+                Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
+                    Ok(()) => Outcome::Done,
+                    Err(_) => Outcome::Later,
+                },
+                Err(error) => {
+                    eprintln!("palpo agent control: {error}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    Outcome::Later
+                }
+            };
+        }
+        if matches!(
+            work.payload["operation"].as_str(),
+            Some("coordinator_project_approval" | "coordinator_token_top_up")
+        ) {
+            match domain
+                .receive_coordinator_command(fleet.into(), work.payload.clone())
+                .await
+            {
+                Ok(Some(result))
+                    if result["state"] == "refused"
+                        || work.payload["operation"] == "coordinator_token_top_up" =>
+                {
+                    return match adapter.complete(work.ticket, result).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("palpo command binding refused: {error}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    return Outcome::Later;
+                }
+            }
+        }
+        if work.payload["operation"] == "coordinator_token_top_up" {
+            let result = async {
+                let command: hagency_store::coordinator::TokenTopUpApproval =
+                    serde_json::from_value(work.payload["command"].clone())
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?;
+                if command.context.server_engagement_id.as_str() != fleet {
+                    return Err(AdmissionError::Refused("invalid_request"));
+                }
+                let agent = domain
+                    .engagement(command.request.agent_allocation_id.as_str().into())
+                    .await
+                    .map_err(AdmissionError::from)?;
+                let (context, _, _) = domain
+                    .provisioning_request_evidence(fleet.into(), agent.request_id)
+                    .await
+                    .map_err(AdmissionError::from)?
+                    .ok_or_else(|| "agent evidence missing".to_owned())?;
+                let request: Value = serde_json::from_str(&context)
+                    .map_err(|_| "agent evidence invalid".to_owned())?;
+                let proof = verify_project_request(reader, domain, fleet, &request).await?;
+                domain
+                    .approve_coordinator_top_up(command, proof)
+                    .await
+                    .map_err(AdmissionError::from)
+            }
+            .await;
+            return match result {
+                Ok(agent) => match adapter
+                    .complete(
+                        work.ticket,
+                        json!({"engagementId":agent.id,"allocatedTokens":agent.allocation()}),
+                    )
+                    .await
+                {
+                    Ok(()) => Outcome::Done,
+                    Err(_) => Outcome::Later,
+                },
+                Err(AdmissionError::Refused(reason)) => {
+                    match domain
+                        .refuse_coordinator_command(
+                            fleet.into(),
+                            work.payload.clone(),
+                            reason.into(),
+                        )
+                        .await
+                    {
+                        Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
+                            Ok(()) => Outcome::Done,
+                            Err(_) => Outcome::Later,
+                        },
+                        Err(_) => {
+                            let _ = adapter.retry_later(work.ticket).await;
+                            Outcome::Later
+                        }
+                    }
+                }
+                Err(reason) => {
+                    eprintln!("palpo coordinator top-up: {reason}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    Outcome::Later
+                }
+            };
+        }
+        if matches!(
+            work.payload["operation"].as_str(),
+            Some("coordinator_project_approval" | "coordinator_project_setup")
+        ) {
+            let result = async {
+                let setup = if work.payload["operation"] == "coordinator_project_approval" {
+                    let command: hagency_store::coordinator::ProjectApproval =
+                        serde_json::from_value(work.payload["command"].clone())
+                            .map_err(|_| AdmissionError::Refused("invalid_request"))?;
+                    if command.context.server_engagement_id.as_str() != fleet {
+                        return Err(AdmissionError::Refused("invalid_request"));
+                    }
+                    domain
+                        .approve_coordinator_project(
+                            command.clone(),
+                            work.payload["definition"].clone(),
+                        )
+                        .await
+                        .map_err(AdmissionError::from)?;
+                    hagency_store::coordinator::ProjectSetupCommand {
+                        context: command.context.clone(),
+                        project_id: command.request.project_id,
+                        project_revision: command.request.revision,
+                        approval_command_id: command.context.command_id,
+                    }
+                } else {
+                    serde_json::from_value(work.payload["command"].clone())
+                        .map_err(|_| AdmissionError::Refused("invalid_request"))?
+                };
+                if setup.context.server_engagement_id.as_str() != fleet {
+                    return Err(AdmissionError::Refused("invalid_request"));
+                }
+                run_project_setup(reader, domain, setup).await
+            }
+            .await;
+            return match result {
+                Ok(result) => match adapter.complete(work.ticket, result).await {
+                    Ok(()) => Outcome::Done,
+                    Err(_) => Outcome::Later,
+                },
+                Err(AdmissionError::Refused(reason)) => match domain
+                    .refuse_coordinator_command(fleet.into(), work.payload.clone(), reason.into())
+                    .await
+                {
+                    Ok(receipt) => match adapter.complete(work.ticket, receipt).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    },
+                    Err(_) => {
+                        let _ = adapter.retry_later(work.ticket).await;
+                        Outcome::Later
+                    }
+                },
+                Err(reason) => {
+                    eprintln!("palpo coordinator project: {reason}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    Outcome::Later
+                }
+            };
+        }
         if let Some(id) = work.payload.get("requestId").and_then(Value::as_str) {
             probes.remember_request(id);
         }
+        if work.payload.get("coordinatorApproval").is_some() {
+            match domain
+                .receive_coordinator_agent(fleet.into(), work.payload.clone())
+                .await
+            {
+                Ok(row) if row["state"] == "refused" || row["state"] == "applied" => {
+                    return match adapter.complete(work.ticket, row).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("palpo decision could not be recorded: {error}");
+                    let _ = adapter.retry_later(work.ticket).await;
+                    return Outcome::Later;
+                }
+            }
+        }
         return match admit_request(reader, domain, fleet, &work.payload).await {
             Ok(engagement) => {
-                eprintln!("palpo request admitted as {engagement} (pending the console verdict)");
+                if work.payload.get("coordinatorApproval").is_some() {
+                    eprintln!(
+                        "palpo request {engagement}: coordinator decision applied; provisioning queued"
+                    );
+                } else {
+                    eprintln!(
+                        "palpo request admitted as {engagement} (legacy console verdict pending)"
+                    );
+                }
                 match adapter
                     .complete(work.ticket, json!({"engagementId": engagement}))
                     .await
                 {
                     Ok(()) => Outcome::Done,
                     Err(_) => Outcome::Later,
+                }
+            }
+            Err(AdmissionError::Refused(reason))
+                if work.payload.get("coordinatorApproval").is_some() =>
+            {
+                let id = work.payload["coordinatorApproval"]["context"]["commandId"]
+                    .as_str()
+                    .unwrap_or_default();
+                match domain
+                    .refuse_coordinator_agent(id.into(), reason.into())
+                    .await
+                {
+                    Ok(row) => match adapter.complete(work.ticket, row).await {
+                        Ok(()) => Outcome::Done,
+                        Err(_) => Outcome::Later,
+                    },
+                    Err(_) => {
+                        let _ = adapter.retry_later(work.ticket).await;
+                        Outcome::Later
+                    }
                 }
             }
             Err(reason) => {
@@ -720,9 +1167,29 @@ async fn approval_invites_once(reader: &Reader, bot: &str, fleet: &str, server: 
 /// bound), which the provisioning slice establishes.
 async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, reader: &Reader) {
     use hagency_core::project::EngagementState as S;
-    let Ok(engagements) = domain.engagements(String::new(), 100).await else {
+    // Retain one bounded page until publication acknowledges it, then advance.
+    // A large first fleet must not hide later fleets or its own 101st agent.
+    if !probes
+        .statuses
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+    {
+        return;
+    }
+    let cursor = probes
+        .status_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Ok(engagements) = domain.fleet_engagements(fleet.to_owned(), cursor, 20).await else {
         return;
     };
+    *probes
+        .status_cursor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) =
+        engagements.last().map(|e| e.id.clone()).unwrap_or_default();
     let observed = now_iso();
     let mut out = Vec::new();
     for e in engagements {
@@ -751,7 +1218,20 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         };
         // ADR-186 §A4/§C4: the granted amount, raised by any top-up; the
         // request when the operator granted it unchanged.
-        let allocated = matches!(e.state, S::Reserved | S::Active).then(|| json!(e.allocation()));
+        let allocated =
+            matches!(e.state, S::Reserved | S::Active | S::Revoked).then(|| json!(e.allocation()));
+        let usage = domain
+            .coordinator_agent_usage(e.id.clone())
+            .await
+            .unwrap_or(Value::Null);
+        let mut lifecycle = domain
+            .coordinator_agent_lifecycle(e.id.clone())
+            .await
+            .unwrap_or(Value::Null);
+        let runtime_available = probes.runtime_availability(&e.id);
+        if lifecycle.is_object() {
+            lifecycle["runtimeAvailability"] = json!(runtime_available);
+        }
         // The serving identity is the fleet-namespaced account the App Service
         // factory created for this engagement; `ready` is TS's rule (active and
         // bound) plus the observed fact the agent is joined in the target room.
@@ -763,6 +1243,8 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
         let agent = format!("@{fleet}_{}:{server}", e.id);
         let target = c["targetRoomId"].as_str().unwrap_or_default().to_owned();
         let joined = bound
+            && runtime_available == "available"
+            && lifecycle["matrixReady"] == true
             && reader
                 .get(&[
                     "_matrix",
@@ -791,7 +1273,9 @@ async fn refresh_statuses(domain: &DomainStore, probes: &Probes, fleet: &str, re
             "serving": resource.map(|r| json!({"framework": r.framework, "model": r.model,
                 "reasoning": r.reasoning})),
             "fulfillment": phase.map(|p| json!({"phase": p, "incomplete": false})),
-            "ready": joined, "decidedAt": null, "endedAt": null, "observedAt": observed,
+            "ready": joined, "lifecycle":lifecycle, "decidedAt": null, "endedAt": null, "observedAt": observed,
+            "consumedTokens":usage["consumedTokens"],"usageObservedAtMs":usage["usageObservedAtMs"],
+            "usageEvidence":usage["usageEvidence"],"usageComplete":usage["usageComplete"],"quotaPaused":usage["quotaPaused"],
         }));
     }
     *probes.statuses.lock().unwrap_or_else(|e| e.into_inner()) = out;
@@ -850,5 +1334,52 @@ pub(super) async fn run(
             _ = cancel.cancelled() => break,
             _ = tokio::time::sleep(pause) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_palpo_private_observation_files_survive_beyond_secret_token_size() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("private");
+        private::directory(&state).unwrap();
+        let probes = Probes::new(&state);
+        for i in 0..25 {
+            probes.remember_request(&format!("request_{i:040}"));
+            probes.record_event(json!({"sourceEventId":format!("event_{i}"),"challenge":"bound-challenge","receivedAt":"2026-10-04T00:00:00Z"}));
+        }
+        drop(probes);
+        let probes = Probes::new(&state);
+        assert!(probes.palpo_request("request_0000000000000000000000000000000000000000"));
+        assert!(probes.palpo_request("request_0000000000000000000000000000000000000024"));
+        assert!(probes.event("event_0").is_some());
+        assert!(probes.event("event_24").is_some());
+        let configuration = json!({"homeserver":"https://matrix.example.test","as_token":"x".repeat(1024),"sender_localpart":"representative"});
+        private::replace(
+            &state.join("palpo-appservice.json"),
+            &serde_json::to_vec(&configuration).unwrap(),
+        )
+        .unwrap();
+        assert!(Appservice::load(&state, "example.test").is_some());
+    }
+
+    #[test]
+    fn native_palpo_status_pages_wait_for_their_exact_publication_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let probes = Probes::new(root.path());
+        let pending =
+            json!({"requestId":"one","state":"active","observedAt":"2026-10-04T01:02:03.000Z"});
+        *probes.statuses.lock().unwrap() = vec![pending.clone()];
+        *probes.status_cursor.lock().unwrap() = "after_one".into();
+        let old =
+            json!({"requestId":"one","state":"pending","observedAt":"2026-10-04T01:01:00.000Z"});
+        probes.statuses_published(&[old]);
+        assert_eq!(probes.statuses(), vec![pending.clone()]);
+        probes.statuses_published(&[pending]);
+        assert!(probes.statuses().is_empty());
+        assert_eq!(*probes.status_cursor.lock().unwrap(), "after_one");
     }
 }

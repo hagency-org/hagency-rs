@@ -33,7 +33,18 @@ async fn observed() -> (
     Arc<crate::ProvisionedTokenAccount>,
     crypto::Peer,
 ) {
-    let (f, mut fake, c) = ready_inline_account().await;
+    observed_with_limits(common::load_limits()).await
+}
+async fn observed_with_limits(
+    limits: crate::Limits,
+) -> (
+    common::Fixture,
+    common::Fake,
+    Collector,
+    Arc<crate::ProvisionedTokenAccount>,
+    crypto::Peer,
+) {
+    let (f, mut fake, c) = ready_inline_limits(None, limits).await;
     let (result, ()) = common::scripted(c.intake(plan(), &CancellationToken::new()), async {
         inline_input(&mut fake, "account_enrollment").await;
         complete_account_step(&f, &mut fake).await;
@@ -79,6 +90,11 @@ async fn respond(
         (
             200,
             json!({"user_id":account.sender_mxid(),"device_id":account.device_id(),"is_guest":false}),
+        )
+    } else if request.target.starts_with("/_matrix/client/v3/sync?") {
+        (
+            200,
+            json!({"next_batch":"before-owner-invite","rooms":{"join":{}},"to_device":{"events":[]}}),
         )
     } else if request.target.ends_with("/state") {
         assert!(
@@ -545,7 +561,7 @@ async fn native_provisioning_account_enrollment_scope_change() {
             request=fake.next()=>{
                 if request.target.contains("new_agent_dm") && request.target.ends_with("/state") {
                     direct_reads += 1;
-                    if direct_reads == 3 {
+                    if direct_reads == 2 {
                         // Preparing and original SDK Possible are already
                         // durable. Revoke while the last HTTP read is held.
                         f.store.revoke("during_enrollment_room_read".into(),admitted_id(&f)).await.unwrap();
@@ -555,7 +571,7 @@ async fn native_provisioning_account_enrollment_scope_change() {
             }
         }
     };
-    assert_eq!(direct_reads, 3);
+    assert_eq!(direct_reads, 2);
     assert!(result.is_err());
     assert!(account_root(&f).join("sdk").exists());
     assert!(
@@ -571,4 +587,107 @@ async fn native_provisioning_account_enrollment_scope_change() {
     c.close().await.unwrap();
     f.store.shutdown().await.unwrap();
     fake.close().await;
+}
+
+/// Healthy individually bounded steps may exceed one SDK budget in aggregate.
+#[tokio::test]
+async fn native_provisioning_enrollment_budget_per_step() {
+    let limits = crate::Limits {
+        sdk: std::time::Duration::from_secs(4),
+        ..common::load_limits()
+    };
+    let (f, mut fake, c, account, mut peer) = observed_with_limits(limits).await;
+    let start = tokio::time::Instant::now();
+    let cancel = CancellationToken::new();
+    let operation = account.enroll_before_activation(
+        1,
+        [44; 32],
+        rooms(),
+        vec![(OWNER.into(), peer.anchor())],
+        &cancel,
+    );
+    tokio::pin!(operation);
+    let enrolled = loop {
+        tokio::select! {
+            result=&mut operation => break result.unwrap(),
+            request=fake.next() => {
+                // Each successful write and the first sync fit the budget;
+                // their combined latency deliberately exceeds it.
+                if request.target.contains("/keys/") || request.target.contains("/sync?") {
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                }
+                respond(request, &account, &mut peer, &mut |_,_| {}).await;
+            }
+        }
+    };
+    assert!(start.elapsed() > std::time::Duration::from_secs(4));
+    assert_eq!(peer.writes.len(), 5);
+    assert!(
+        enrolled
+            .inner
+            .owner
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .intake_mode()
+            .await
+            .unwrap()
+    );
+    assert_account_only(&f, &c);
+    close(f, fake, c, Some(enrolled), &account).await;
+}
+
+#[tokio::test]
+async fn native_provisioning_enrollment_read_timeout_resumes_without_key_replay() {
+    for before_write in [true, false] {
+        let limits = crate::Limits {
+            sdk: std::time::Duration::from_secs(10),
+            ..common::limits()
+        };
+        let (f, mut fake, c, account, mut peer) = observed_with_limits(limits).await;
+        let cancel = CancellationToken::new();
+        let operation = account.enroll_before_activation(
+            1,
+            [44; 32],
+            rooms(),
+            vec![(OWNER.into(), peer.anchor())],
+            &cancel,
+        );
+        tokio::pin!(operation);
+        let mut held = None;
+        let mut dm_reads = 0;
+        let result = loop {
+            tokio::select! {
+                result=&mut operation => break result,
+                request=fake.next() => {
+                    if request.target.contains("new_agent_dm") && request.target.ends_with("/state") { dm_reads += 1; }
+                    let hold = if before_write { dm_reads == 2 && request.target.ends_with("/state") }
+                        else { request.target.contains("/sync?") };
+                    if hold && held.is_none() { held = Some(request); }
+                    else { respond(request,&account,&mut peer,&mut |_,_| {}).await; }
+                }
+            }
+        };
+        assert!(matches!(result, Err(Error::AwaitingSetup)));
+        assert_eq!(effect_row(&f), Some(("provision".into(), "started".into())));
+        assert_eq!(peer.writes.len(), if before_write { 0 } else { 5 });
+        drop(held);
+        let enrolled = drive(&account, &mut fake, &mut peer).await.unwrap();
+        assert_eq!(peer.writes.len(), 5, "original writes each happen once");
+        assert_eq!(peer.claims, 1);
+        assert!(
+            enrolled
+                .inner
+                .owner
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .intake_mode()
+                .await
+                .unwrap()
+        );
+        close(f, fake, c, Some(enrolled), &account).await;
+    }
 }

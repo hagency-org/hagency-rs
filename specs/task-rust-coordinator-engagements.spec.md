@@ -1,0 +1,293 @@
+spec: task
+name: "Apply a Rinx coordinator decision inside a bounded Hagency engagement"
+inherits: project
+satisfies: [REQ-RUST-MIGRATION-EXECUTION]
+tags: [active, rust, palpo, allocation, approvals]
+---
+
+## Intent
+
+Implement the native portion of ADR-191 and Rinx ADR 0011. These tests establish
+Rust domain, import, console and transport behavior, not a completed mini-app or
+live deployment.
+
+## Constraints
+
+- Current registration, delegation, project, resource, Matrix evidence and amount
+  are checked under the original domain writer.
+- One coordinator decision reserves and provisions; no additional console verdict.
+- Parent/engagement/agent commitments are bounded without double charging.
+- Retirement never releases unmeasured consumption. Top-ups cannot grow a parent.
+- Separate engagements retain independent profile and transport custody.
+- Acknowledgment and runtime readiness remain separate observations.
+
+## Acceptance Criteria
+
+Scenario: Readiness follows current Matrix route authority after provisioning
+  Test: native_factory_readiness_requires_current_dm_and_project_routes
+  Given a completed native agent with admitted owner and project routes
+  When its direct-room recipient proof is invalidated
+  Then current Matrix readiness is false while the original provisioning receipt remains complete
+
+Scenario: Readiness follows the current registration worker
+  Test: native_factory_failure_diagnostics
+  Given registered agents with healthy, blocked and detached workers
+  When the status publisher observes runtime availability
+  Then only a running healthy attached worker is available and stopped or missing workers cannot be Ready
+
+Scenario: Restart recovery cannot claim another engagement's agents
+  Test: restarted_factories_list_only_agents_of_their_exact_registration
+  Given two completed agents in distinct registrations on the same homeserver
+  When both factories restart or a stale registration attempts recovery
+  Then each lists only its own exact registration's agents and cannot take the other's recovery route
+
+Scenario: Uncertain provisioning remains visible without retrying or releasing capacity
+  Test: uncertain_provision_is_visible_after_restart_without_releasing_its_reservation
+  Given a coordinated allocation whose original provisioning effect has an unknown outcome
+  When the domain restarts and another request needs the reserved capacity
+  Then the lifecycle reports uncertainty, a second claim is refused and the reservation is retained
+
+Scenario: Each native engagement validates only its own private Matrix root
+  Test: native_matrix_ca_is_private_bounded_and_profile_scoped
+  Level: unit
+  Test Double: private temporary profile directories and a test CA certificate
+  Production caller: hagency::bootstrap::config::matrix_root
+  Given independent engagement profiles with an optional operator-installed Matrix CA
+  When a CA is absent, malformed, too large or a symlink
+  Then only a bounded private regular PEM file is accepted and another profile never inherits it
+
+Scenario: Native legacy setup keeps the selected namespace and freezes the owner intent
+  Test: native_legacy_association_keeps_selected_fleet_and_frozen_owner_intent
+  Level: integration
+  Test Double: local Matrix and Palpo HTTP fixture; real private native setup state
+  Production caller: hagency::bootstrap::association::run
+  Given the authenticated resource owner selects an existing legacy fleet for protocol upgrade
+  When the setup response is lost, fields change or another installation imports its profile
+  Then retry retains the selected fleet and only the original runtime and delegation binding can import it
+
+Scenario: Native legacy adoption moves the existing reservation without a second allocation
+  Test: legacy_adoption_moves_existing_hold_once_and_preserves_original_decisions_across_restart
+  Given a legacy agent consumes all available parent capacity and has an original native approval receipt
+  When the owner maps it into an explicit engagement grant, tops it up and retires it
+  Then the same allocation and historical verdict survive, replay cannot undo later changes and unknown consumption is retained
+
+Scenario: Offline CLI migration audits a complete SQLite backup and preserves source state
+  Test: offline_cli_adopts_copied_legacy_allocations_and_replays_without_source_writes
+  Level: integration
+  Test Double: actual native executable, private temporary SQLite backup including committed WAL frames
+  Production caller: hagency::bootstrap::coordinator_migration::run
+  Given a reviewed inventory and explicit resource-owner adoption plan for a copied legacy database
+  When another writer holds either lock or the adopted database is restored and replayed
+  Then concurrent migration is refused and the original decisions, allocation IDs, unknown usage and migration receipts survive without changing the source
+
+Scenario: Approved project recovery preserves its grant and fences superseded attempts
+  Test: approved_project_setup_recovers_without_reapproval_and_fences_stale_attempts
+  Given a failed room-setup attempt with a committed project approval
+  When the owner retries after restart or an old attempt is replayed
+  Then the original rooms and grant remain unchanged and only the current attempt may publish readiness
+
+Scenario: The actual native worker retries project room setup without another approval
+  Test: native_project_setup_failure_and_owner_retry_preserve_the_original_approval
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated Matrix HTTP and Palpo HTTPS peers
+  Production caller: hagency::bootstrap::palpo_work::run_project_setup
+  Given the original Matrix join fails and the runtime restarts
+  When an authenticated owner retries after the invitation is repaired
+  Then the original failure replays without a new join and the new attempt verifies both rooms without another grant
+
+Scenario: Scoped rename preserves identity and capacity across schema upgrade and restart
+  Test: scoped_agent_rename_preserves_identity_budget_and_newer_name_across_restart
+  Given a coordinated agent with an existing allocation
+  When an authorized rename is replayed or an obsolete Matrix response arrives
+  Then only the current desired label is confirmed and identity, capacity and newer requests remain unchanged
+
+Scenario: Explicit rename replaces an existing custom Matrix label only with exact readback
+  Test: explicit_agent_rename_replaces_custom_name_and_requires_exact_readback
+  Level: integration
+  Test Double: real bounded Matrix client and isolated HTTPS peer
+  Production caller: hagency_matrix::collector::Collector::reconcile_agent_profile
+  Given a durable owner or coordinator rename
+  When Matrix returns a different label or the exact requested label on retry
+  Then a mismatch remains unverified and the exact readback confirms the original desired name
+
+Scenario: Whole Matrix identity retirement requires every original remote proof field
+  Test: native_retirement_requires_every_exact_remote_identity_field
+  Given the original fleet, request and Matrix identity
+  When any binding or deactivation, appservice denial or room-removal proof is missing
+  Then cleanup does not complete
+
+Scenario: Remote retirement retries only the original bounded authenticated request
+  Test: native_retirement_http_retries_exact_identity_and_refuses_redirected_or_incomplete_proof
+  Level: integration
+  Test Double: real bounded HTTPS client with an isolated TLS peer
+  Given a failed remote retirement response
+  When the same operation retries or the peer redirects
+  Then original identity bytes and generation remain fixed and credentials never follow a redirect
+
+Scenario: Cleanup inspects its original uncertain effect after restart
+  Test: native_remote_retirement_inspects_the_original_uncertain_effect_after_restart
+  Given a revoked allocation with uncertain remote cleanup
+  When the store restarts and the exact remote identity is verified
+  Then the original effect and fence settle without rearming provisioning or execution
+
+Scenario: The native Palpo profile completes identity cleanup without an agent runtime
+  Test: native_palpo_retirement_reconciles_lost_reply_after_restart_without_a_runtime
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated HTTPS Palpo peer
+  Given a lost retirement reply and unavailable ordinary delivery after restart
+  When the profile retries cleanup and receives incomplete then exact proof
+  Then it keeps the original identity fenced until verified and does not change capacity
+
+Scenario: Cancelling a profile records its uncertain identity cleanup before the store closes
+  Test: native_palpo_retirement_cancellation_persists_uncertainty_before_store_reopen
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated HTTPS Palpo peer
+  Given the profile is cancelled after its retirement request is sent
+  When the remote response has not arrived
+  Then its original effect is uncertain before reopening and a replacement worker can reconcile it
+
+Scenario: Credential rotation fences older imports and repairs an interrupted file replacement
+  Test: native_palpo_profile_rotation_refuses_stale_generation_and_recovers_partial_files
+  Given a newer private transport generation was only partly written
+  When startup or an old or changed profile import is attempted
+  Then startup and conflicting imports are refused while the exact retry repairs the original operation
+
+Scenario: Importing a second same-server profile retains a larger verified profile
+  Test: native_palpo_multiple_profiles_same_server_preserve_independent_credentials
+  Given the first private transport profile exceeds 512 bytes after binding its reception room
+  When another engagement on that server is imported and both profiles reload
+  Then the original credentials and reception remain intact in independently selected directories
+
+Scenario: Scoped agent controls cannot bypass cleanup inspection or replay an old pause
+  Test: scoped_agent_controls_recheck_authority_and_preserve_cleanup_and_capacity_on_replay
+  Given a coordinated agent controlled by its project owner or current delegate
+  When pause, resume or retirement retries after a restart or an uncertain cleanup
+  Then the original result survives, unknown cleanup cannot be retried and capacity remains held
+
+Scenario: Final account reconciliation releases only unused capacity
+  Test: final_account_settlement_refunds_only_unused_capacity_and_late_usage_remains_charged
+  Given a retired agent with measured usage and completed runtime cleanup
+  When the resource owner records final account usage then a later usage observation arrives
+  Then only unused capacity is returned, late usage remains charged and replay cannot refund twice
+
+Scenario: Project and top-up terminal receipts cannot be revived by later capacity or expiry
+  Test: project_and_top_up_refusals_are_terminal_and_applied_commands_replay_after_expiry
+  Given an applied top-up and refused project and top-up commands
+  When capacity changes or the writer restarts after command expiry
+  Then their original outcomes survive without a second reservation
+
+Scenario: The actual native worker reports project and top-up refusals without Matrix availability
+  Test: native_palpo_worker_publishes_terminal_project_and_top_up_refusals
+  Level: integration
+  Test Double: actual native executable and SQLite stores; isolated HTTPS Palpo peer and unreachable Matrix origin
+  Given a stale delegation decision and a top-up targeting a missing project
+  When the native worker receives their durable deliveries
+  Then it persists and publishes the terminal refusals before completing custody
+
+Scenario: Owner delegation revisions fence old commands and survive restart
+  Test: owner_delegation_changes_fence_old_commands_and_publish_before_resources
+  Given the owner changes the coordinator through a revocable configuration permission
+  When an old decision or changed retry arrives
+  Then the new revision remains authoritative and is durably published before resource changes
+
+Scenario: Native owner suspension requires authentication and retains contributed capacity
+  Test: native_console_delegation_suspend_is_authorized_idempotent_and_does_not_release_capacity
+  Level: integration
+  Test Double: real native console router and domain writer; isolated registration
+  Given a verified association with an engagement resource allocation
+  When the owner suspends delegation and retries the same revision
+  Then anonymous or conflicting changes are refused and capacity is not released
+
+Scenario: Private protocol JSON is not truncated at the bearer-token file limit
+  Test: native_palpo_private_observation_files_survive_beyond_secret_token_size
+  Given enough recorded request and probe IDs to exceed 512 bytes
+  When the native process reloads its private observation files
+  Then old and recent request/probe bindings and a longer appservice credential survive
+
+Scenario: Delivered approvals remain visible before Matrix admission
+  Test: delivered_approval_is_visible_before_matrix_admission_and_terminal_refusal_survives_restart
+  Given a delivered command whose Matrix admission has not completed
+  When the store restarts or its delegation changes
+  Then the pending decision remains visible and an authority refusal is durable
+
+Scenario: Capacity refusals and successful commands retain their original result
+  Test: capacity_refusal_has_a_durable_receipt_and_applied_delivery_replays_without_reserving_again
+  Given concurrent demand for the last available capacity
+  When a successful or refused command replays after expiry or an allocation increase
+  Then its terminal outcome remains unchanged and no reservation is repeated
+
+Scenario: The actual portal shares one ledger across both resource views
+  Test: native_coordinator_ledger_browser_shares_resource_allocation_and_shows_delivered_refusals
+  Level: integration
+  Test Double: real native console and SQLite writer, isolated seeded registration; Chrome browser
+  Given a verified server engagement and a delivered approval refused before provisioning
+  When the owner edits its allocation through the server-engagement page
+  Then the resource page displays the same ledger and Agent allocations displays the refusal
+
+Scenario: Owner setup retries its original association and refuses another installation's profile
+  Test: native_owner_association_retries_frozen_intent_and_refuses_foreign_profile
+  Level: integration
+  Test Double: local Matrix and Palpo HTTP fixture; real private native setup state
+  Given an authenticated owner initiates an engagement from native Hagency setup
+  When the response is lost or an imported profile changes the runtime or coordinator
+  Then the request retries unchanged and only the matching local association can be imported
+
+Scenario: One coordinator approval schedules native provisioning
+  Test: coordinator_approval_reserves_and_provisions_without_a_console_decision
+  Given a verified engagement, eligible manager, ready project and current Matrix proof
+  When the authorized coordinator command is replayed across a restart
+  Then exactly one allocation and provision effect remain and a console bypass is refused
+
+Scenario: Parent and child capacity cannot be overdrawn
+  Test: contribution_and_agent_reservations_cannot_exceed_parent_or_child
+  Given an engagement contribution and child allocations
+  When another allocation exceeds the contribution or parent ceiling
+  Then it is refused without double charging and retirement cannot refund unknown spend
+
+Scenario: A token top-up applies atomically once
+  Test: coordinator_top_up_is_atomic_replayable_and_cannot_grow_the_engagement_pool
+  Given a current agent and frozen expected allocation
+  When a delegated top-up arrives or is replayed
+  Then only its bounded increase is committed and stale amounts are refused
+
+Scenario: Profile import cannot claim connection proof
+  Test: profile_import_is_atomic_and_native_probe_is_required_before_contribution
+  Given an imported registration and delegation
+  When a changed coordinator reuses its revision or a connection has not been proven
+  Then the import is atomic and resource contribution remains unavailable
+
+Scenario: Two engagements on one server retain independent credentials
+  Test: native_palpo_import_route_saves_the_owner_download
+  Level: integration
+  Test Double: real local Salvo routes and SQLite stores; outbound connection disabled
+  Given the authenticated resource owner's console
+  When two profiles for one hostname are imported
+  Then both registrations and their separate private credentials remain available
+
+Scenario: Owner contribution HTTP calls enforce capacity and binding
+  Test: native_console_engagement_contribution_reserves_capacity_and_rejects_cross_binding
+  Level: integration
+  Test Double: real local console router and writer; seeded owned resource
+  Given a verified delegated engagement
+  When the owner contributes, retries or requests too much
+  Then matching commands are idempotent and cross-binding or excess allocation is refused
+
+Scenario: Lost projection acknowledgment cannot erase a later top-up
+  Test: native_coordinator_publication_replays_frozen_grant_and_keeps_a_later_top_up
+  Level: integration
+  Test Double: local HTTPS peer; real native adapter, domain and custody writers
+  Given a frozen resource projection with a lost response
+  When a newer grant is queued before retry
+  Then the original bytes replay first and the newer projection is subsequently delivered
+
+Scenario: Status paging includes later agents
+  Test: fleet_status_pages_reach_agents_after_the_first_hundred
+  Given more than one hundred native agents in a registration
+  When the publisher enumerates bounded registration-scoped pages
+  Then every agent is included exactly once and another engagement has no rows
+
+Scenario: Status pages advance only on matching acknowledgment
+  Test: native_palpo_status_pages_wait_for_their_exact_publication_receipt
+  Given a bounded current status page
+  When an old publication receipt arrives
+  Then the current page remains until its own exact receipt is accepted

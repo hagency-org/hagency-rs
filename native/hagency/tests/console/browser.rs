@@ -38,6 +38,156 @@ fn script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../mockup/scripts/native-console-browser.mjs")
 }
+
+#[tokio::test]
+async fn native_coordinator_ledger_browser_shares_resource_allocation_and_shows_delivered_refusals()
+{
+    let address = address();
+    let f = Fixture::new(address, Some(&built()));
+    hagency_store::private::write_new(
+        &f.root.path().join("state/operator.token"),
+        TOKEN.as_bytes(),
+    )
+    .unwrap();
+    let fleet = common::registration().fleet_id;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let policy = json!({"id":fleet,"server":"example.test","owner":"@provider:example.test","coordinator":"@coordinator:example.test",
+        "registrationGeneration":1,"delegationRevision":1,"delegationExpiresAtMs":now+3600000,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true});
+    f.domain
+        .configure_coordinator(serde_json::from_value(policy).unwrap())
+        .await
+        .unwrap();
+    let resource = native_resource("browser_ledger_resource");
+    f.domain.put_resource(resource.clone()).await.unwrap();
+    let definition = common::request("delivered_browser", "RefusedVisible", &resource, 100);
+    let digest =
+        hagency_core::canonical::digest(&serde_json::to_value(&definition).unwrap()).unwrap();
+    let mut payload = serde_json::to_value(definition).unwrap();
+    payload["coordinatorApproval"] = json!({"context":{"version":1,"commandId":"browser_decision","serverEngagementId":fleet,"registrationGeneration":1,
+        "delegationRevision":1,"actor":"@coordinator:example.test","issuedAtMs":now,"expiresAtMs":now+300000},
+        "request":{"id":"delivered_browser","revision":1,"serverEngagementId":fleet,"projectId":"project_one","projectRevision":1,"resourceAllocationId":"browser_grant",
+        "projectOwner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":digest,"requestedTokens":100},"allocatedTokens":100});
+    assert_eq!(
+        f.domain
+            .receive_coordinator_agent(fleet.clone(), payload)
+            .await
+            .unwrap()["state"],
+        "refused"
+    );
+    let settled_resource = native_resource("browser_settlement_resource");
+    f.domain
+        .put_resource(settled_resource.clone())
+        .await
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(90);
+    let access = hagency_store::ResourceConfigurationAccess::new(until, Default::default());
+    let grant=serde_json::from_value(json!({"id":"settlement_grant","serverEngagementId":fleet,"resourceId":settled_resource.id(),"revision":1,"allocatedTokens":500,"eligibleManagers":["@owner:example.test"]})).unwrap();
+    f.domain
+        .contribute_resource(access.prepare_contribution(grant, until).unwrap())
+        .await
+        .unwrap();
+    let context = |id: &str| json!({"version":1,"commandId":id,"serverEngagementId":fleet,"registrationGeneration":1,"delegationRevision":1,"actor":"@coordinator:example.test","issuedAtMs":now,"expiresAtMs":now+300000});
+    let definition = json!({"name":"Settlement project","roomId":"!project:example.test","ownerDmRoomId":"!private:example.test"});
+    let project=serde_json::from_value(json!({"context":context("settlement_project"),"request":{"id":"settlement_project_request","revision":1,"serverEngagementId":fleet,"projectId":"project_one","owner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":hagency_core::canonical::digest(&definition).unwrap(),"resourceAllocations":["settlement_grant"]}})).unwrap();
+    f.domain
+        .approve_coordinator_project(project, definition)
+        .await
+        .unwrap();
+    let request = common::request(
+        "settlement_browser",
+        "SettlementVisible",
+        &settled_resource,
+        200,
+    );
+    let mut observation = common::observation(&request);
+    observation.observed_at_ms = now;
+    let proof = hagency_core::authority::verify_request(
+        &common::registration(),
+        request.clone(),
+        observation,
+    )
+    .unwrap();
+    f.domain
+        .verify_coordinator_project(proof.clone())
+        .await
+        .unwrap();
+    f.domain.admit(proof.clone(), now).await.unwrap();
+    let command=serde_json::from_value(json!({"context":context("settlement_allocation"),"request":{"id":"settlement_browser","revision":1,"serverEngagementId":fleet,"projectId":"project_one","projectRevision":1,"resourceAllocationId":"settlement_grant","projectOwner":"@owner:example.test","requester":"@owner:example.test","definitionDigest":hagency_core::canonical::digest(&serde_json::to_value(&request).unwrap()).unwrap(),"requestedTokens":200},"allocatedTokens":200})).unwrap();
+    let settled_agent = f
+        .domain
+        .approve_coordinated_agent(command, proof)
+        .await
+        .unwrap();
+    // This fixture never starts an execution; retirement cancels provisioning.
+    f.domain
+        .revoke("retire_settlement_fixture".into(), settled_agent.id.clone())
+        .await
+        .unwrap();
+    let server = Server::new(TcpListener::new(address).try_bind().await.unwrap());
+    let handle = server.handle();
+    let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
+    let url = hagency::console::client::access(&f.root.path().join("state"), address)
+        .await
+        .unwrap();
+    let mut child = Command::new(node())
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../mockup/scripts/native-coordinator-ledger-browser.mjs"),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(format!("{}\n",json!({"base":format!("http://{address}"),"url":url,"fleet":fleet,"resource":resource.id(),
+        "output":PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/coordinator-ledger-browser")})).as_bytes()).await.unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let grants = f
+        .domain
+        .server_engagement_resources(fleet.clone(), String::new(), 50)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 2);
+    let edited = grants
+        .iter()
+        .find(|g| g["id"] != "settlement_grant")
+        .unwrap();
+    assert_eq!(edited["allocatedTokens"], 4000);
+    assert_eq!(edited["revision"], 2);
+    let settlement = f
+        .domain
+        .coordinator_settlement(settled_agent.id)
+        .await
+        .unwrap();
+    assert_eq!(settlement["state"], "settled");
+    assert_eq!(settlement["releasedTokens"], 200);
+    let authority = f
+        .domain
+        .coordinator_authority(fleet)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&authority).unwrap()["state"],
+        "suspended"
+    );
+    assert_eq!(u64::from(authority.delegation_revision), 2);
+    handle.stop_graceful(Some(Duration::from_secs(2)));
+    serving.await.unwrap().unwrap();
+    f.close().await;
+}
 /// Wait for the spawned executable to admit on `address`; when it refuses
 /// to start, SAY WHY — the child's exit status and its stderr. A bare
 /// "process exited" line made #83 need this re-run at all. The stderr read
@@ -548,6 +698,11 @@ fn configuration_script() -> PathBuf {
 async fn native_console_resource_configuration_browser() {
     let address = address();
     let f = Fixture::new(address, Some(&built()));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    f.domain.configure_coordinator(serde_json::from_value(json!({"id":common::registration().fleet_id,"server":"example.test","owner":"@provider:example.test","coordinator":"@coordinator:example.test","registrationGeneration":1,"delegationRevision":1,"delegationExpiresAtMs":now+3600000,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true})).unwrap()).await.unwrap();
     let resource = configuration_resource();
     f.domain.put_resource(resource.clone()).await.unwrap();
     hagency_store::private::write_new(
@@ -618,9 +773,14 @@ async fn native_console_resource_configuration_browser() {
                 continue;
             }
             let answer = if let Some(id) = line.strip_prefix("EDIT_RESOURCE ") {
-                let mut actual = f.domain.resource_configuration(id.into()).await.unwrap();
-                actual.ceiling.as_mut().unwrap().tokens = Some(6000.try_into().unwrap());
-                f.domain.edit_resource(actual, None).await.unwrap();
+                let actual = f.domain.resource_configuration(id.into()).await.unwrap();
+                let binding = f.domain.resource_engagements(id.into()).await.unwrap().remove(0);
+                let until = std::time::Instant::now() + Duration::from_secs(2);
+                let access = hagency_store::ResourceConfigurationAccess::new(until, Default::default());
+                let command = access.prepare(actual.id(), hagency_store::resource_publication_revision(&actual).unwrap(), false,
+                    hagency_store::ProfileChange::Preserve {}, hagency_store::CeilingChange::Monthly { tokens: 6000.try_into().unwrap() }, until).unwrap()
+                    .with_engagement(serde_json::from_value(json!({"serverEngagementId":binding.server_engagement_id,"allocationId":binding.id,"expectedRevision":binding.revision,"eligibleManagers":binding.eligible_managers})).unwrap()).unwrap();
+                f.domain.configure_resource(command).await.unwrap();
                 json!({"ok":true})
             } else {
                 match line.as_str() {
@@ -688,6 +848,11 @@ async fn native_console_resource_configuration_executable() {
     let (mut db, _) = seed(&state);
     let source = configuration_resource();
     db.put_resource(&source).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    db.configure_coordinator(&serde_json::from_value(json!({"id":common::registration().fleet_id,"server":"example.test","owner":"@provider:example.test","coordinator":"@coordinator:example.test","registrationGeneration":1,"delegationRevision":1,"delegationExpiresAtMs":now+3600000,"state":"verified","allowSelfApproval":false,"coordinatorApprovalV1":true})).unwrap()).unwrap();
     drop(db);
     let mut selected = source.id();
     for restart in [false, true] {
@@ -1153,13 +1318,13 @@ fn regression_script() -> PathBuf {
 /// The #56 regression lane: ONE login walks every rail entry, then the key
 /// operator actions end to end on fixture data — approve and refuse a
 /// pending engagement, stop an agent (start asserted as the fail-closed
-/// absence it is), generate a side registration file, clear-dirty the
+/// absence it is), redirect a retired project-side bookmark, clear-dirty the
 /// configuration wizard, resolve the seeded alert — each asserting its
 /// visible result text. The store outcomes are asserted here against the
 /// database, derived from the same code paths the verdict and lifecycle
 /// lanes pin (approve → reserved + provision effect; refuse → rejected;
 /// a started dispatch fences to outcome_unknown with its session
-/// quarantined; the registration YAML lands on disk).
+/// quarantined; the retired registration flow writes no YAML).
 #[tokio::test]
 async fn native_console_regression_browser() {
     let address = address();
@@ -1187,7 +1352,14 @@ async fn native_console_regression_browser() {
     let acceptor = TcpListener::new(address).try_bind().await.unwrap();
     let server = Server::new(acceptor);
     let handle = server.handle();
-    let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
+    let serving = tokio::spawn(
+        server.try_serve(
+            f.app
+                .clone()
+                .with_palpo_import(f.root.path().join("state"))
+                .router(),
+        ),
+    );
     let url = hagency::console::client::access(&f.root.path().join("state"), address)
         .await
         .unwrap();
@@ -1354,12 +1526,74 @@ async fn native_console_regression_browser() {
     assert_eq!(alert_status, "resolved");
     drop(sql);
     assert!(
-        f.root
+        !f.root
             .path()
             .join("state/registrations/example.test.yaml")
             .exists(),
-        "the registration file landed on disk"
+        "opening a retired project-side bookmark must not create a registration"
     );
+    handle.stop_graceful(Some(Duration::from_secs(2)));
+    serving.await.unwrap().unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn native_association_browser_requests_confirms_and_imports_without_manual_files() {
+    use std::sync::atomic::Ordering;
+    let peer = super::associations::PairPeer::start(false).await;
+    let address = address();
+    let f = Fixture::new(address, Some(&built()));
+    let state = f.root.path().join("state");
+    hagency_store::private::write_new(&state.join("operator.token"), TOKEN.as_bytes()).unwrap();
+    let app = f.app.clone().with_palpo_import(state.clone());
+    let server = Server::new(TcpListener::new(address).try_bind().await.unwrap());
+    let handle = server.handle();
+    let serving = tokio::spawn(server.try_serve(app.router()));
+    let url = hagency::console::client::access(&state, address)
+        .await
+        .unwrap();
+    let mut child = Command::new(node())
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../mockup/scripts/native-association-browser.mjs"),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(format!("{}\n",json!({"base":format!("http://{address}"),"url":url,"palpo":peer.origin,
+        "output":PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/association-browser")})).as_bytes()).await.unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    for (expected, mode) in [("owner_seen", 1), ("admin_seen", 3), ("imported_seen", 4)] {
+        let line = tokio::time::timeout(Duration::from_secs(45), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(line.as_deref(), Some(expected));
+        if mode == 4 {
+            let entry = std::fs::read_dir(state.join("palpo-pairings"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            f.domain
+                .bind_reception(name[..35].into(), 1, "!pairing:example.test".into())
+                .await
+                .unwrap();
+        }
+        peer.mode.store(mode, Ordering::SeqCst);
+        input.write_all(b"continue\n").await.unwrap();
+    }
+    drop(input);
+    let result = tokio::time::timeout(Duration::from_secs(30), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.success());
     handle.stop_graceful(Some(Duration::from_secs(2)));
     serving.await.unwrap().unwrap();
     f.close().await;

@@ -109,7 +109,8 @@ Most library crates state their role and limits in a `//!` comment at the top of
 | Start and service (ADR-189) | `Command::Start` and `serve` in [hagency/src/main.rs](hagency/src/main.rs); `default_state_dir`, `announce` and the service units in [hagency/src/service.rs](hagency/src/service.rs); the embedded console in [hagency/build.rs](hagency/build.rs) and [hagency/src/console/assets.rs](hagency/src/console/assets.rs) |
 | Configuration files | [hagency/src/bootstrap/config.rs](hagency/src/bootstrap/config.rs): `FleetRuntimeConfig` (`fleet-runtime.json`) and `Config` (`agent-driver.json`). [hagency/src/setup.rs](hagency/src/setup.rs) writes `fleet-runtime.json` and detects Codex (`detect_codex`). |
 | Setup page (ADR-189) | [hagency/src/console/setup.rs](hagency/src/console/setup.rs) serves `GET /console/api/setup`, `POST /console/api/setup/check` and `POST /console/api/setup/resource`. The page is [mockup/app/setup/page.jsx](../mockup/app/setup/page.jsx); [mockup/components/SetupBanner.jsx](../mockup/components/SetupBanner.jsx) links every other console page to it until setup is done. |
-| Palpo import | [hagency/src/bootstrap/palpo_import.rs](hagency/src/bootstrap/palpo_import.rs) parses the download. [hagency/src/console/palpo_import.rs](hagency/src/console/palpo_import.rs) serves `POST /console/api/palpo/import`. |
+| Palpo import | [hagency/src/bootstrap/palpo_import.rs](hagency/src/bootstrap/palpo_import.rs) parses independent engagement profiles. [hagency/src/console/palpo_import.rs](hagency/src/console/palpo_import.rs) serves `POST /console/api/palpo/import`. The first profile keeps its legacy location; additional profiles use `palpo-engagements/<fleet-id>/`. |
+| Delegated coordinator decisions (ADR-191) | [hagency-store/src/domain/coordinator.rs](hagency-store/src/domain/coordinator.rs) reserves contributions and applies project, agent and top-up decisions. [hagency/src/console/server_engagements.rs](hagency/src/console/server_engagements.rs) lists profiles/contributions and accepts authenticated owner contributions. |
 | Fleet service (ADR-187) | [hagency/src/bootstrap/fleet_service.rs](hagency/src/bootstrap/fleet_service.rs) runs the stages and the provisioning loop. [hagency/src/bootstrap/fleet_identity.rs](hagency/src/bootstrap/fleet_identity.rs) creates the fleet's accounts, keys and per-owner approval devices, and pins owner keys. |
 | Invites and joined rooms (ADR-188) | [hagency/src/bootstrap/invites.rs](hagency/src/bootstrap/invites.rs) polls each agent's invites. [hagency-matrix/src/provisioning/factory.rs](hagency-matrix/src/provisioning/factory.rs) evaluates joined rooms and posts the encrypted-room notice. |
 | Message admission | `admit_matrix_input` in [hagency-store/src/domain/verified_ingress.rs](hagency-store/src/domain/verified_ingress.rs) decides which messages wake an agent |
@@ -122,11 +123,12 @@ Most library crates state their role and limits in a `//!` comment at the top of
 - `domain.sqlite3` holds domain state: resources, engagements, tasks, approvals, rooms and usage.
 - `custody.sqlite3` holds Palpo transport custody.
 
-The domain schema version is `DOMAIN_SCHEMA_VERSION` in [hagency-store/src/domain.rs](hagency-store/src/domain.rs), currently 60. Migrations live in [hagency-store/src/migrations/](hagency-store/src/migrations/). A file's number is not always its schema version. For example, version 59 applies `059-owner-anchors.sql`, and version 60 applies `074-joined-rooms.sql`. The list in `domain.rs` maps each version to its file.
+The domain schema version is `DOMAIN_SCHEMA_VERSION` in [hagency-store/src/domain.rs](hagency-store/src/domain.rs), currently 61. Migrations live in [hagency-store/src/migrations/](hagency-store/src/migrations/). A file's number is not always its schema version. Version 60 applies `074-joined-rooms.sql`; version 61 applies `075-coordinator-engagements.sql`. The list in `domain.rs` maps each version to its file.
 
 Recent tables:
 - `owner_anchors` (version 59) holds each owner's pinned cross-signing master key (ADR-187).
 - `joined_rooms` (version 60) holds the rooms an agent joined by invitation, with their state: `working`, `encrypted_shared` or `retired` (ADR-188).
+- The six `coordinator_*` tables (version 61) hold delegation, bounded contributions, approved projects, child allocations, replay receipts and durable projections (ADR-191). This is an integration slice; see ADR-191's remaining acceptance work before enabling it for existing users.
 
 ## Decisions and contracts
 

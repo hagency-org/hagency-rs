@@ -37,7 +37,10 @@ impl Custody {
     async fn ready(&self, cancel: &CancellationToken) -> Result<(), Error> {
         let mut runtime = self.runtime.lock().await;
         let owner = runtime.as_mut().ok_or(Error::OutcomeUnknown)?;
-        let result = tokio::select! {result=owner.ready()=>result.map_err(|_|Error::OutcomeUnknown),_ = cancel.cancelled()=>Err(Error::Cancelled)};
+        let result = tokio::select! {result=owner.ready()=>result.map_err(|error| {
+            eprintln!("agent factory runtime readiness refused: {error:?}");
+            Error::OutcomeUnknown
+        }),_ = cancel.cancelled()=>Err(Error::Cancelled)};
         if result.is_err() {
             owner.cancel();
         }
@@ -165,8 +168,14 @@ pub struct ProvisionedAgent {
     collector: Arc<Collector>,
     binding: SessionBinding,
     workspace: String,
+    appservice_identity: bool,
 }
 impl ProvisionedAgent {
+    /// Whole-identity cleanup belongs to the profile's authenticated Palpo
+    /// worker. A device logout cannot settle an appservice identity.
+    pub fn requires_identity_retirement(&self) -> bool {
+        self.appservice_identity
+    }
     pub fn collector(&self) -> &Collector {
         &self.collector
     }
@@ -741,7 +750,13 @@ impl TokenProvisioningHost {
         let runtime = plan
             .start(domain.clone(), scope.clone(), home)
             .await
-            .map_err(|_| Error::OutcomeUnknown)?;
+            .map_err(|error| {
+                eprintln!(
+                    "agent factory {} runtime startup refused: {error:?}",
+                    effect.engagement_id
+                );
+                Error::OutcomeUnknown
+            })?;
         *custody.runtime.lock().await = Some(runtime);
         custody.ready(cancel).await?;
         // GET-only current verification on the original successful SDK job;
@@ -977,6 +992,7 @@ impl TokenProvisioningHost {
             collector: Arc::new(collector),
             binding,
             workspace: format!("work_{engagement}"),
+            appservice_identity: self.as_namespace.is_some(),
         })
     }
     /// Discovery of a NEW agent. An agent a restart brings back enters through
@@ -1087,10 +1103,10 @@ impl Collector {
     /// The engagements this coordinator's inline factory completed and that a
     /// restart should bring back, in id order. Read-only.
     pub async fn provisioned_engagements(&self) -> Result<Vec<String>, Error> {
-        if self.inner.config.provisioning.is_none() {
+        let Some(host) = &self.inner.config.provisioning else {
             return Ok(Vec::new());
-        }
-        Ok(self.inner.domain.inline_factory_engagements().await?)
+        };
+        host.provisioned_engagements(&self.inner.domain).await
     }
     /// Bring back one such agent after a restart. It concerns that agent only:
     /// a refusal leaves the coordinator and every other agent as they were. On

@@ -92,7 +92,9 @@ jobs:
           export HAGENCY_CONSOLE_SCREENSHOTS="$RUNNER_TEMP/console-screenshots"
           mkdir -p "$HAGENCY_CONSOLE_SCREENSHOTS"
           cargo clippy --locked -p hagency --all-targets --features native-console-browser -- -D warnings
-          cargo test --locked -p hagency --features native-console-browser --test console -- --nocapture
+          # Each browser test starts Chromium and retains a complete asset
+          # snapshot. Bound their concurrency while running every assertion.
+          cargo test --locked -p hagency --features native-console-browser --test console -- --nocapture --test-threads=2
       - name: Keep console failure screenshots
         if: failure()
         uses: actions/upload-artifact@v4

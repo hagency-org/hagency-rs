@@ -78,15 +78,17 @@ async fn native_console_engagements_read() {
         "allocatedTokens",
         "spentTokens",
         "quotaPaused",
+        "coordinatorManaged",
     ] {
         assert!(row.get(key).is_some(), "missing wire key {key}");
     }
     assert_eq!(
         row.as_object().unwrap().len(),
-        14,
-        "exactly the fourteen declared keys"
+        15,
+        "exactly the fifteen declared keys"
     );
     assert!(row["requestedTokens"].as_u64().is_some());
+    assert_eq!(row["coordinatorManaged"], false);
     assert!(row["id"].as_str().is_some_and(|id| !id.is_empty()));
     // E4 on the wire: the astral project name. The verifier truncated the
     // 260-character input to 255 Unicode SCALAR values (authority.rs:286) —

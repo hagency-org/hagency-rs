@@ -67,6 +67,8 @@ pub enum Error {
     /// is resumed on a later turn. Waiting for a human has no deadline.
     #[error("the owner has not joined the new agent's room yet")]
     AwaitingOwner,
+    #[error("waiting to resume a completed provisioning step")]
+    AwaitingSetup,
     #[error("Matrix transport request failed")]
     Transport,
     #[error("Matrix redirect refused")]

@@ -117,17 +117,78 @@ async fn native_palpo_import_route_saves_the_owner_download() {
         "the side view never carries a token"
     );
 
-    // A re-import of the same fleet is accepted; another fleet is refused.
+    // A second engagement on the same server keeps separate credentials.
     let again = post("/console/api/palpo/import", &cookie)
         .json(&body(&download(&fleet)))
         .send(&service)
         .await;
     assert_eq!(again.status_code, Some(StatusCode::OK));
+    let second = format!("hf_{}", "d".repeat(32));
+    let mut second_download = download(&second);
+    second_download["registration"]["as_token"] = json!("second-as-secret");
+    second_download["transport"]["token"] = json!("second-machine-secret-0123456789");
     let other = post("/console/api/palpo/import", &cookie)
-        .json(&body(&download(&format!("hf_{}", "d".repeat(32)))))
+        .json(&body(&second_download))
         .send(&service)
         .await;
-    assert_eq!(other.status_code, Some(StatusCode::CONFLICT));
+    assert_eq!(other.status_code, Some(StatusCode::OK));
+    let secondary = state.join("palpo-engagements").join(&second);
+    assert_eq!(
+        std::fs::read_to_string(secondary.join("palpo.machine_token")).unwrap(),
+        "second-machine-secret-0123456789"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("palpo.machine_token")).unwrap(),
+        "machine-token-secret-0123456789"
+    );
+    let first: Value =
+        serde_json::from_slice(&std::fs::read(state.join("palpo-appservice.json")).unwrap())
+            .unwrap();
+    assert_eq!(first["as_token"], "as-token-value-secret");
+    let rows: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM registrations WHERE fleet_id IN (?1,?2)",
+            [&fleet, &second],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2);
+    f.close().await;
+}
+
+/// Scenario: the coordinator, its self-approval and its expiry come only from
+/// this installation's own association. An unversioned download that carries
+/// them is refused before anything is written or any coordinator is set.
+#[tokio::test]
+async fn native_palpo_import_route_refuses_a_coordinator_policy_in_an_unversioned_download() {
+    let f = Fixture::new("127.0.0.1:13300".parse().unwrap(), None);
+    let state = f.root.path().join("state");
+    let service = Service::new(f.app.clone().with_palpo_import(state.clone()).router());
+    let cookie = lifecycle_session(&service).await;
+    let fleet = fleet();
+    let mut forged = download(&fleet);
+    forged["engagement"] = json!({"id": fleet, "server": "example.test",
+        "owner": "@mallory:example.test", "coordinator": "@mallory:example.test",
+        "registrationGeneration": 1, "delegationRevision": 1,
+        "delegationExpiresAtMs": 4102444800000_u64, "state": "verified",
+        "allowSelfApproval": true, "coordinatorApprovalV1": true});
+    let refused = post("/console/api/palpo/import", &cookie)
+        .json(&body(&forged))
+        .send(&service)
+        .await;
+    assert_eq!(refused.status_code, Some(StatusCode::BAD_REQUEST));
+    assert!(
+        !state.join("palpo-transport.json").exists(),
+        "a refused import writes nothing"
+    );
+    assert!(
+        f.domain
+            .coordinator_authority(fleet.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "no coordinator is set"
+    );
     f.close().await;
 }
 

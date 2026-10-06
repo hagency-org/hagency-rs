@@ -36,6 +36,12 @@ and its encrypted approval bot holds keys from startup. The operator chose to
 keep encrypted agent DMs and close the window, rather than follow TS to
 plaintext.
 
+The 2026-10-05 human E2E exposed a second first-message window after key
+publication. Activation ran an observation sync with `timeline.limit: 0`
+after the owner had joined and sent a DM. That sync received the room key,
+but advanced the shared cursor past the ciphertext. The existing late-key
+retry could not recover an envelope that intake had never received.
+
 ## Decision
 
 The agent is enrolled before the owner is invited. Its enrolled user set
@@ -63,6 +69,14 @@ joins.
    - The ledger's user set is frozen as ADR-102 requires. The pre-activation
      re-verify sees the same set after the owner joins, so ADR-183 B only
      adds devices that appeared in the meantime.
+   - Before returning successful enrollment, capture the initial sync cursor
+     and durably reserve it for inbox intake. This precedes the owner invite.
+     Activation and driver observations still verify identity and room state,
+     but cannot advance that cursor with a timeline-less sync. The reservation
+     survives restart and grants no task or session authority.
+   - If the first ciphertext arrives before its room key, intake retains it
+     across restart. A later key-only sync admits and wakes that message
+     exactly once, without another message or an `@` mention from the owner.
 4. **The owner is invited by new create-only custody stages.**
    - The rooms step ends with `agent-rooms` once the agent-only DM exists and
      the agent has joined the project room.
@@ -108,6 +122,16 @@ must tell the two orders apart.
 Bad, because the owner sees the DM invite a few seconds later, after
 enrollment completes.
 
+The cursor boundary is covered by
+`native_provisioning_sdk_preserves_first_dm_cursor_before_activation` and
+the real encrypted-message/late-key restart case in
+`native_matrix_retains_undecryptable_event_until_late_room_key`.
+`native_configured_fleet_first_dm_during_activation` also runs the service
+process with two agents, sends each first encrypted DM at the owner's join,
+and checks independently decrypted replies and a subsequent round. It covers
+ordinary and application-service provisioning with the local Codex profile
+and an offline runtime helper.
+
 ## Alternatives Considered
 
 - **Plaintext agent DMs with a separate encrypted approval room (TS
@@ -117,3 +141,42 @@ enrollment completes.
   becomes safe, but messages sent before it are still lost.
 - **Requesting lost room keys afterwards.** Clients do not answer key
   requests from another user's devices, so this recovers nothing.
+
+
+## Amendment: bounded steps and recovery before the owner invite (2026-10-06)
+
+Frank-Lee's live provisioning persisted all five key writes and a Complete SDK
+ledger, then exhausted the single 60-second enrollment/initial-sync budget.
+The effect stayed Uncertain although no runtime or owner invite had started.
+
+Provisioning now budgets each finite enrollment step separately and gives the
+initial inbox synchronization its own budget. The ledger's write bound still
+caps the sequence. A provisioning census reads agent identity and both rooms,
+then checks the application-service authority once, immediately before use;
+it does not nest duplicate authority probes around the same identity GET.
+Current domain authority and recipient checks still precede each key POST.
+
+The original sender can return an acknowledged Possible write to Prepared only
+when its HTTP function was never entered. A lost POST response cannot use this
+negative observation. A transient read timeout at a resumable SDK checkpoint
+keeps the effect Started and the same owned job resumes on a later pass. Stage
+names are logged with errors. Readiness still requires the original first-inbox
+cursor and subsequent runtime activation.
+
+A restarted service may inspect an Uncertain Reserved provision with no runtime
+session or transport. This narrowly amends ADR-147's blanket refusal to resume
+Started/Uncertain effects: it must reopen the exact completed home and account,
+validate stored create/invite/join receipts, find completed encryption enrollment,
+and prove that no owner-invite record or DM membership for the owner exists.
+Inspection emits no Matrix writes. Missing, tampered or partial records, changed
+registration, changed resource, revoked allocation, or any admitted runtime refuse.
+After fresh identity/room/authority reads, the store records the recovery and
+returns the SAME effect, fence, allocation, account, keys and rooms to Started.
+The ordinary remaining stages then finish; register, login, room creation and
+key uploads are not replayed. An uncertain owner invite or runtime remains outside
+this recovery path.
+
+Regressions: `native_provisioning_enrollment_budget_per_step`,
+`native_provisioning_enrollment_read_timeout_resumes_without_key_replay`,
+`native_provisioning_recovers_completed_keys_before_owner_invite`, and
+`native_provision_recovery_scope_is_inspection_only`.

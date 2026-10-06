@@ -2,12 +2,16 @@
 kind: decision
 id: ADR-190
 title: "Owners request agents from Rinx through a Hagency mini app, not from Palpo's web admin"
-status: Proposed
+status: Superseded
 satisfies: [REQ-RUST-MIGRATION-EXECUTION]
 tags: [native, onboarding, rinx, miniapp, palpo, requests]
 ---
 
 ## Context
+
+Superseded by [ADR-191](adr-191-server-engagement-coordinator-approvals.md), which
+uses an explicit server engagement and a single delegated coordinator approval.
+The proposal below is historical and is not the active approval policy.
 
 To get an agent today, an owner leaves their Matrix client and uses Palpo's web admin. That page:
 

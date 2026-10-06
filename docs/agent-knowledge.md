@@ -4979,3 +4979,23 @@ asserted. Preserve older unknown owners20841/18059/83315 too.
   `Service::reattach_known_agents`, runner route handlers) and re-run the
   checker locally before pushing; look at every section, not just
   `unknownGaps`.
+
+
+## Provisioning budgets and recovery before the owner invite (2026-10-06)
+
+- Enrollment and the first Matrix sync no longer share one SDK deadline. Each
+  finite enrollment step has its own bound; initial sync has a separate bound.
+  Provisioning avoids duplicate App Service probes within one read-only census,
+  while checking current authority and recipients before each key write.
+- A transient read timeout resumes only through the same retained SDK owner and
+  a resumable ledger state. The original sender may clear Possible only if HTTP
+  was never entered. A lost write response remains uncertain.
+- Restart recovery may inspect an uncertain reserved provision only before the
+  owner invitation: original complete account and home, saved room receipts,
+  complete encryption ledger, no owner-invite record/membership, and no runtime
+  or transport. Inspection makes only Matrix reads, then a store CAS resumes the
+  same effect/fence/allocation. See ADR-184's 2026-10-06 amendment. Recovery after
+  an uncertain owner invitation remains outside this path.
+- Configured-fleet tests use the built Hagency executable as a retained task
+  client. Do not rebuild/replace that executable while these tests are running:
+  runtime identity checks can refuse startup or stop the fixture service.

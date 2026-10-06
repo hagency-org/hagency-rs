@@ -24,6 +24,76 @@ pub fn registration() -> Registration {
 pub fn resource() -> Resource {
     serde_json::from_value(resource_body(true)).unwrap()
 }
+pub fn retiring_agent(state: &std::path::Path) -> String {
+    use hagency_core::authority::*;
+    use hagency_store::EffectOutcome;
+    let reg = registration();
+    let pool = resource();
+    let request: ProjectRequest=serde_json::from_value(json!({"v":1,"fleetId":reg.fleet_id,"requestId":"remote_retirement","requesterMxid":"@owner:matrix.example.test","sourceRoomId":reg.reception_room_id,"targetProjectId":"project_one","targetRoomId":"!project:matrix.example.test","ownerMxid":"@owner:matrix.example.test","ownerDmRoomId":"!private:matrix.example.test","role":"coding","requestedTokens":40,"ratePerDay":null,"authVersion":1,"sourceEventId":"$original","agentDefinition":{"name":"Retiring","resourceId":pool.id()}})).unwrap();
+    let room = |id: &str, members: Vec<String>| RoomObservation {
+        room_id: id.into(),
+        joined: members.into_iter().collect(),
+        invite_only: true,
+        encryption: None,
+        powers: Default::default(),
+        default_power: 0,
+        invite_power: 0,
+        binding: None,
+        name: None,
+    };
+    let mut project = room(
+        &request.target_room_id,
+        vec![request.owner_mxid.clone(), reg.representative_mxid.clone()],
+    );
+    project.powers.insert(request.owner_mxid.clone(), 100);
+    project.binding = Some(
+        json!({"v":1,"fleetId":reg.fleet_id,"purpose":"project","projectId":request.target_project_id,"ownerMxid":request.owner_mxid,"authVersion":1}),
+    );
+    let mut owner_room = room(
+        &request.owner_dm_room_id,
+        vec![request.owner_mxid.clone(), reg.approval_bot_mxid.clone()],
+    );
+    owner_room.encryption = Some("m.megolm.v1.aes-sha2".into());
+    let mut content = serde_json::to_value(&request).unwrap();
+    content.as_object_mut().unwrap().remove("ownerDmRoomId");
+    content.as_object_mut().unwrap().remove("sourceEventId");
+    let evidence = RequestObservation {
+        registration_generation: reg.generation,
+        observed_at_ms: 1000,
+        source: SourceObservation {
+            event_id: request.source_event_id.clone(),
+            room_id: request.source_room_id.clone(),
+            sender: request.owner_mxid.clone(),
+            event_type: "com.hagency.engagement.request.v1".into(),
+            content,
+        },
+        reception: room(
+            &request.source_room_id,
+            vec![request.owner_mxid.clone(), reg.representative_mxid.clone()],
+        ),
+        project,
+        owner_room,
+    };
+    let proof = verify_request(&reg, request.clone(), evidence).unwrap();
+    let mut db = DomainRepository::open(state).unwrap();
+    db.admit(&proof, 1000).unwrap();
+    db.approve("approved", &proof, 1000).unwrap();
+    let id = request.engagement_id().unwrap();
+    let effect = db
+        .claim_effect_for(format!("provision_{id}").as_str())
+        .unwrap()
+        .unwrap();
+    db.observe_effect(
+        &effect.id,
+        effect.fence,
+        &EffectOutcome::Applied {
+            receipt: "fixture provisioned identity".into(),
+        },
+    )
+    .unwrap();
+    db.revoke("revoke_original", &id).unwrap();
+    id
+}
 pub fn resource_body(published: bool) -> Value {
     // Public mutation accepts provider input, never Resource's derived roles cache.
     json!({"presetId":"private_preset","seatId":"private_seat",

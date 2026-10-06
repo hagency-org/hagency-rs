@@ -141,31 +141,58 @@ impl Collector {
     ) -> Result<bool, Error> {
         let inner = &self.inner;
         let now = profile_clock_ms();
+        let profile = inner
+            .domain
+            .matrix_agent_profile(engagement.to_owned())
+            .await?;
+        let pending = matches!(profile["state"].as_str(), Some("pending" | "failed"));
         let last = inner
             .profile_checked_at
             .load(std::sync::atomic::Ordering::Relaxed);
         if last != 0
-            && now.saturating_sub(last) < crate::identity_polish::PROFILE_RECONCILE_INTERVAL_MS
+            && now.saturating_sub(last)
+                < if pending {
+                    5000
+                } else {
+                    crate::identity_polish::PROFILE_RECONCILE_INTERVAL_MS
+                }
         {
             return Ok(false);
         }
-        let name = inner
-            .domain
-            .engagement(engagement.to_owned())
-            .await?
-            .agent_name;
-        let changed = crate::identity_polish::reconcile_display_name(
-            &inner.http,
-            &inner.config.identity.transport.sender_mxid,
-            name.as_str(),
-            name.as_str(),
-            cancel,
-        )
-        .await?;
+        let name = profile["desiredName"].as_str().ok_or(Error::Config)?;
+        let explicit = profile["state"] != "default";
+        let changed = if explicit {
+            crate::identity_polish::apply_display_name(
+                &inner.http,
+                &inner.config.identity.transport.sender_mxid,
+                name,
+                cancel,
+            )
+            .await
+        } else {
+            crate::identity_polish::reconcile_display_name(
+                &inner.http,
+                &inner.config.identity.transport.sender_mxid,
+                name,
+                name,
+                cancel,
+            )
+            .await
+        };
+        if explicit {
+            inner
+                .domain
+                .observe_matrix_agent_profile(
+                    engagement.to_owned(),
+                    name.to_owned(),
+                    changed.is_ok(),
+                )
+                .await?;
+        }
         inner
             .profile_checked_at
             .store(profile_clock_ms(), std::sync::atomic::Ordering::Relaxed);
-        Ok(changed)
+        changed
     }
 
     /// The engagement this collector's transport belongs to — task #12's
@@ -298,6 +325,56 @@ impl Inner {
         }))
     }
 
+    /// Called by the original provisioning job after enrollment and before
+    /// inviting the owner. Later activation reads leave this cursor alone;
+    /// the first intake fetches both the first DM and any delayed room key.
+    pub(crate) async fn reserve_intake_cursor(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        let guard = self.owner.lock().await;
+        let owner = guard.as_ref().ok_or(Error::Storage)?;
+        if !owner.intake_mode().await? {
+            self.sync_observation(owner, cancel).await?;
+            owner.reserve_intake_cursor().await?;
+        }
+        Ok(())
+    }
+    async fn sync_observation(
+        &self,
+        owner: &Owner,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        observe!(Cursor);
+        let cursor = owner.cursor().await?;
+        let filter = json!({
+            "room": {
+                "rooms": self.observed().iter().map(|r| r.room_id.clone()).collect::<Vec<_>>(),
+                "timeline": {"limit": 0}, "ephemeral": {"types": []},
+                "account_data": {"types": []}, "state": {"lazy_load_members": false}
+            },
+            "presence": {"types": []}, "account_data": {"types": []}
+        })
+        .to_string();
+        let mut query = vec![
+            ("timeout", "0"),
+            ("full_state", "true"),
+            ("filter", filter.as_str()),
+        ];
+        if let Some(cursor) = cursor.as_deref() {
+            query.push(("since", cursor));
+        }
+        observe!(SyncHttp);
+        let value = self
+            .http
+            .request(&["_matrix", "client", "v3", "sync"], Some(&query), cancel)
+            .await?
+            .success()?;
+        let value = self.scope_sync(value)?;
+        observe!(SyncApply);
+        owner.sync(value).await?;
+        Ok(())
+    }
     pub(crate) async fn collect(
         &self,
         cancel: &CancellationToken,
@@ -335,34 +412,7 @@ impl Inner {
             }
             observe!(IntakeMode);
             if !owner.intake_mode().await? {
-                observe!(Cursor);
-                let cursor = owner.cursor().await?;
-                let filter = json!({
-                    "room": {
-                        "rooms": self.observed().iter().map(|r| r.room_id.clone()).collect::<Vec<_>>(),
-                        "timeline": {"limit": 0}, "ephemeral": {"types": []},
-                        "account_data": {"types": []}, "state": {"lazy_load_members": false}
-                    },
-                    "presence": {"types": []}, "account_data": {"types": []}
-                })
-                .to_string();
-                let mut query = vec![
-                    ("timeout", "0"),
-                    ("full_state", "true"),
-                    ("filter", filter.as_str()),
-                ];
-                if let Some(cursor) = cursor.as_deref() {
-                    query.push(("since", cursor));
-                }
-                observe!(SyncHttp);
-                let value = self
-                    .http
-                    .request(&["_matrix", "client", "v3", "sync"], Some(&query), cancel)
-                    .await?
-                    .success()?;
-                let value = self.scope_sync(value)?;
-                observe!(SyncApply);
-                owner.sync(value).await?;
+                self.sync_observation(owner, cancel).await?;
             }
             drop(guard);
             if cancel.is_cancelled() {
@@ -727,6 +777,15 @@ impl Inner {
         if let Some(guard) = &self.config.as_guard {
             guard.check(cancel).await?;
         }
+        self.whoami_identity(cancel).await?;
+        if let Some(guard) = &self.config.as_guard {
+            guard.check(cancel).await?;
+        }
+        Ok(())
+    }
+    /// Identity read inside a larger read-only census. Its caller checks the
+    /// application-service authority once, after the final read and before use.
+    pub(crate) async fn whoami_identity(&self, cancel: &CancellationToken) -> Result<(), Error> {
         let value = self
             .http
             .request(
@@ -745,9 +804,6 @@ impl Inner {
                 .is_some_and(|v| v != &Value::Bool(false))
         {
             return Err(Error::Identity);
-        }
-        if let Some(guard) = &self.config.as_guard {
-            guard.check(cancel).await?;
         }
         Ok(())
     }
@@ -1278,6 +1334,55 @@ mod tests {
         let (second, ()) = tokio::join!(c.reconcile_agent_profile(&engagement, &cancel), async {});
         assert!(!second.unwrap());
         fake.quiesced(admitted, &common::limits()).await;
+        c.close().await.unwrap();
+        f.store.shutdown().await.unwrap();
+        fake.close().await;
+    }
+    #[tokio::test]
+    async fn explicit_agent_rename_replaces_custom_name_and_requires_exact_readback() {
+        let f = common::Fixture::new();
+        let mut fake = common::Fake::start(false).await;
+        let c = Collector::new(f.config(&fake.endpoint), f.store.clone()).unwrap();
+        let cancel = CancellationToken::new();
+        let mxid = &c.inner.config.identity.transport.sender_mxid;
+        let (result, ()) = tokio::join!(
+            crate::identity_polish::apply_display_name(
+                &c.inner.http,
+                mxid,
+                "Requested name",
+                &cancel
+            ),
+            async {
+                fake.next()
+                    .await
+                    .json(200, json!({"displayname":"Existing custom name"}));
+                let put = fake.next().await;
+                assert_eq!(put.method, "PUT");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&put.body).unwrap()["displayname"],
+                    "Requested name"
+                );
+                put.json(200, json!({}));
+                fake.next()
+                    .await
+                    .json(200, json!({"displayname":"Wrong readback"}));
+            }
+        );
+        assert_eq!(result, Err(Error::Wire));
+        let (result, ()) = tokio::join!(
+            crate::identity_polish::apply_display_name(
+                &c.inner.http,
+                mxid,
+                "Requested name",
+                &cancel
+            ),
+            async {
+                fake.next()
+                    .await
+                    .json(200, json!({"displayname":"Requested name"}));
+            }
+        );
+        assert_eq!(result, Ok(false));
         c.close().await.unwrap();
         f.store.shutdown().await.unwrap();
         fake.close().await;

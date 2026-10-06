@@ -1,10 +1,11 @@
-//! One service-owned outbound adapter; no registration or execution authority.
+//! Independently scoped outbound adapters; no implicit execution authority.
 use super::{Failure, config::read};
 use hagency_core::authority::Registration;
 use hagency_palpo::{Adapter, CancellationToken, Error, HostConfig, Limits};
 use hagency_store::{DomainStore, Store, outbound::RegistrationIdentity};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -21,6 +22,7 @@ struct Config {
 }
 
 pub(super) struct Prepared {
+    state: std::path::PathBuf,
     host: HostConfig,
     registration: RegistrationIdentity,
     work: Option<Work>,
@@ -32,8 +34,96 @@ struct Work {
     fleet: String,
     generation: u64,
 }
+/// The profiles found at start. While another engagement can start, a
+/// profile that cannot load is parked under its engagement ID with the
+/// repair: one interrupted import or stray entry never stops the others.
+/// With nothing to start, `load_all` refuses as a single profile always has.
+#[derive(Default)]
+pub(super) struct Loaded {
+    pub(super) prepared: Vec<Prepared>,
+    pub(super) parked: Vec<(String, Failure)>,
+    /// Entries of `palpo-engagements/` that are not engagement directories.
+    pub(super) ignored: Vec<String>,
+}
+
+/// The status key of a profile that did not load: its engagement ID when the
+/// files name one, so importing that engagement again replaces the parked
+/// status; otherwise the file to repair.
+fn profile_key(state: &Path, directory: &Path) -> String {
+    let fleet = if directory == state {
+        read(
+            &state.join("palpo-transport.json"),
+            16 * 1024,
+            "palpo-transport.json",
+        )
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value["registration"]["fleetId"].as_str().map(str::to_owned))
+    } else {
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+    };
+    fleet
+        .filter(|fleet| super::palpo_import::is_engagement_id(fleet))
+        .unwrap_or_else(|| "palpo-transport.json".into())
+}
+
 impl Prepared {
+    pub(super) fn load_all(state: &Path) -> Result<Loaded, Failure> {
+        let profiles =
+            super::palpo_import::profile_directories(state).map_err(|_| Failure::Config {
+                field: "Palpo profiles",
+                fix: "the state and palpo-engagements directories must be private and readable",
+            })?;
+        let mut loaded = Loaded {
+            ignored: profiles.ignored,
+            ..Loaded::default()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for directory in profiles.directories {
+            match Self::load(&directory) {
+                Ok(profile) if seen.insert(profile.registration.fleet_id.clone()) => {
+                    loaded.prepared.push(profile);
+                }
+                // A second credential directory for a running engagement is
+                // never started beside it.
+                Ok(profile) => loaded.parked.push((
+                    format!("{} (second directory)", profile.registration.fleet_id),
+                    Failure::Config {
+                        field: "Palpo profiles",
+                        fix: "an engagement must have exactly one credential directory",
+                    },
+                )),
+                Err(failure) => loaded
+                    .parked
+                    .push((profile_key(state, &directory), failure)),
+            }
+        }
+        for fleet in profiles.unusable {
+            loaded.parked.push((
+                fleet,
+                Failure::Config {
+                    field: "Palpo engagement directory",
+                    fix: "the directory must be private (0700), owned by this user and readable",
+                },
+            ));
+        }
+        // Parking keeps the other engagements serving. With none to start,
+        // the broken configuration refuses the start, naming its repair.
+        if loaded.prepared.is_empty()
+            && let Some((_, failure)) = loaded.parked.first()
+        {
+            return Err(*failure);
+        }
+        Ok(loaded)
+    }
     pub(super) fn load(state: &Path) -> Result<Self, Failure> {
+        super::palpo_import::ensure_committed(state).map_err(|_| Failure::Config {
+            field: "Palpo profile",
+            fix: "retry the exact pending profile import before starting transport",
+        })?;
         let value: Config = serde_json::from_slice(&read(
             &state.join("palpo-transport.json"),
             16 * 1024,
@@ -55,6 +145,19 @@ impl Prepared {
             field: "palpo-transport.json: registration",
             fix: "the six-field registration must be present and well-formed",
         })?;
+        if state
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+            == Some("palpo-engagements")
+            && state.file_name().and_then(|s| s.to_str())
+                != Some(value.registration.fleet_id.as_str())
+        {
+            return Err(Failure::Config {
+                field: "Palpo engagement directory",
+                fix: "the directory must match the profile's engagement ID",
+            });
+        }
         let registration_fingerprint = hagency_store::publication_fingerprint(&value.registration)
             .map_err(|_| Failure::Config {
                 field: "palpo-transport.json: registration",
@@ -69,7 +172,13 @@ impl Prepared {
             },
         );
         let registration = RegistrationIdentity {
-            binding: "native-palpo-v2".into(),
+            binding: if state.file_name().and_then(|n| n.to_str())
+                == Some(value.registration.fleet_id.as_str())
+            {
+                format!("native-palpo-v2-{}", value.registration.fleet_id)
+            } else {
+                "native-palpo-v2".into()
+            },
             side_id: value.registration.server_name,
             fleet_id: value.registration.fleet_id,
             registration_generation: value.registration.generation,
@@ -114,6 +223,7 @@ impl Prepared {
             }
         }
         Ok(Self {
+            state: state.to_owned(),
             host,
             registration,
             work,
@@ -124,19 +234,18 @@ impl Prepared {
 /// Whether `serve --palpo-transport` found an imported fleet at boot. A fresh
 /// install has none yet: TS starts with no outbound fleet and picks one up
 /// when the operator imports it, so an absent file is "waiting for the
-/// import", never a startup refusal. A present but broken file still refuses.
+/// import", never a startup refusal. A present but broken profile refuses the
+/// start unless another engagement can start (`Prepared::load_all`).
 pub(super) fn imported(state: &Path) -> Result<bool, Failure> {
-    match std::fs::symlink_metadata(state.join("palpo-transport.json")) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(Failure::Config {
-            field: "palpo-transport.json",
-            fix: "the file must be readable by the service owner (stat failed)",
-        }),
-    }
+    super::palpo_import::profile_directories(state)
+        .map(|p| !p.directories.is_empty() || !p.unusable.is_empty())
+        .map_err(|_| Failure::Config {
+            field: "Palpo profiles",
+            fix: "the profile directories must be private and readable",
+        })
 }
 
-/// The service's one Palpo transport, startable while the service runs (TS
+/// The service's Palpo transports, startable while the service runs (TS
 /// `reconcileOutboundFleets`: an imported outbound fleet starts without a
 /// restart, a re-import replaces its client). Bootstrap starts the imported
 /// fleet at boot through this same handle, and closes it at shutdown.
@@ -150,17 +259,21 @@ struct LiveInner {
     /// `--palpo-transport`: without it an import is saved for the next start
     /// that enables the transport, and nothing connects now.
     enabled: bool,
-    owner: tokio::sync::Mutex<Option<Owner>>,
+    owner: tokio::sync::Mutex<BTreeMap<String, Owner>>,
+    imports: tokio::sync::Mutex<()>,
+    pairings: tokio::sync::Mutex<()>,
+    pairing_task: Mutex<Option<Arc<tokio::sync::Mutex<JoinHandle<()>>>>>,
+    pairing_cancel: CancellationToken,
     /// ADR-187: an imported fleet's service (agents, approvals) with no
     /// coordinator; absent on a coordinator install, which runs its own.
     fleet: Option<FleetMode>,
     /// Shutdown wins over a concurrent import: once set, nothing starts.
     closed: std::sync::atomic::AtomicBool,
-    cancel: Mutex<Option<CancellationToken>>,
+    cancel: Mutex<BTreeMap<String, CancellationToken>>,
 }
 struct FleetMode {
     address: std::net::SocketAddr,
-    service: tokio::sync::Mutex<Option<super::fleet_service::FleetService>>,
+    service: tokio::sync::Mutex<BTreeMap<String, super::fleet_service::FleetService>>,
 }
 /// What an import reports: the saved fleet's public facts and whether the
 /// transport was started. Never a token.
@@ -173,8 +286,6 @@ pub(crate) struct Connected {
 #[derive(Debug)]
 pub(crate) enum ImportError {
     Invalid(&'static str),
-    /// The native service runs exactly one Palpo fleet transport.
-    OtherFleet,
     Store(hagency_store::Error),
     Start(Failure),
     Closed,
@@ -188,6 +299,73 @@ impl From<super::palpo_import::Error> for ImportError {
     }
 }
 impl Live {
+    pub(crate) fn start_pairings(&self) {
+        let mut task = self
+            .0
+            .pairing_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if task.is_some() || self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let weak = Arc::downgrade(&self.0);
+        let cancel = self.0.pairing_cancel.clone();
+        *task = Some(Arc::new(tokio::sync::Mutex::new(tokio::spawn(
+            async move {
+                loop {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let Some(inner) = weak.upgrade() else {
+                        break;
+                    };
+                    let live = Self(inner);
+                    if !cancel.is_cancelled() {
+                        let _ = super::pairing::tick(&live, &cancel).await;
+                    }
+                    drop(live);
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+                    }
+                }
+            },
+        ))));
+    }
+    pub(crate) async fn create_pairing(
+        &self,
+        input: super::pairing::Input,
+    ) -> Result<serde_json::Value, super::association::Error> {
+        let _guard = self.0.pairings.lock().await;
+        if self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(super::association::Error::Invalid("runtime closed"));
+        }
+        let value = super::pairing::create(self.state_dir(), input)?;
+        self.start_pairings();
+        Ok(value)
+    }
+    pub(crate) async fn pairing_verified(&self, fleet: &str) -> bool {
+        self.0
+            .domain
+            .coordinator_authority(fleet.to_owned())
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|policy| serde_json::json!(policy.state) == "verified")
+    }
+    pub(crate) fn pairing_status(&self) -> Result<serde_json::Value, super::association::Error> {
+        super::pairing::list(self.state_dir(), self.0.enabled)
+    }
+    pub(crate) async fn verify_coordinator(&self, fleet: &str, user: &str) -> bool {
+        let Ok(registration) = self.0.domain.provisioning_registration(fleet.into()).await else {
+            return false;
+        };
+        let Ok(profile) = super::palpo_import::profile_directory(&self.0.state, fleet) else {
+            return false;
+        };
+        super::palpo_work::verify_coordinator_account(&profile, &registration.server_name, user)
+            .await
+    }
     pub(crate) fn new(
         state: std::path::PathBuf,
         store: Store,
@@ -201,10 +379,14 @@ impl Live {
             domain,
             status,
             enabled,
-            owner: tokio::sync::Mutex::new(None),
+            owner: tokio::sync::Mutex::new(BTreeMap::new()),
+            imports: tokio::sync::Mutex::new(()),
+            pairings: tokio::sync::Mutex::new(()),
+            pairing_task: Mutex::new(None),
+            pairing_cancel: CancellationToken::new(),
             fleet: None,
             closed: std::sync::atomic::AtomicBool::new(false),
-            cancel: Mutex::new(None),
+            cancel: Mutex::new(BTreeMap::new()),
         }))
     }
     /// ADR-187: this service also runs an imported fleet's agents and
@@ -213,7 +395,7 @@ impl Live {
         let mut inner = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("set before sharing"));
         inner.fleet = Some(FleetMode {
             address,
-            service: tokio::sync::Mutex::new(None),
+            service: tokio::sync::Mutex::new(BTreeMap::new()),
         });
         Self(Arc::new(inner))
     }
@@ -228,18 +410,34 @@ impl Live {
     pub(crate) fn is_imported(&self) -> bool {
         imported(&self.0.state).unwrap_or(false)
     }
-    async fn start_fleet(&self, registration: &Registration) {
-        let Some(fleet) = &self.0.fleet else { return };
+    async fn start_fleet(
+        &self,
+        registration: &Registration,
+        state: &Path,
+        probes: Option<Arc<super::palpo_work::Probes>>,
+    ) -> Result<(), Failure> {
+        let Some(fleet) = &self.0.fleet else {
+            return Ok(());
+        };
         let mut service = fleet.service.lock().await;
-        if service.is_none() && !self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
-            *service = Some(super::fleet_service::FleetService::start(
-                self.0.state.clone(),
-                fleet.address,
-                self.0.domain.clone(),
-                registration.fleet_id.clone(),
-                registration.server_name.clone(),
-            ));
+        if let Some(previous) = service.get_mut(&registration.fleet_id) {
+            previous.close().await?;
         }
+        if !self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
+            service.insert(
+                registration.fleet_id.clone(),
+                super::fleet_service::FleetService::start_scoped(
+                    state.to_owned(),
+                    self.0.state.clone(),
+                    fleet.address,
+                    self.0.domain.clone(),
+                    registration.fleet_id.clone(),
+                    registration.server_name.clone(),
+                    probes,
+                ),
+            );
+        }
+        Ok(())
     }
     pub(crate) fn status(&self) -> &StatusHandle {
         &self.0.status
@@ -247,8 +445,10 @@ impl Live {
     /// Replace the running transport (if any) with one built from `prepared`.
     async fn replace(&self, prepared: Prepared) -> Result<(), Failure> {
         let registration = prepared.registration.clone();
+        let profile = prepared.state.clone();
+        let probes = prepared.work.as_ref().map(|work| work.probes.clone());
         let mut owner = self.0.owner.lock().await;
-        if let Some(mut old) = owner.take() {
+        if let Some(old) = owner.get_mut(&registration.fleet_id) {
             // A previous transport that does not acknowledge its close keeps
             // its original join; the new one starts only after it settled.
             old.close().await?;
@@ -256,24 +456,29 @@ impl Live {
         if self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Failure::Cancelled);
         }
-        self.0.status.set("starting", None);
-        let started = Owner::start(
+        let status = self.0.status.child(&registration.fleet_id);
+        status.set("starting", None);
+        let started = crate::bootstrap::palpo::Owner::start(
             prepared,
             self.0.store.clone(),
             self.0.domain.clone(),
-            self.0.status.clone(),
+            status,
         );
-        *self.0.cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(started.cancel.clone());
-        *owner = Some(started);
+        self.0
+            .cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(registration.fleet_id.clone(), started.cancel.clone());
+        owner.insert(registration.fleet_id.clone(), started);
         drop(owner);
-        // A re-import of the same fleet keeps the running fleet service.
+        // Replace only this engagement's service so new credentials take effect.
         if let Ok(registration) = self
             .0
             .domain
             .provisioning_registration(registration.fleet_id.clone())
             .await
         {
-            self.start_fleet(&registration).await;
+            self.start_fleet(&registration, &profile, probes).await?;
         }
         Ok(())
     }
@@ -287,6 +492,7 @@ impl Live {
         raw: &str,
         homeserver: &str,
     ) -> Result<Connected, ImportError> {
+        let _import = self.0.imports.lock().await;
         if self.0.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ImportError::Closed);
         }
@@ -294,28 +500,38 @@ impl Live {
         let (mut registration, mut appservice, machine, endpoint, generation) =
             super::palpo_import::parse(raw)?;
         appservice["homeserver"] = serde_json::json!(homeserver);
-        // One fleet per service: a different fleet would silently retarget
-        // every identity and request this service already holds.
-        if let Ok(raw) = std::fs::read(self.0.state.join("palpo-transport.json"))
-            && let Ok(current) = serde_json::from_slice::<Config>(&raw)
-            && current.registration.fleet_id != registration.fleet_id
-        {
-            return Err(ImportError::OtherFleet);
-        }
+        let profile =
+            super::palpo_import::profile_directory(&self.0.state, &registration.fleet_id)?;
         let domain = &self.0.domain;
+        let accepted = domain
+            .coordinator_authority(registration.fleet_id.clone())
+            .await
+            .map_err(ImportError::Store)?;
+        super::association::validate_import(&self.0.state, raw, &homeserver, accepted.as_ref())
+            .map_err(|_| ImportError::Invalid("association binding"))?;
         // A re-import of the same fleet keeps a reception an earlier probe bound.
         if let Ok(current) = domain
             .provisioning_registration(registration.fleet_id.clone())
             .await
+            && current.generation == registration.generation
         {
             registration.reception_room_id = current.reception_room_id;
         }
+        let policy = super::palpo_import::coordinator_profile(raw, &registration)?;
+        super::palpo_import::validate_write(
+            &profile,
+            &registration,
+            &appservice,
+            &machine,
+            &endpoint,
+            generation,
+        )?;
         domain
-            .register(registration.clone())
+            .import_coordinator_registration(registration.clone(), policy)
             .await
             .map_err(ImportError::Store)?;
         super::palpo_import::write(
-            &self.0.state,
+            &profile,
             &registration,
             &appservice,
             &machine,
@@ -325,25 +541,29 @@ impl Live {
         // The project side the console lists and verifies: the homeserver
         // address and the App Service credential the representative acts
         // with (TS `PUT /api/project-sides/:id/credential`).
-        let side = registration.server_name.clone();
-        domain
-            .ensure_side(side.clone())
-            .await
-            .map_err(ImportError::Store)?;
-        domain
-            .set_api_base_url(side.clone(), Some(homeserver.clone()))
-            .await
-            .map_err(ImportError::Store)?;
-        let credential = serde_json::json!({
-            "kind": "appservice",
-            "asToken": appservice["as_token"], "hsToken": appservice["hs_token"],
-            "namespace": appservice["namespace"],
-            "senderLocalpart": appservice["sender_localpart"], "url": appservice["url"],
-        });
-        domain
-            .set_credential(side, Some(credential), false)
-            .await
-            .map_err(ImportError::Store)?;
+        // The legacy side record is hostname keyed; secondary engagements must
+        // never replace its credentials. They are addressed by exact fleet ID.
+        if profile == self.0.state {
+            let side = registration.server_name.clone();
+            domain
+                .ensure_side(side.clone())
+                .await
+                .map_err(ImportError::Store)?;
+            domain
+                .set_api_base_url(side.clone(), Some(homeserver.clone()))
+                .await
+                .map_err(ImportError::Store)?;
+            let credential = serde_json::json!({
+                "kind": "appservice",
+                "asToken": appservice["as_token"], "hsToken": appservice["hs_token"],
+                "namespace": appservice["namespace"],
+                "senderLocalpart": appservice["sender_localpart"], "url": appservice["url"],
+            });
+            domain
+                .set_credential(side, Some(credential), false)
+                .await
+                .map_err(ImportError::Store)?;
+        }
         let imported = super::palpo_import::Imported {
             fleet_id: registration.fleet_id.clone(),
             server_name: registration.server_name.clone(),
@@ -358,7 +578,7 @@ impl Live {
                 started: false,
             });
         }
-        let prepared = Prepared::load(&self.0.state).map_err(ImportError::Start)?;
+        let prepared = Prepared::load(&profile).map_err(ImportError::Start)?;
         self.replace(prepared).await.map_err(ImportError::Start)?;
         Ok(Connected {
             imported,
@@ -366,31 +586,59 @@ impl Live {
         })
     }
     pub(super) fn cancel(&self) {
+        self.0.pairing_cancel.cancel();
         self.0
             .closed
             .store(true, std::sync::atomic::Ordering::Release);
         if let Some(fleet) = &self.0.fleet
             && let Ok(service) = fleet.service.try_lock()
-            && let Some(service) = service.as_ref()
         {
-            service.cancel();
+            for service in service.values() {
+                service.cancel();
+            }
         }
-        if let Some(cancel) = &*self.0.cancel.lock().unwrap_or_else(|e| e.into_inner()) {
+        for cancel in self
+            .0
+            .cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
             cancel.cancel();
         }
     }
     pub(super) async fn close(&self) -> Result<(), Failure> {
         self.cancel();
+        self.0.pairing_cancel.cancel();
+        let pairing = self
+            .0
+            .pairing_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(task) = pairing {
+            let _ = (&mut *task.lock().await).await;
+            self.0
+                .pairing_task
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
+        let mut result = Ok(());
         // The fleet's agents and approvals close before the transport.
-        if let Some(fleet) = &self.0.fleet
-            && let Some(service) = fleet.service.lock().await.take()
-        {
-            service.close().await;
+        if let Some(fleet) = &self.0.fleet {
+            for service in fleet.service.lock().await.values_mut() {
+                if let Err(error) = service.close().await {
+                    result = Err(error);
+                }
+            }
         }
-        match self.0.owner.lock().await.as_mut() {
-            Some(owner) => owner.close().await,
-            None => Ok(()),
+        for owner in self.0.owner.lock().await.values_mut() {
+            if let Err(error) = owner.close().await {
+                result = Err(error);
+            }
         }
+        result
     }
 }
 
@@ -399,33 +647,83 @@ pub(crate) struct Status {
     configured: bool,
     state: &'static str,
     error: Option<&'static str>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    engagements: BTreeMap<String, &'static str>,
 }
 #[derive(Clone)]
-pub(crate) struct StatusHandle(Arc<Mutex<Status>>);
+pub(crate) struct StatusHandle(
+    Arc<Mutex<Status>>,
+    Arc<Mutex<BTreeMap<String, StatusHandle>>>,
+);
 impl StatusHandle {
     pub(crate) fn new(configured: bool) -> Self {
-        Self(Arc::new(Mutex::new(Status {
-            configured,
-            state: if configured { "starting" } else { "disabled" },
-            error: None,
-        })))
+        Self(
+            Arc::new(Mutex::new(Status {
+                configured,
+                state: if configured { "starting" } else { "disabled" },
+                error: None,
+                engagements: BTreeMap::new(),
+            })),
+            Default::default(),
+        )
     }
     /// `--palpo-transport` with no fleet imported yet.
     pub(super) fn awaiting() -> Self {
-        Self(Arc::new(Mutex::new(Status {
-            configured: true,
-            state: "awaiting_import",
-            error: None,
-        })))
+        Self(
+            Arc::new(Mutex::new(Status {
+                configured: true,
+                state: "awaiting_import",
+                error: None,
+                engagements: BTreeMap::new(),
+            })),
+            Default::default(),
+        )
     }
     pub(crate) fn get(&self) -> Status {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        let mut status = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let children = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        if !children.is_empty() {
+            for (id, child) in children.iter() {
+                let child = child.get();
+                status.engagements.insert(id.clone(), child.state);
+                if child.error.is_some() {
+                    status.error = child.error;
+                }
+            }
+            let values = status.engagements.values();
+            status.state = if values.clone().all(|s| *s == "running") {
+                "running"
+            } else if values.clone().all(|s| *s == "stopped") {
+                "stopped"
+            } else if values
+                .clone()
+                .any(|s| matches!(*s, "unavailable" | "outcome_unknown"))
+            {
+                "unavailable"
+            } else {
+                "starting"
+            };
+        }
+        status
+    }
+    fn child(&self, id: &str) -> Self {
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id.into())
+            .or_insert_with(|| Self::new(true))
+            .clone()
+    }
+    /// A profile that did not load at start: unavailable with a configuration
+    /// error until that engagement is imported again.
+    pub(super) fn park(&self, key: &str) {
+        self.child(key).set("unavailable", Some("config"));
     }
     /// The state word alone, for the readiness rollup (brief 19): the full
     /// `Status` stays console-only; `/health` names components by state
     /// words, never private detail.
     pub(crate) fn state(&self) -> &'static str {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).state
+        self.get().state
     }
     fn set(&self, state: &'static str, error: Option<&'static str>) {
         let mut status = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -516,6 +814,11 @@ impl Owner {
                     return Ok(());
                 }
                 // Preserve the original activation future through its receipt.
+                let retirement = if prepared.work.is_some() {
+                    Some(hagency_palpo::RetirementClient::new(&prepared.host)?)
+                } else {
+                    None
+                };
                 let mut adapter = Adapter::attach(prepared.host, store).await?;
                 if let Some(work) = &prepared.work {
                     adapter = adapter.with_probe_receipts(work.probes.clone());
@@ -529,28 +832,67 @@ impl Owner {
                 // ADR109 rechecks domain identity after custody waits before
                 // HTTP admission; already admitted bytes cannot be recalled.
                 // The custody consumer runs beside it and stops with it.
-                let consumer = async {
-                    if let Some(work) = &prepared.work {
-                        super::palpo_work::run(
-                            &adapter,
-                            &work.probes,
-                            &domain,
-                            &work.appservice,
-                            &work.fleet,
-                            work.generation,
-                            &signal,
-                        )
-                        .await;
+                let delivery = async {
+                    loop {
+                        completion.status.set("running", None);
+                        let work_signal = signal.child_token();
+                        let consumer = async {
+                            if let Some(work) = &prepared.work {
+                                crate::bootstrap::palpo_work::run(
+                                    &adapter,
+                                    &work.probes,
+                                    &domain,
+                                    &work.appservice,
+                                    &work.fleet,
+                                    work.generation,
+                                    &work_signal,
+                                )
+                                .await;
+                            }
+                        };
+                        let (result, ()) = tokio::join!(
+                            async {
+                                let result =
+                                    adapter.run_with_resources(&domain, &work_signal).await;
+                                work_signal.cancel();
+                                result
+                            },
+                            consumer
+                        );
+                        if signal.is_cancelled() {
+                            return Ok(());
+                        }
+                        match result {
+                            Err(Error::Unauthorized) if retirement.is_some() => {
+                                // A resumed registration can reuse its current
+                                // credentials. Restart both original lanes and
+                                // their consumer after the bounded backoff.
+                                completion.status.set("unavailable", Some("unauthorized"));
+                                tokio::select! {
+                                    _ = signal.cancelled() => return Ok(()),
+                                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                                }
+                            }
+                            Err(error) if retirement.is_some() => {
+                                completion
+                                    .status
+                                    .set("unavailable", Some(error_label(error)));
+                                signal.cancelled().await;
+                                return Err(error);
+                            }
+                            result => {
+                                signal.cancel();
+                                return result;
+                            }
+                        }
                     }
                 };
-                let (result, ()) = tokio::join!(
-                    async {
-                        let result = adapter.run_with_resources(&domain, &signal).await;
-                        signal.cancel();
-                        result
-                    },
-                    consumer
-                );
+                let cleanup = async {
+                    if let (Some(client), Some(work)) = (&retirement, &prepared.work) {
+                        super::palpo_retirement::run(client, &domain, &work.fleet, &signal).await;
+                    }
+                };
+                let (result, ()) = tokio::join!(delivery, cleanup);
                 result
             }
             .await;
@@ -596,6 +938,23 @@ impl Drop for Owner {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn native_palpo_multi_engagement_health_does_not_hide_a_failed_transport() {
+        let status = StatusHandle::new(true);
+        let one = status.child("first");
+        let two = status.child("second");
+        one.set("running", None);
+        assert_eq!(status.state(), "starting");
+        two.set("unavailable", Some("transport"));
+        assert_eq!(status.state(), "unavailable");
+        assert_eq!(status.get().engagements.len(), 2);
+        two.set("running", None);
+        assert_eq!(status.state(), "running");
+        one.set("stopped", None);
+        two.set("stopped", None);
+        assert_eq!(status.state(), "stopped");
+    }
 
     #[tokio::test]
     async fn native_palpo_service_cancel_custody_retained_join() {

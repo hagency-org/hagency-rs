@@ -46,6 +46,7 @@ pub(super) fn selection_query(req: &Request) -> Result<(), Error> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Label {
+    coordinator_managed: bool,
     id: String,
     agent_name: String,
     project_name: Option<String>,
@@ -117,6 +118,7 @@ async fn engagements(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             let labels: Vec<_> = rows
                 .into_iter()
                 .map(|e| Label {
+                    coordinator_managed: e.coordinator_managed,
                     id: e.id,
                     agent_name: e.agent_name,
                     project_name: e.project_name,

@@ -2,14 +2,16 @@
 
 # Hagency
 
-**Lend Codex agents to projects on a Palpo Matrix server, with owner approval and token budgets.**
+**Run local Codex agents for Palpo Matrix projects, with coordinator approval and token budgets.**
 
-Hagency is one Rust binary, `hagency`, that runs as a service on your machine. The *operator* is the person who runs Hagency and offers its resources to Palpo. The operator publishes resources to a connected Palpo homeserver. A resource is a model, a reasoning effort and a monthly token ceiling. Projects define agents on those resources and request tokens. The operator approves an amount. Hagency then gives the agent its own Matrix identity in the project's room. People @mention the agent to give it work. The owner approves the agent's risky operations from a private encrypted room.
+Hagency is one Rust binary, `hagency`, that runs as a service on your machine and uses your local Codex installation. The *operator* configures resources: a model, reasoning effort and token budget bound to a server engagement. The engagement's designated Matrix *coordinator* reviews project and agent requests in Rinx's Palpo Inbox. Once an agent's allocation is accepted, Hagency creates its Matrix identity and starts its runtime. People @mention it in the project room; its owner can message it directly and approve protected operations in a private encrypted room.
+
+These instructions describe this source checkout. Older pre-release binaries may not include the server-engagement UI.
 
 This repository holds the Rust service in [native/](native/) and the console source in [mockup/](mockup/). The console is a Next.js app that is exported to static files at build time and embedded in the binary.
 
 **Running Hagency?** Follow [Set up Hagency](#set-up-hagency).
-**Using Hagency through a Palpo server?** Start with the [user guide](docs/user-guide/README.md).
+**Trying the complete Rinx workflow?** Follow the [quick start and user guide](docs/user-guide/README.md).
 **Changing the service?** Start with the [code walkthrough](docs/architecture-walkthrough.md).
 
 ## Contents
@@ -29,10 +31,11 @@ This repository holds the Rust service in [native/](native/) and the console sou
 
 ## What it does
 
-- **Resources and the catalog.** The operator configures resources in the console. Hagency publishes new resources to Palpo. Ceilings, seats and internal ids stay private.
-- **Project-defined agents.** A project member defines an agent on a published resource in Palpo web. The definition names the requested tokens and a daily rate. Each definition becomes an *engagement*: the record of one agent for one project. It waits for the operator's decision.
-- **Approval with an allocation.** The operator approves an amount, up to "all remaining". The amount must fit the resource's ceiling, seats and pool headroom. When the agent uses up its allocation, it pauses without dropping work. It resumes when the operator adds tokens.
-- **Provisioning without a coordinator.** For a Palpo fleet imported in the console, Hagency creates every account itself through the fleet's App Service: the approval bot, each agent, and the agent's encrypted DM with its owner. No separate coordinator agent is needed (ADR-187).
+- **Server engagements.** Start a connection request in Hagency, confirm it as the resource owner in Rinx, and have the Palpo administrator approve it. Hagency receives the configuration automatically. Each engagement has its own coordinator, delegation and resources.
+- **Resources and the catalog.** Use **My resources → New resource configuration** to choose the engagement, source configuration, model, reasoning effort, budget and eligible project managers. One engagement can have multiple resources. Creating the resource also assigns its budget to that engagement; there is no second pool to allocate.
+- **Project-defined agents.** An eligible project manager requests a project from a resource in Rinx, then requests agents for the approved project. The coordinator reviews both in the Palpo Inbox. Project approval grants access; an agent approval is separately checked against the available resource budget.
+- **Allocation and readiness.** Approval, token reservation and runtime readiness are separate states. Wait for **Execution · ready** before testing an agent. Owners can request more tokens in Rinx when needed.
+- **Automatic Matrix setup.** Hagency creates the approval bot, agent accounts and owner DMs through the server engagement's App Service. The designated coordinator is a Matrix user who makes decisions; no separate coordinator AI agent is required.
 - **Mention-driven work.** In the project room, an agent acts only when a person @mentions it. It reads the surrounding discussion as context and replies in the conversation's thread. In its DM, every message from the owner reaches it.
 - **Work in other rooms.** An agent joins rooms its owner invites it to. An invitation from anyone else waits for a decision in the console. In a joined room the agent follows the rules in [Where an agent works](#where-an-agent-works) (ADR-188).
 - **Owner approvals.** These go to the owner as cards in a private encrypted approval room:
@@ -41,7 +44,7 @@ This repository holds the Rust service in [native/](native/) and the console sou
   - file transfers.
 
   Only a verified verdict from the owner's own device counts. An unanswered card is denied.
-- **One console.** The same binary serves the console on its loopback port. It covers setup, resources, accounts, agents, engagements, project sides, approvals, invitations, tasks, usage and alerts.
+- **One console.** The same binary serves the console on its loopback port. Its navigation covers Setup, My resources, Workforce, Server engagements, Engagements, Approvals, Invitations, Usage and Alerts. Project and agent requests are handled in Rinx.
 
 ### Where an agent works
 
@@ -76,7 +79,7 @@ Palpo homeserver  <── outbound HTTPS ──  hagency start (127.0.0.1:13300)
   - the guardian that owns each runner's process tree;
   - the MCP helper that gives Codex its task tools;
   - the operator CLI.
-- **Fleet service.** When a Palpo fleet is imported, the fleet service runs it. It creates the fleet's accounts, provisions approved agents, and runs one approval pump per owner. Every step retries with backoff. One engagement's failure does not stop the others.
+- **Fleet service.** Each configured server engagement has an isolated fleet service. It creates the fleet's accounts, provisions approved agents, and runs one approval pump per owner. Retryable failures use backoff; an uncertain write is retained for inspection rather than blindly repeated.
 - **Crates.** The Rust workspace lives in [native/](native/). The main crates are:
   - `hagency-core`: the domain types;
   - `hagency-store`: the durable rules;
@@ -97,9 +100,9 @@ You need:
 | --- | --- |
 | Host | macOS, or Linux with systemd. You use the console on the machine that runs Hagency. |
 | Coding agent | Codex CLI, installed and on your `PATH` |
-| Palpo | A homeserver whose admin can run **Add Hagency** |
+| Palpo and Rinx | A compatible Palpo server and Rinx client, plus existing resource-owner, coordinator and administrator accounts on that server |
 
-Your terminal work is steps 1 to 3. The rest happens in the console.
+Your terminal work is steps 1 to 3. Then use the Hagency console for local setup and Rinx for Matrix approvals.
 
 ### 1. Sign in to the coding agent
 
@@ -190,7 +193,7 @@ Choose one:
 - uses a default state directory: `~/Library/Application Support/Hagency` on macOS, `${XDG_DATA_HOME:-~/.local/share}/hagency` on Linux. Pass `--state-dir DIR` for another one.
 - initializes the directory when it is new or empty. It refuses a non-empty directory that is not a Hagency state directory.
 - listens on `127.0.0.1:13300`. `--listen` accepts loopback addresses only.
-- runs as an imported fleet (`serve --palpo-transport`) with the embedded console. It starts without `fleet-runtime.json` and without a Palpo import; you complete both in the console.
+- runs in fleet mode (`serve --palpo-transport`) with the embedded console. It can start before local Codex or a Palpo server engagement is configured; complete those through Setup and the Rinx approval flow.
 - prints a console sign-in link and opens it in your browser. Pass `--no-open` to only print it. It prints the link only to an interactive terminal; otherwise it prints the `hagency console-access` command to run.
 
 `hagency service install` registers a per-user service that runs `hagency start --no-open`, and starts it:
@@ -218,45 +221,35 @@ Pass the same `--state-dir` and `--listen` you gave `start`, if you changed them
 
 ### 5. Finish setup in the console
 
-Open **Setup** in the console menu. It has three steps. Each step shows a check mark when it is done. Until all three are done, every other console page shows a one-line note, "Setup is not finished", with a link to **Setup**. A coordinator install has no Setup steps: it shows no note, and its Setup page says that its runtime is configured in `agent-driver.json`.
+1. Open **Setup → Coding agents**. Hagency detects Codex and its sign-in, then writes and validates `fleet-runtime.json`. Use **Check again** after installing or signing in to Codex. Follow the restart notice if Codex's executable changed.
+2. Under **Connect Palpo**, click **New server engagement**. Enter the HTTPS Matrix server address, the resource owner's full Matrix ID, the coordinator's full Matrix ID, a connection name and delegation duration. Use existing accounts on that server. Leave **Separate Palpo address** blank unless the administrator supplies a separate operations address.
+3. Click **Request connection**. In Rinx, the resource owner opens **Palpo → Inbox** and confirms the request. The server administrator then approves it in their own Inbox. Hagency receives the approved configuration automatically; no JSON download or import is needed for this flow.
+4. In the resource owner's Rinx Inbox, open the approved request and click **Verify connection** once. The button is disabled while verification runs; wait for **Connection verified** in Rinx and Hagency.
+5. Open **My resources → New resource configuration**. Choose the verified engagement and an existing local **Source configuration**, then choose the model, reasoning effort, monthly token budget and eligible project managers. Click **Create resource**. The source supplies the framework, provider and account; it is not an agent, project or role. The [quick start](docs/user-guide/README.md#step-5-create-a-resource) covers the fields and the first-source prerequisite.
 
-1. **Coding agents.** Hagency finds Codex on the service's `PATH` and shows its path, its version and whether it is signed in.
-   - **Not installed:** install Codex, then click **Check again**.
-   - **Not signed in:** run `codex login` in a terminal on this machine, then click **Check again**.
-   - **Signed in:** nothing to click. When the page loads, Hagency writes and validates `fleet-runtime.json` with the defaults under [Configuration](#configuration). The first time, the fleet service picks it up within 5 s, without a restart. When the page rewrites the file after a Codex update, restart the service (see [After a Codex update](#operating)).
-   - The step shows how Codex is signed in: a ChatGPT plan or an API key. With a plan, it notes that plan sign-ins are meant for personal use, and suggests an API key before you offer the agent to other people. It does not block.
-2. **Connect Palpo.**
-   1. In Palpo web, the Palpo admin runs **Add Hagency**.
-   2. In Palpo web, sign in with the account that owns this Hagency. Open **My Hagency access** and click **Download Hagency configuration**.
-   3. In this step, pick the file, enter the homeserver's Matrix address and click **Connect**. The Palpo transport starts without a restart. One Hagency runs one Palpo fleet.
-   4. In Palpo web, click **Verify connection & create reception**. The fleet service then creates the fleet's representative device and keys. The approval bot gets one device per owner, created when the fleet service first prepares that owner's approved agent (once the owner has a cross-signing key).
+Create additional resources through that same entry. Each resource has one budget for its engagement; do not allocate it again on the connection page. **Edit configuration** updates an existing resource. A budget cannot fall below consumed or reserved tokens, and an in-use resource may prevent model changes.
 
-   The same import is also under **Project sides → Connect a Palpo project server**.
-3. **Offer a resource.** This step needs step 1.
-   1. Choose a **Model**. The list holds only the model and reasoning pairs Hagency qualifies ([role-capacity.json](native/hagency-core/role-capacity.json)). For Codex these are `gpt-5.6-sol` with `low`, `medium` or `high`.
-   2. Set the **Monthly token ceiling**. The default is 20,000,000.
-   3. Click **Offer to Palpo**.
+### 6. Request a project and an agent in Rinx
 
-   Hagency creates the resource on the seat of your Codex sign-in and publishes it. Palpo receives it within 15 s, and projects can define agents on it. Offer more models in the same step. Edit or withdraw resources under **My resources**.
+1. As an eligible project manager, open **Palpo → Resources → Request project here**. Name the project and describe its purpose. Let Palpo create a room or choose an eligible existing room: a private, unencrypted room you created.
+2. The engagement's coordinator approves the project in **Palpo → Inbox**. Wait for project setup to complete.
+3. Under **Palpo → Projects**, click **Request agent**, choose the resource and role, and enter the agent name, initial tokens and daily rate. The coordinator reviews and approves or rejects the requested allocation in their Inbox.
+4. Follow the request's execution status. **Approved** records the decision. Accept the agent's DM invitation when it appears, then wait for **ready** before sending a message without an @mention. In the project room, @mention the agent.
 
-### 6. Approve agents
-
-Projects define agents on your resources in Palpo web. Approve each request under **Engagements**. The agent joins the project room when provisioning completes. The [user guide](docs/user-guide/README.md#work-with-an-agent-owner-and-guest) describes how owners and guests work with an agent.
-
-Everything after setup happens in the console.
+The [quick start and user guide](docs/user-guide/README.md) explains encryption, operational approvals, top-ups and setup failures. Hagency's **Engagements** page is for inspecting runtime and allocation state; coordinator decisions happen in Rinx.
 
 ## Set up from the command line
 
-Use these for automation, recovery and coordinator installs. The setup above needs none of them.
+Use these for automation, recovery and existing coordinator installs. A fresh installation also needs the one-time local source configuration described under [Create a resource with the operator API](#create-a-resource-with-the-operator-api).
 
 ### Service modes
 
 | Mode | Use it for | How it runs | Configuration |
 | --- | --- | --- | --- |
-| Fleet (default, recommended) | An imported Palpo fleet, with no coordinator agent (ADR-187) | `hagency start`, or `serve --palpo-transport` | `fleet-runtime.json`, written by the Setup page or `hagency setup`, plus the files the console import writes |
+| Fleet (default, recommended) | Server engagements with automatic agent provisioning | `hagency start`, or `serve --palpo-transport` | `fleet-runtime.json`, written by Setup or `hagency setup`, plus each engagement's installed connection configuration |
 | Coordinator | Existing installs that run a coordinator agent | `serve --agent-driver --palpo-transport` | `agent-driver.json` and its `matrix.*` and `approval.*` files |
 
-`--agent-driver` and `--development-driver` are mutually exclusive. Without `--palpo-transport`, a console import is saved and starts on the next start with the flag, and the Setup page reports a coordinator install (`applicable: false`) and offers no steps. `serve` serves the embedded console when the binary has one; `--console-assets` overrides it.
+`--agent-driver` and `--development-driver` are mutually exclusive. Palpo delivery requires `--palpo-transport`; an installed configuration alone does not start that transport. Existing coordinator-mode installs configure their runtime in `agent-driver.json`, while Setup still exposes server association and resource links. `serve` serves the embedded console when the binary has one; `--console-assets` overrides it.
 
 ### Prepare a state directory with `hagency setup`
 
@@ -270,7 +263,7 @@ hagency setup --state-dir /abs/path/state
 - initializes the directory as `hagency init` does when it is new or empty. It refuses a non-empty directory that has no `operator.token`.
 - finds the Codex binary: `--codex PATH`, or else `codex` on `PATH`. If that is the npm launcher script, setup uses the native binary that the npm package ships beside it.
 - finds the Codex sign-in folder: `--codex-home DIR`, or else `$CODEX_HOME`, or else `~/.codex`. The folder must exist; if it does not, setup asks you to run `codex login` first. With `--no-local-codex`, setup does not look for this folder, so no `~/.codex` is needed: agents sign in to `<state>/runtime-home` instead, setup reports that folder, and the file gets no `local_codex` block.
-- creates `<state>/agent-homes` and writes `fleet-runtime.json` with mode 0600 and the defaults listed under [Configuration](#configuration).
+- creates `<state>-agent-homes` and writes `fleet-runtime.json` with mode 0600 and the defaults listed under [Configuration](#configuration).
 - validates the file with the same loader `serve` uses. A file that fails is renamed to `fleet-runtime.json.rejected`, so the service never starts on it.
 - refuses to replace an existing `fleet-runtime.json` unless you pass `--force`. With `--force`, it keeps the old file as `fleet-runtime.json.bak-<seconds>`. A running service keeps the configuration it loaded at start, so restart it to use the new file.
 
@@ -340,7 +333,9 @@ install/install-native.sh --mode coordinator \
 
 ### Create a resource with the operator API
 
-The Setup page's **Offer to Palpo** uses the same writer as this call. Replace the state directory, and the listen address if you changed it from the default `127.0.0.1:13300`:
+The resource wizard currently needs an existing source configuration. On a fresh state directory, **Setup** configures the Codex runtime but does not create this source. Use the operator API once to create a local Codex source, then create engagement resources through **New resource configuration**. This is an onboarding prerequisite, not an additional engagement token pool.
+
+Replace the state directory and, if changed, the default listen address. This example uses the preset and seat written by `hagency setup` and keeps the source out of the published catalog:
 
 ```bash
 curl -s -X POST http://127.0.0.1:13300/api/native/v1/resources \
@@ -348,13 +343,13 @@ curl -s -X POST http://127.0.0.1:13300/api/native/v1/resources \
   -H 'Content-Type: application/json' \
   -d '{"presetId":"local_codex","seatId":"local_codex_seat","framework":"codex",
        "model":"gpt-5.6-sol","provider":"openai","reasoning":"medium",
-       "ceiling":{"tokens":20000000,"period":"monthly"},"published":true}'
+       "ceiling":{"tokens":20000000,"period":"monthly"},"published":false}'
 ```
 
-With install-native.sh on Linux, only root can read `operator.token`. Use a root shell (`sudo -s`): with `sudo curl …`, the `$(cat …)` still runs as you and cannot read the token. No seat has to be registered first. The answer is the resource's public catalog entry.
+With install-native.sh on Linux, only root can read `operator.token`. Use a root shell (`sudo -s`): with `sudo curl …`, the `$(cat …)` still runs as you and cannot read the token. No seat has to be registered first. The response is the saved resource configuration.
 
-- **Qualified pairs only.** Palpo sees a resource only if its `model` and `reasoning` form a pair qualified for at least one role in [native/hagency-core/role-capacity.json](native/hagency-core/role-capacity.json). Any other pair is stored, but not published. The Setup page offers qualified pairs only.
-- **Matching the login.** With `local_codex`, `seatId` must equal `local_codex.seat`, `framework` must be `codex`, and `provider` must be `openai` or left out. Setup writes the preset `local_codex` and the seat `local_codex_seat`, which the example uses. The API does not check the match. A mismatched resource is accepted and published, but its agents are refused when Hagency provisions them, after the operator approves.
+- **Qualified pairs only.** Palpo sees a resource only if its `model` and `reasoning` form a pair qualified for at least one role in [native/hagency-core/role-capacity.json](native/hagency-core/role-capacity.json). Any other pair is stored, but not published. The resource wizard offers qualified pairs only.
+- **Matching the login.** With `local_codex`, `seatId` must equal `local_codex.seat`, `framework` must be `codex`, and `provider` must be `openai` or left out. Setup writes the preset `local_codex` and the seat `local_codex_seat`, which the example uses. The API does not check the match; a mismatched resource cannot provision an agent even if a request is approved.
 
 ## Operating
 
@@ -410,7 +405,7 @@ The service reads no environment file. Its configuration is the files in its sta
 | --- | --- |
 | `operator.token` | Operator bearer secret, created by `hagency init` |
 | `fleet-runtime.json` | Codex runtime settings for an imported fleet, described below. Written by the Setup page or `hagency setup`. |
-| `agent-homes/` | The agents' home directories (`home.root` as `hagency setup` writes it) |
+| `<state>-agent-homes/` (sibling directory) | The agents' home directories, outside credential/SDK state (`home.root` as `hagency setup` writes it) |
 | `palpo-transport.json`, `palpo.machine_token`, `palpo-appservice.json` | Written by the Palpo import |
 | `representative.identity.json`, `matrix.representative_token`, `matrix.appservice_token`, `matrix.provisioning_key` | The fleet's representative and provisioning credentials. The fleet service creates them once. |
 | `approval-<owner>.*`, `approval-sdk-<owner>/` | One approval-bot device per owner: its record, token, identity and key files, and its SDK store. `<owner>` is a slug derived from the owner's Matrix ID. Created when the fleet service first prepares that owner's approved agent (once the owner has a cross-signing key). |
@@ -429,7 +424,7 @@ The Setup page and `hagency setup` write `fleet-runtime.json` and validate it wi
 - `executable` and `executable_sha256`: the Codex binary it found, and its hash;
 - `file_limit` 4194304 (4 MiB), `operation_ms` 300000, `response_ms` 2000, `approval_owner_wait_ms` 180000, `idle_ms` 1200000;
 - `send_file` and `receive_file` `true`;
-- `home`: `root` is `<state>/agent-homes`, `task_client` is the running `hagency` binary, `projects` is `[]`;
+- `home`: `root` is `<state>-agent-homes`, `task_client` is the running `hagency` binary, `projects` is `[]`;
 - `local_codex`, unless you pass `--no-local-codex`: preset `local_codex`, seat `local_codex_seat`, `home` set to your `HOME`, `codex_home` set to the Codex sign-in folder (`$CODEX_HOME`, or `~/.codex`; the Setup page always uses this default, `hagency setup --codex-home` chooses another).
 
 To change a value, edit the file (keep mode 0600) and restart the service, or run `hagency setup --state-dir <state> --force` with other options.
@@ -486,7 +481,7 @@ What `hagency setup` writes, with each `/srv/hagency/...` path standing in for t
   "approval_owner_wait_ms": 180000,
   "idle_ms": 1200000,
   "home": {
-    "root": "/srv/hagency/state/agent-homes",
+    "root": "/srv/hagency/state-agent-homes",
     "task_client": "/srv/hagency/bin/hagency",
     "projects": []
   }

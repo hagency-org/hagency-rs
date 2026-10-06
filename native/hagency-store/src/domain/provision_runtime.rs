@@ -24,6 +24,16 @@ pub struct OwnedProvisionScope {
     pub(super) account: Option<accounts::Association>,
     owner: Arc<()>,
     claimed: Arc<AtomicBool>,
+    runtime_live: Arc<AtomicBool>,
+}
+/// Exclusive live runtime custody. Cloned bindings share this guard; the next
+/// attachment is admitted only after all original workers and bindings drop it.
+/// This does not reset the one-shot warm initialization claim.
+pub struct OwnedRuntimeLease(Arc<AtomicBool>);
+impl Drop for OwnedRuntimeLease {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 impl OwnedProvisionScope {
     pub fn resource(&self) -> &Resource {
@@ -40,6 +50,12 @@ impl OwnedProvisionScope {
             return Err(Error::Busy);
         }
         Ok(())
+    }
+    pub fn claim_runtime(&self) -> Result<Arc<OwnedRuntimeLease>, Error> {
+        if self.runtime_live.swap(true, Ordering::AcqRel) {
+            return Err(Error::Busy);
+        }
+        Ok(Arc::new(OwnedRuntimeLease(self.runtime_live.clone())))
     }
     pub(crate) fn queue_value(&self) -> impl Serialize + '_ {
         (
@@ -209,7 +225,57 @@ impl DomainRepository {
         effect: &Effect,
         registration: &Registration,
     ) -> Result<OwnedProvisionScope, Error> {
-        self.validate_provision_account(effect, registration)?;
+        self.provision_scope_at(effect, registration, false)
+    }
+    /// Mint inspection custody only. Runtime authorization still rejects the
+    /// uncertain effect until the original Matrix artifacts have been checked.
+    pub fn inspect_provision_scope(
+        &mut self,
+        effect: &Effect,
+        registration: &Registration,
+    ) -> Result<OwnedProvisionScope, Error> {
+        self.provision_scope_at(effect, registration, true)
+    }
+    pub fn resume_inspected_provision(&mut self, scope: &OwnedProvisionScope) -> Result<(), Error> {
+        if !Arc::ptr_eq(&scope.owner, &self.approval_owner)
+            || scope.claimed.load(Ordering::Acquire)
+            || scope.runtime_live.load(Ordering::Acquire)
+        {
+            return Err(Error::RunnerAuthority);
+        }
+        self.validate_recoverable_provision(&scope.effect, &scope.registration)?;
+        if self.warm_scopes.len() >= 16 {
+            return Err(Error::Capacity);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute("UPDATE effects SET state='started',outcome_digest=NULL WHERE id=?1 AND fence=?2 AND state='uncertain'",
+            rusqlite::params![scope.effect.id, scope.effect.fence])?;
+        if changed != 1 {
+            return Err(Error::State);
+        }
+        current(&tx, scope, &self.accounts, &self.approval_owner, false)?;
+        let result = json!({"effectId":scope.effect.id,"fence":scope.effect.fence,"checkpoint":"enrolled_before_owner_invite"});
+        let digest = canonical::transport_digest(&result)?;
+        tx.execute("INSERT OR IGNORE INTO decisions(id,digest,result,kind,at) VALUES(?1,?2,?3,'resume_enrolled_provision',?4)",
+            rusqlite::params![format!("provision_recovery_{digest}"), digest, result.to_string(), super::graphs::now_ms()?])?;
+        tx.commit()?;
+        self.warm_scopes
+            .insert(scope.effect.id.clone(), scope.clone());
+        Ok(())
+    }
+    fn provision_scope_at(
+        &mut self,
+        effect: &Effect,
+        registration: &Registration,
+        recovering: bool,
+    ) -> Result<OwnedProvisionScope, Error> {
+        if recovering {
+            self.validate_recoverable_provision(effect, registration)?;
+        } else {
+            self.validate_provision_account(effect, registration)?;
+        }
         let resource: Resource = serde_json::from_value(
             effect
                 .payload
@@ -242,7 +308,19 @@ impl DomainRepository {
             resource,
             owner: self.approval_owner.clone(),
             claimed: Arc::new(AtomicBool::new(false)),
+            runtime_live: Arc::new(AtomicBool::new(false)),
         };
+        if recovering {
+            let actual = read_resource(&tx, &scope.resource.id())?;
+            if canonical::transport_digest(&runtime_identity(&actual))?
+                != canonical::transport_digest(&runtime_identity(&scope.resource))?
+            {
+                return Err(Error::Unqualified);
+            }
+            self.accounts.check_resource(&tx, &scope.resource)?;
+            tx.commit()?;
+            return Ok(scope);
+        }
         current(&tx, &scope, &self.accounts, &self.approval_owner, false)?;
         tx.commit()?;
         if let Some(known) = self.warm_scopes.get(&effect.id) {
@@ -283,6 +361,7 @@ impl DomainRepository {
             resource,
             owner: self.approval_owner.clone(),
             claimed: Arc::new(AtomicBool::new(false)),
+            runtime_live: Arc::new(AtomicBool::new(false)),
         };
         current(&tx, &scope, &self.accounts, &self.approval_owner, true)?;
         tx.commit()?;
@@ -303,21 +382,30 @@ impl DomainRepository {
     /// Engagements this service's inline factory completed and that are still
     /// Active, in id order. An engagement another path provisioned (an adopted
     /// coordinator or approval account) is not listed.
-    pub fn inline_factory_engagements(&mut self) -> Result<Vec<String>, Error> {
+    pub fn inline_factory_engagements(
+        &mut self,
+        registration: &Registration,
+    ) -> Result<Vec<String>, Error> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = tx
             .prepare(
                 "SELECT e.id FROM engagements e JOIN effects f ON f.engagement_id=e.id \
-                 WHERE e.state='active' AND f.kind='provision' AND f.state='complete' \
+                 WHERE e.fleet_id=?1 AND e.generation=?2 \
+                 AND e.state='active' AND f.kind='provision' AND f.state='complete' \
                  ORDER BY e.id",
             )?
-            .query_map([], |r| r.get::<_, String>(0))?
+            .query_map(
+                rusqlite::params![registration.fleet_id, registration.generation],
+                |r| r.get::<_, String>(0),
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         let mut found = Vec::new();
         for id in ids {
-            if inline_factory_snapshot(&tx, &id)?.is_some() {
+            if inline_factory_snapshot(&tx, &id)?
+                .is_some_and(|(_, actual, _)| &actual == registration)
+            {
                 found.push(id);
             }
         }
