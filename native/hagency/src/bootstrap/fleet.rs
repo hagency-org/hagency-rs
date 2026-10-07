@@ -608,18 +608,22 @@ impl Service {
         loop {
             tokio::select! {biased;_ = cancel.cancelled()=>return Ok(()),_ = tick.tick()=>{}}
             self.reconcile_awaiting_owners();
-            let next = self
-                .provider
-                .take_next()
-                .map_err(|_| Failure::OutcomeUnknown);
-            match next {
+            match self.provider.take_next() {
                 Ok(Some(agent)) => {
-                    self.admit(agent, notices.clone(), false).await?;
+                    let engagement = agent.session().engagement_id.clone();
+                    if let Err(error) = self.admit(agent, notices.clone(), false).await {
+                        tracing::error!(%engagement, ?error, "a provisioned agent could not be admitted; the fleet service stops");
+                        return Err(error);
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        "the agent factory refused the next agent; the fleet service stops"
+                    );
                     self.routes.failed.store(true, Ordering::Release);
-                    return Err(error);
+                    return Err(Failure::OutcomeUnknown);
                 }
             }
         }
