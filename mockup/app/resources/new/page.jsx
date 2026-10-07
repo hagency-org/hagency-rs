@@ -120,7 +120,15 @@ function WizardForm({ native = null }) {
     (async () => {
       const rows = []; let after = '';
       do { const page = await fetchServerEngagements(after); rows.push(...page.engagements); after = page.nextCursor; } while (after);
-      if (active) { setServerEngagements(rows); setEngagementsLoaded(true); }
+      if (active) {
+        setServerEngagements(rows); setEngagementsLoaded(true);
+        // The setup wizard carries only an identity, never authority. Recheck
+        // the current backend observation before selecting it for the user.
+        const requested = new URLSearchParams(window.location.search).get('server_engagement_id');
+        if (!native.editing && rows.some(row => row.id === requested && row.state === 'verified' && row.delegationExpiresAtMs > Date.now())) {
+          setDraft(old => old.serverEngagementId ? old : { ...old, serverEngagementId: requested });
+        }
+      }
     })().catch(e => { if (active) setEngagementError(e.message); });
     return () => { active = false; };
   }, [!!native]);
@@ -411,6 +419,9 @@ function WizardForm({ native = null }) {
           {native && <div className="field"><label htmlFor="configuration-managers">{t('se.managers')}</label>
             <textarea id="configuration-managers" value={draft.managers} onChange={e => set({ managers: e.target.value })} />
             <p>{t('nc.managersHelp')}</p>
+            {engagement && managers.includes(engagement.coordinatorMxid) && <p role="status" className="notice" data-coordinator-manager>
+              {t(engagement.allowSelfApproval ? 'nc.coordinatorCanSelfApprove' : 'nc.coordinatorCannotSelfApprove')}
+            </p>}
           </div>}
           <div className={native ? "field" : "field-row"}>
             <label htmlFor="wz-tokens">{t('wz.monthlyTokens')}</label>

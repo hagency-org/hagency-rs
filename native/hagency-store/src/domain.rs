@@ -1359,6 +1359,21 @@ impl DomainRepository {
     pub fn put_resource(&mut self, resource: &Resource) -> Result<CatalogResource, Error> {
         self.edit_resource(resource, Some(resource.published))
     }
+    /// Create a local source without advertising it or replacing a concurrent
+    /// operator's configuration. Publication and server allocation are separate.
+    pub fn create_resource_source(
+        &mut self,
+        resource: &Resource,
+    ) -> Result<CatalogResource, Error> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let resource = prepare_resource_write(&tx, resource, Some(false), true)?;
+        self.accounts.check_resource(&tx, &resource)?;
+        write_resource_configuration(&tx, &resource, true)?;
+        tx.commit()?;
+        Ok(resource.catalog())
+    }
     pub fn edit_resource(
         &mut self,
         resource: &Resource,

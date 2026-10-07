@@ -22,11 +22,21 @@ pub(super) fn router() -> Router {
     )
 }
 pub(super) fn selection_query(req: &Request) -> Result<(), Error> {
-    query(req, &["resource_id", "source_resource_id"], 192)?;
+    query(
+        req,
+        &["resource_id", "source_resource_id", "server_engagement_id"],
+        384,
+    )?;
     let resource = req.query::<String>("resource_id");
     let source = req.query::<String>("source_resource_id");
-    if resource.is_some() && source.is_some() {
+    let engagement = req.query::<String>("server_engagement_id");
+    if resource.is_some() && (source.is_some() || engagement.is_some()) {
         return Err(Error::Invalid);
+    }
+    // The document may carry a selection hint from setup. It grants nothing;
+    // both the live read and the allocation writer still check authority.
+    if let Some(id) = engagement {
+        identifier(&id, 128).map_err(|_| Error::Invalid)?;
     }
     if let Some(id) = resource.or(source) {
         identifier(&id, 128).map_err(|_| Error::Invalid)?;

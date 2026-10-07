@@ -1777,3 +1777,79 @@ div[data-engagement-id] > section:nth-last-child(-n+2) { grid-column: auto; }
 /* Placeholder words read as placeholders. */
 .main td[data-tone="none"], .main dd:empty { color: var(--ink-faint); }
 @media (max-width: 1600px) and (min-width: 761px) { .main table.roster th:nth-child(6), .main table.roster td:nth-child(6) { display: none; } }
+
+/* Guided connection: the current task stays beside its server/account context. */
+.setup-progress { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 24px 0; }
+.setup-progress button { font: inherit; text-align: left; color: var(--ink); background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 16px; display: grid; grid-template-columns: 28px 1fr; gap: 4px 8px; cursor: pointer; }
+.setup-progress button[aria-current] { border-color: var(--accent); background: var(--accent-soft); }
+.setup-progress button > span { grid-row: span 2; border: 1px solid var(--line-strong); border-radius: 50%; height: 26px; width: 26px; display: grid; place-items: center; }
+.setup-progress small { color: var(--ink-2); }
+.setup-progress .complete { color: var(--ok); background: var(--ok-soft); }
+.setup-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 24px; align-items: start; }
+.setup-workspace > * { min-width: 0; }
+.setup-stage { padding: 24px; margin-bottom: 16px; }
+.setup-stage h2 { font-size: 20px; margin: 0 0 8px; }
+.setup-stage p { margin: 8px 0 16px; overflow-wrap: anywhere; }
+.setup-stage .btn-row { gap: 8px; flex-wrap: wrap; margin-top: 24px; }
+.setup-workspace .btn { min-height: 44px; white-space: normal; display: inline-flex; align-items: center; justify-content: center; }
+.setup-context { padding: 24px; }
+.setup-context h2 { font-size: 16px; margin: 0 0 16px; }
+.setup-context dt, .association-review dt { color: var(--ink-2); font-size: 12px; }
+.setup-context dd, .association-review dd { margin: 4px 0 16px; overflow-wrap: anywhere; }
+.setup-agent { border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin: 16px 0; background: var(--page); }
+.setup-agent h3 { margin: 0 0 8px; font-size: 16px; }
+.setup-agent code { overflow-wrap: anywhere; }
+.setup-source-form, .association-form, .association-form fieldset { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px; }
+.association-form fieldset { border: 0; padding: 0; margin: 0; min-width: 0; background: transparent; }
+.setup-source-form label, .association-form label { display: grid; gap: 8px; }
+.setup-source-form input, .setup-source-form select, .association-form input, .association-form select { min-width: 0; width: 100%; min-height: 44px; font: inherit; color: var(--ink); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 8px 12px; }
+.association-steps { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 16px 0; padding: 0; }
+.association-steps li { padding: 8px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); color: var(--ink-2); }
+.association-steps li[aria-current] { color: var(--ink); border-color: var(--accent); }
+.association-steps li.complete { color: var(--ok); background: var(--ok-soft); }
+.association-status { border-top: 1px solid var(--line-strong); padding-top: 24px; margin-top: 24px; }
+.association-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+.association-heading h3 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.association-address { color: var(--ink-2); }
+.association-review { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; margin: 16px 0; }
+.association-review > div { min-width: 0; }
+.setup-handoff { padding-left: 24px; }
+.setup-handoff li { padding: 8px 0 16px 8px; }
+@media (max-width: 960px) { .setup-workspace { grid-template-columns: minmax(0, 1fr); } .setup-context dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px 16px; } .setup-context dd { margin: 0; } }
+@media (max-width: 640px) { .setup-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .setup-progress button { padding: 12px; } .setup-stage, .setup-context { padding: 16px; } .association-review { grid-template-columns: minmax(0, 1fr); } }
+
+.setup-workspace.without-context { grid-template-columns: minmax(0, 1fr); max-width: 800px; }
+.setup-stage .dim, .setup-stage .note, .setup-context .dim { color: var(--ink-2); margin-left: 0; }
+.setup-stage .association-review { margin: 0; }
+.association-form fieldset > p, .association-form fieldset > h3 { margin: 0; }
+.association-form .btn-row { margin-top: 8px; }
+.association-form fieldset { gap: 16px; }
+.setup-stage .association-review dd { margin-bottom: 8px; }
+.setup-stage .association-review dt { color: var(--ink-2); }
+@media (max-width: 640px) { .setup-progress { margin: 16px 0; } }
+
+.setup-progress button { min-height: 52px; align-items: center; }
+.setup-progress button > span { grid-row: auto; }
+.setup-progress button > small { grid-column: 2; }
+.setup-workspace .field-help { color: var(--ink-2); font-size: 13px; line-height: 1.55; font-weight: 400; }
+
+.setup-workspace .btn { padding-left: 16px; padding-right: 16px; }
+.association-form input, .association-form select { padding-left: 16px; padding-right: 16px; }
+.association-steps li { padding-left: 16px; padding-right: 16px; }
+
+/* The shell already supplies the vertical gap; avoid doubling it in the wizard. */
+.setup-progress { margin: 0; }
+.setup-stage .association-form { gap: 16px; }
+.association-form .association-steps { margin: 0; }
+.setup-stage .association-form label { font-weight: 600; }
+.setup-stage .association-form input, .setup-stage .association-form select { font-size: 14px; font-weight: 400; }
+.setup-workspace .field-help { font-size: 14px; }
+@media (max-width: 640px) {
+  .association-form .btn-row { display: grid; grid-template-columns: 1fr 1fr; }
+  .association-form .btn-row > .primary { grid-column: 1 / -1; }
+}
+
+.resource-capacity { display: grid; gap: 8px; margin: 8px 0; min-width: 160px; }
+.resource-capacity b { font-size: 16px; font-variant-numeric: tabular-nums; }
+.resource-capacity b span, .resource-capacity small { font-size: 13px; color: var(--ink-2); font-weight: 400; }
+.resource-capacity .meter { width: 100%; max-width: 320px; }

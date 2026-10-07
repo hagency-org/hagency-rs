@@ -166,6 +166,10 @@ async fn native_console_resource_configuration_observations() {
     for query in [
         "resource_id=x&source_resource_id=y",
         "source_resource_id=x&source_resource_id=y",
+        "server_engagement_id=x&server_engagement_id=y",
+        "server_engagement_id=",
+        "resource_id=x&server_engagement_id=y",
+        "server_engagement_id=bad%2Fid",
         "unknown=x",
     ] {
         assert_eq!(
