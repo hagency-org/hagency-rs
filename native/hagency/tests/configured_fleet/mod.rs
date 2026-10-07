@@ -644,7 +644,9 @@ impl Fixture {
         let backends = 1 + self.peer.agents.len();
         let read = async {
             let token = fs::read_to_string(self.state.join("operator.token")).unwrap();
-            let until = tokio::time::Instant::now() + Duration::from_secs(10);
+            // Harness patience, not a product budget: admission ends after the
+            // profile claim, later than the route this used to wait for.
+            let until = tokio::time::Instant::now() + Duration::from_secs(60);
             loop {
                 let response = client
                     .get(format!(
@@ -659,7 +661,18 @@ impl Fixture {
                 let snapshot: Value =
                     serde_json::from_str(&response.text().await.unwrap()).unwrap();
                 assert_eq!(snapshot["factory_service"]["failed"], false);
-                if snapshot["factory_service"]["registered_backends"] == backends {
+                // A backend is registered before its agent's profile claim,
+                // so registered is not admitted: wait until every driver has
+                // left `prepared`. A step that changes the agent's local Codex
+                // folder before then fails that agent's admission instead.
+                let admitted = snapshot["factory_service"]["agents"]
+                    .as_array()
+                    .is_some_and(|agents| {
+                        agents
+                            .iter()
+                            .all(|agent| agent["status"]["state"] != "prepared")
+                    });
+                if snapshot["factory_service"]["registered_backends"] == backends && admitted {
                     break;
                 }
                 assert!(tokio::time::Instant::now() < until);
