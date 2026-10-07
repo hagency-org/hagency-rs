@@ -10,6 +10,32 @@ fn resource() -> Resource {
     serde_json::from_value(json!({"presetId":"private_preset","seatId":"private_account","framework":"codex","model":"gpt-5.6-sol","reasoning":"medium","ceiling":{"tokens":1000,"period":"monthly"}})).unwrap()
 }
 #[test]
+fn setup_source_stays_private_and_cannot_replace_existing_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let mut db = DomainRepository::open(&root.path().join("state")).unwrap();
+    let original = resource();
+    db.create_resource_source(&original).unwrap();
+    assert!(db.catalog("", 16).unwrap().is_empty());
+    let saved = db.resource_configuration(&original.id()).unwrap();
+    assert!(!saved.published);
+    let mut changed = original.clone();
+    changed.ceiling.as_mut().unwrap().tokens = Some(5000.try_into().unwrap());
+    assert!(matches!(
+        db.create_resource_source(&changed),
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        db.create_resource_source(&original),
+        Err(Error::Conflict)
+    ));
+    let after = db.resource_configuration(&original.id()).unwrap();
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(saved).unwrap()
+    );
+    assert_eq!(db.resource_configurations("", 16).unwrap().len(), 1);
+}
+#[test]
 fn native_resource_publication_cas() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");

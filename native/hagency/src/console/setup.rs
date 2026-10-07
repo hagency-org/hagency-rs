@@ -84,6 +84,14 @@ async fn report(
             .unwrap_or(0),
         None => 0,
     };
+    let sources = match domain {
+        Some(store) => store
+            .resource_configurations(String::new(), 64)
+            .await
+            .map(|rows| rows.len())
+            .unwrap_or(0),
+        None => 0,
+    };
     let mut value = json!({
         "ok": true,
         "applicable": live.fleet_address().is_some(),
@@ -97,6 +105,7 @@ async fn report(
         "offer": {
             "choices": codex_choices(),
             "resources": resources,
+            "sourceResources": sources,
         },
     });
     if let Some(result) = configured_now {
@@ -197,9 +206,8 @@ struct Offer {
     tokens: Option<u64>,
 }
 
-/// ADR-189 step 3: create and publish a resource for the configured coding
-/// agent, through the same writer as the operator API, with the runtime's
-/// seat and only a qualified model and reasoning pair.
+/// Prepare the first local source. It is not published and has no server
+/// allocation until the operator reviews a resource configuration separately.
 #[handler]
 async fn offer(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     if !check_lifecycle(depot, res) {
@@ -248,19 +256,22 @@ async fn offer(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         "provider": "openai",
         "reasoning": input.reasoning,
         "ceiling": {"tokens": tokens, "period": "monthly"},
-        "published": true,
+        "published": false,
     }));
     let Ok(resource) = resource else {
         refusal(res, StatusCode::BAD_REQUEST, "invalid_domain_command");
         return;
     };
-    let result = store.edit_resource(resource, Some(true)).await;
+    let result = store.create_resource_source(resource).await;
     if let Err(error) = recheck(depot) {
         failed(res, error);
         return;
     }
     match result {
         Ok(resource) => res.render(Json(json!({"ok": true, "resource": resource}))),
+        Err(hagency_store::Error::Conflict) => {
+            refusal(res, StatusCode::CONFLICT, "setup_source_exists")
+        }
         Err(_) => refusal(res, StatusCode::BAD_REQUEST, "setup_resource_refused"),
     }
 }

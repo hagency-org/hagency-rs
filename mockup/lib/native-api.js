@@ -859,16 +859,19 @@ export async function fetchResources(selected, after = '') {
   for (const r of list.resources) remember(r.id, [r.framework, r.model, r.reasoning].filter(Boolean).join(' · '));
   const editor = chosen === null ? null : validateConfiguration(await request(`/api/resources/${chosen}/configuration`), chosen);
   const coordinatorResources = (await fetchServerEngagements()).engagements.length > 0;
-  const engagementResources = [];
-  for (const fleet of new Set(editor?.resource.engagementResources.map(g => g.serverEngagementId) ?? [])) {
+  const resourceCapacities = [];
+  const displayed = new Set([...list.resources.map(r => r.id), chosen]);
+  const bindings = [...list.resources.flatMap(r => r.engagementResources), ...(editor?.resource.engagementResources ?? [])];
+  for (const fleet of new Set(bindings.map(g => g.serverEngagementId))) {
     let after = '';
     do {
       const page = await fetchEngagementResources(fleet, after);
-      engagementResources.push(...page.resources.filter(g => g.resourceId === chosen));
+      resourceCapacities.push(...page.resources.filter(g => displayed.has(g.resourceId)));
       after = page.nextCursor;
     } while (after);
   }
-  return { ...list, selected: chosen, budget, editor, engagementResources, coordinatorResources, resourceConsole: true };
+  const engagementResources = resourceCapacities.filter(g => g.resourceId === chosen);
+  return { ...list, selected: chosen, budget, editor, engagementResources, resourceCapacities, coordinatorResources, resourceConsole: true };
 }
 export async function publishResource(resource, published) {
   const value = await request(`/api/resources/${resource.id}/publication`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: resource.revision, published }) });
@@ -880,7 +883,12 @@ export function configurationView(location) { return /^\/console\/resources\/new
 export function configurationSelection(location) {
   const query = new URLSearchParams(location.search);
   const edit = query.has('resource_id');
-  return { mode: edit ? 'edit' : 'create', id: selection(location, edit ? 'resource_id' : 'source_resource_id') };
+  const engagements = query.getAll('server_engagement_id');
+  if (engagements.length > 1 || (engagements.length && (edit || !id(engagements[0])))) throw new Error('invalid_selection');
+  // This is a UI selection hint, not an allocation grant. The form rechecks
+  // it against the current verified, unexpired server-engagement read.
+  query.delete('server_engagement_id');
+  return { mode: edit ? 'edit' : 'create', id: selection({ search: query.toString() }, edit ? 'resource_id' : 'source_resource_id') };
 }
 export function validateConfiguration(value, selected) {
   if (!object(value, ['resource', 'choices', 'modelTier', 'modelRoles']) || value.resource?.id !== selected

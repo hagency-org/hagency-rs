@@ -70,6 +70,12 @@ try {
     console.log(`VERIFIED ${config.resource}`);
   } else {
     await budget(config.resource); await ceiling(12345);
+    await page.locator('#configuration-managers').fill('@coordinator:example.test');
+    await page.locator('[data-coordinator-manager]').waitFor();
+    assert.match(await page.locator('[data-coordinator-manager]').innerText(), /cannot approve its own/);
+    await page.locator('#configuration-managers').fill('@owner:example.test');
+    assert.equal(await page.locator('[data-coordinator-manager]').count(), 0);
+
     await page.locator('#wz-tokens').fill('9007199254740992'); assert.equal(await page.getByRole('button', { name: 'Create resource', exact: true }).isEnabled(), false);
     await page.locator('#wz-tokens').fill('1e3'); assert.equal(await page.getByRole('button', { name: 'Create resource', exact: true }).isEnabled(), false);
     await page.locator('#wz-tokens').fill('12345');
@@ -79,6 +85,10 @@ try {
     assert.match(created, /^resource_[a-f0-9]{24}$/); assert.notEqual(created, config.resource); console.log(`CREATED ${created}`);
     if (process.env.HAGENCY_CONSOLE_SCREENSHOTS && !config.executable) { await mkdir(process.env.HAGENCY_CONSOLE_SCREENSHOTS, { recursive: true }); await page.screenshot({ path: join(process.env.HAGENCY_CONSOLE_SCREENSHOTS, 'console-configuration-en.png'), fullPage: true }); }
     await page.locator('[data-configuration-action="saved"] a').click(); await ready(); assert.equal(await page.locator('#native-resource').inputValue(), created);
+    const capacity = page.locator('[data-resource-id] [data-resource-capacity]').first();
+    assert.match(await capacity.innerText(), /12,345 \/ 12,345/);
+    assert.match(await page.locator(`[data-resource-row="${created}"] [data-resource-capacity]`).innerText(), /12,345 \/ 12,345/);
+    if (process.env.HAGENCY_CONSOLE_SCREENSHOTS) await page.screenshot({ path: join(process.env.HAGENCY_CONSOLE_SCREENSHOTS, 'resource-capacity-en.png'), fullPage: true });
     await page.getByRole('button', { name: '中文', exact: true }).click(); await page.getByRole('button', { name: '深色', exact: true }).click();
     await budget(created, true); await ceiling(22222); await save(true);
     assert.equal(await page.locator('html').getAttribute('lang'), 'zh-CN'); assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');

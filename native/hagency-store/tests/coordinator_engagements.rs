@@ -1379,3 +1379,51 @@ fn approved_project_setup_recovers_without_reapproval_and_fences_stale_attempts(
         "recovery cannot introduce another approval"
     );
 }
+
+#[test]
+fn catalog_capacity_tracks_agent_holds_without_duplicating_capability_budgets() {
+    let (_dir, mut db) = setup();
+    let read = |db: &DomainRepository| {
+        db.published_catalog(&publication_identity())
+            .unwrap()
+            .into_update()
+    };
+    let first = read(&db);
+    assert_eq!(
+        first["capabilities"]["resourceBudgets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        first["capabilities"]["resourceBudgets"][0]["remainingTokens"],
+        300
+    );
+    let (command, proof) = prepared(&mut db, "budget_agent", "BudgetAgent", 100);
+    db.approve_coordinated_agent(&command, &proof, 1000)
+        .unwrap();
+    let next = read(&db);
+    let row = &next["capabilities"]["resourceBudgets"][0];
+    assert_eq!(row["allocatedTokens"], 300);
+    assert_eq!(row["retainedTokens"], 100);
+    assert_eq!(row["remainingTokens"], 200);
+    assert!(row.get("eligibleManagers").is_none());
+    assert!(row.get("owner").is_none());
+    assert_eq!(
+        row["remainingTokens"],
+        db.server_engagement_resources(&registration().fleet_id, "", 50)
+            .unwrap()[0]["remainingTokens"]
+    );
+    db.put_coordinator_resource(&resource_grant(400, 2), 1001)
+        .unwrap();
+    let increased = read(&db);
+    assert_eq!(
+        increased["capabilities"]["resourceBudgets"][0]["revision"],
+        2
+    );
+    assert_eq!(
+        increased["capabilities"]["resourceBudgets"][0]["remainingTokens"],
+        300
+    );
+}

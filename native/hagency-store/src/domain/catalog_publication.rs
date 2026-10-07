@@ -108,11 +108,15 @@ impl DomainRepository {
         let mut offers: Vec<(String, Vec<Value>)> = qualification::roles()
             .map(|role| (role.to_owned(), Vec::new()))
             .collect();
+        let mut published = std::collections::BTreeSet::new();
         let mut after = String::new();
         loop {
             let page = self.catalog_for(Some(&current.fleet_id), &after, 100)?;
             let finished = page.len() < 100;
             for resource in page {
+                if !resource.roles.is_empty() {
+                    published.insert(resource.id.clone());
+                }
                 for (role, resources) in &mut offers {
                     if resource.roles.contains(role) {
                         if resources.len() == PER_ROLE {
@@ -132,7 +136,33 @@ impl DomainRepository {
             .filter(|(_, resources)| !resources.is_empty())
             .map(|(role, resources)| json!({"role":role,"published":true,"resources":resources}))
             .collect();
-        let body = json!({"heartbeat":true,"capabilities":{
+        // Publish the same allocation headroom as the operator console. An
+        // agent that has ended still retains capacity until usage is settled.
+        // Scope by this registration and omit managers/other private grant data.
+        let mut budgets = Vec::new();
+        if coordinator::binding(&self.db, &current.fleet_id)?.is_some() {
+            let mut after = String::new();
+            loop {
+                let page = self.server_engagement_resources(&current.fleet_id, &after, 50)?;
+                if page.is_empty() {
+                    break;
+                }
+                for row in page {
+                    after = row["id"].as_str().ok_or(Error::Capacity)?.to_owned();
+                    if !published.contains(row["resourceId"].as_str().unwrap_or_default()) {
+                        continue;
+                    }
+                    budgets.push(json!({"id":row["id"],"resourceId":row["resourceId"],"revision":row["revision"],
+                        "allocatedTokens":row["allocatedTokens"],"retainedTokens":row["retainedTokens"],
+                        "remainingTokens":row["remainingTokens"],"overdrawn":row["overdrawn"],
+                        "period":row["period"],"periodKey":row["periodKey"]}));
+                    if budgets.len() > 2048 {
+                        return Err(Error::Capacity);
+                    }
+                }
+            }
+        }
+        let mut body = json!({"heartbeat":true,"capabilities":{
             "v":1,"fleetId":current.fleet_id,"serverName":current.server_name,
             "representativeMxid":current.representative_mxid,
             "approvalBotMxid":current.approval_bot_mxid,"offers":offers,
@@ -141,6 +171,12 @@ impl DomainRepository {
             "coordinatorAgentProfileV1": coordinator::binding(&self.db, &current.fleet_id)?.is_some_and(|e| e.coordinator_approval_v1),
             "coordinatorApprovalV1": coordinator::binding(&self.db, &current.fleet_id)?.is_some_and(|e| e.coordinator_approval_v1),
         }});
+        // An empty catalog carries no capacity observation. This also preserves
+        // the deterministic legacy catalog; Palpo clears an omitted snapshot.
+        if !budgets.is_empty() {
+            body["capabilities"]["resourceBudgets"] = Value::Array(budgets);
+            body["capabilities"]["resourceBudgetObservedAtMs"] = json!(graphs::now_ms()?);
+        }
         if canonical::encode_transport(&body)?.len() > MAX_BODY {
             return Err(Error::Capacity);
         }

@@ -3317,6 +3317,15 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn create_resource_source(
+        &self,
+        resource: Resource,
+    ) -> Result<CatalogResource, Error> {
+        self.call(weight(&resource)?, move |db| {
+            db.create_resource_source(&resource)
+        })
+        .await
+    }
     pub async fn edit_resource(
         &self,
         resource: Resource,

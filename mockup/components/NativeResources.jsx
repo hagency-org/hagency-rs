@@ -9,6 +9,7 @@ import { useT } from '@/components/Prefs';
 import { errorText } from '@/lib/i18n';
 import { Blank } from '@/components/Blank';
 import SearchSelect from '@/components/SearchSelect';
+import ResourceCapacity from '@/components/ResourceCapacity';
 import { labelFor } from '@/lib/labels';
 
 const label = (r) => [r.framework, r.model, r.reasoning].filter(Boolean).join(' · ');
@@ -86,8 +87,8 @@ export default function NativeResources() {
           empty={<>{t(resources.length ? 'nc.unassigned' : 'nr.empty')} {!resources.length && <a href="/console/setup/">{t('nr.emptySetup')}</a>}</>}
         /></div>
         {!data.permissions?.publishResource && <div className="notice"><p>{t(data.permissions?.configureResource ? 'nc.publicationSeparate' : 'nr.readOnly')}</p><code>hagency console-access --state-dir &lt;state&gt; --listen &lt;address&gt;</code></div>}
-        <div className="tbl-wrap"><table className="tbl"><thead><tr><th>{t('nr.profile')}</th><th>{t('col.ceiling')}</th><th>{t('nr.catalog')}</th><th>{t('col.action')}</th></tr></thead><tbody>
-          {configured.map((r) => <tr key={r.id} data-resource-row={r.id}><td>{label(r)}{r.provider && <div className="dim">{r.provider}</div>}<TechnicalDetails><code>{r.id}</code></TechnicalDetails></td><td>{!data.coordinatorResources ? number(r.ceiling?.tokens) : r.engagementResources.map(g => <div key={g.id}>{number(g.allocatedTokens)}<div className="dim">{g.serverEngagementId}</div></div>)}</td><td data-publication={r.published}>{t(r.published ? 'nr.included' : 'nr.withdrawn')}</td><td><a className="btn" href={`/console/resources/new/?resource_id=${r.id}`}>{t('nc.edit')}</a> <ResourceAgents preset={r} native={{ allowed: data.permissions?.publishResource && phase === 'ready', busy: action?.kind === 'pending', publish: data.publish }} /></td></tr>)}
+        <div className="tbl-wrap"><table className="tbl"><thead><tr><th>{t('nr.profile')}</th><th>{t(data.coordinatorResources ? 'rc.remainingTotal' : 'col.ceiling')}</th><th>{t('nr.catalog')}</th><th>{t('col.action')}</th></tr></thead><tbody>
+          {configured.map((r) => <tr key={r.id} data-resource-row={r.id}><td>{label(r)}{r.provider && <div className="dim">{r.provider}</div>}<TechnicalDetails><code>{r.id}</code></TechnicalDetails></td><td>{!data.coordinatorResources ? number(r.ceiling?.tokens) : r.engagementResources.map(g => <div key={g.id}><ResourceCapacity total={g.allocatedTokens} remaining={data.resourceCapacities?.find(c => c.id === g.id && c.revision === g.revision)?.remainingTokens} retained={data.resourceCapacities?.find(c => c.id === g.id && c.revision === g.revision)?.retainedTokens} stale={phase === 'stale'} /><div className="dim">{g.serverEngagementId}</div></div>)}</td><td data-publication={r.published}>{t(r.published ? 'nr.included' : 'nr.withdrawn')}</td><td><a className="btn" href={`/console/resources/new/?resource_id=${r.id}`}>{t('nc.edit')}</a> <ResourceAgents preset={r} native={{ allowed: data.permissions?.publishResource && phase === 'ready', busy: action?.kind === 'pending', publish: data.publish }} /></td></tr>)}
         </tbody></table></div>
         {/* Table footer: what the page covers, then the pager. */}
         <div className="table-foot"><p className="dim">{t('nr.pageOnly')}</p>
@@ -98,6 +99,8 @@ export default function NativeResources() {
         <h2 className="sec" style={{ marginTop: 0 }}>{t('nr.budget')}</h2>
         {(data.engagementResources ?? []).map(g => <section key={g.id} data-engagement-resource={g.id}>
           <p>{t('nc.engagement')}: {g.serverEngagementId}</p>
+          <ResourceCapacity total={g.allocatedTokens} remaining={g.remainingTokens} retained={g.retainedTokens} stale={phase === 'stale'} />
+          <p className="dim">{t('rc.meaning')}</p>
           <dl className="kv"><dt>{t('col.ceiling')}</dt><dd data-budget="ceiling">{number(g.allocatedTokens)}</dd>
             <dt>{t('se.retained')}</dt><dd>{number(g.retainedTokens)}</dd>
             <dt>{t('se.available')}</dt><dd data-budget="remaining">{number(g.remainingTokens)}</dd>
