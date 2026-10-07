@@ -97,7 +97,7 @@ jobs:
           cargo test --locked -p hagency --features native-console-browser --test console -- --nocapture --test-threads=2
       - name: Keep console failure screenshots
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: console-failure-screenshots
           path: ${{ runner.temp }}/console-screenshots
@@ -156,7 +156,7 @@ jobs:
           "original_exit=$syncExit" | Set-Content windows-media-sync-verdict.txt
           Get-Content windows-media-sync-original.log
           exit $syncExit
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && runner.os == 'Windows'
         with:
           name: windows-media-sync-original
@@ -193,7 +193,7 @@ jobs:
           cargo build --locked -p hagency-platform --bins
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,RUNNER_ARCH /usr/bin/python3 -B native/scripts/qualify-linux-cgroup.py --probe "$PWD/target/debug/hagency-cgroup-probe" --uid "$(id -u)" --gid "$(id -g)"
       - run: cargo build --release --locked -p hagency
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hagency-foundation-${{ matrix.os }}
           path: |
