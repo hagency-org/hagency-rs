@@ -1,0 +1,153 @@
+{
+  "claude_executable_sha256": "97a01e5bc74a199e67189435d0331ea3a24eac2e07db4b76d9148c5b0386138f",
+  "claude_version": "2.1.292 (Claude Code)",
+  "commit": "ee66ffb9c487340c262ab64e924783afd80c4050",
+  "host": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "launch_source_digests": {
+    "execution/approval/claude.rs": "34e0a01ae16a6ed97696285bd5e3457d2087b481259c3461711c5e631b50250f",
+    "execution/local_codex.rs": "eb8dce9debcbe349753141319d03723c8a0cb603253385cfb73dbf9ad19f00e9",
+    "operator/claude_live.rs": "419dc1e9aa1217b86655fcce8255a0bfb270503aa1d95b90d945ad0e9d03ea39",
+    "operator/claude_source_digests.rs": "f3f8be2e0fccee362dda3797e3c7e305b82e6609f58d020c3f00bf42d3262c2a",
+    "runtime/claude.rs": "760a79aaebfca97903e39dd2a116da8cdbc29c1fa6f868b715602375ad9e8a52",
+    "runtime/claude/session.rs": "094f6f9ce340523c25c1e9133fb039676a70053c47b184540552e1a032b9556d",
+    "runtime/claude/session/control.rs": "52cc5216553fff504f15d394bb2e0f4f06ecce73b1a4e8512ca76a5578b16b05",
+    "runtime/claude/session/io.rs": "8086fc1c4d10af9d95be3dd3bd2769f45d744e8a089af821509c3e1f8d7fa348",
+    "runtime/claude/task_mcp.rs": "ea621bc6c10a0cf7dff3d0f85396e5718ee126ac71683928c02cfb1fbb99574c",
+    "runtime/owned/claude.rs": "57ef2eb8b9d6c6cb218ad240ca9748cabf31fe023c4be98f88232c0cc261973d"
+  },
+  "model": "claude-sonnet-5",
+  "placeholder": false,
+  "recorded_at_ms": 1791441156172,
+  "schema": "hagency-claude-live-qualification-v1",
+  "verdicts": {
+    "approve_once": {
+      "answers_recorded": 1,
+      "approvals": [
+        {
+          "card_runtime": "claude",
+          "card_tool": "Bash",
+          "input": {
+            "command": "gh --version > approved.txt",
+            "description": "Write gh version output to approved.txt"
+          },
+          "method": "claude/canUseTool",
+          "reusable_scope": true,
+          "tool": "Bash"
+        }
+      ],
+      "approved_file": "gh version 2.78.0 (2025-08-21)\nhttps://github.com/cli/cli/releases/tag/v2.78.0\n",
+      "denied_file_exists": false,
+      "elapsed_ms": 8576,
+      "failure": null,
+      "leader_exited": true,
+      "outside_file_exists": false,
+      "pass": true,
+      "protocol": "Completed",
+      "reply": "Done — wrote the `gh` version output to approved.txt.",
+      "settlement": "Completed",
+      "turn_failure": "",
+      "usage_attached": true,
+      "usage_bound": true,
+      "usage_failure": null,
+      "usage_known_growth": {
+        "cacheRead": 59487,
+        "cacheWrite": 7934,
+        "input": 4,
+        "output": 285
+      },
+      "usage_observed_growth": {
+        "cacheRead": 59487,
+        "cacheWrite": 7934,
+        "input": 4,
+        "output": null
+      },
+      "usage_period_incomplete": true,
+      "usage_receipts": 3,
+      "usage_sources": 1,
+      "whole_tree_stopped": true
+    },
+    "deny_continues": {
+      "answers_recorded": 1,
+      "approvals": [
+        {
+          "card_runtime": "claude",
+          "card_tool": "Bash",
+          "input": {
+            "command": "gh --version > denied.txt",
+            "description": "Write gh version output to denied.txt"
+          },
+          "method": "claude/canUseTool",
+          "reusable_scope": true,
+          "tool": "Bash"
+        }
+      ],
+      "approved_file": null,
+      "denied_file_exists": false,
+      "elapsed_ms": 7161,
+      "failure": null,
+      "leader_exited": true,
+      "outside_file_exists": false,
+      "pass": true,
+      "protocol": "Completed",
+      "reply": "The command was not allowed.",
+      "settlement": "Completed",
+      "turn_failure": "",
+      "usage_attached": true,
+      "usage_bound": true,
+      "usage_failure": null,
+      "usage_known_growth": {
+        "cacheRead": 59501,
+        "cacheWrite": 7982,
+        "input": 4,
+        "output": 300
+      },
+      "usage_observed_growth": {
+        "cacheRead": 59501,
+        "cacheWrite": 7982,
+        "input": 4,
+        "output": null
+      },
+      "usage_period_incomplete": true,
+      "usage_receipts": 3,
+      "usage_sources": 1,
+      "whole_tree_stopped": true
+    },
+    "outside_workspace": {
+      "answers_recorded": 0,
+      "approvals": [],
+      "approved_file": null,
+      "denied_file_exists": false,
+      "elapsed_ms": 3371,
+      "failure": null,
+      "leader_exited": true,
+      "outside_file_exists": false,
+      "pass": true,
+      "protocol": "Completed",
+      "reply": "Permission denied.",
+      "settlement": "Completed",
+      "turn_failure": "",
+      "usage_attached": true,
+      "usage_bound": true,
+      "usage_failure": null,
+      "usage_known_growth": {
+        "cacheRead": 25935,
+        "cacheWrite": 7661,
+        "input": 2,
+        "output": 8
+      },
+      "usage_observed_growth": {
+        "cacheRead": 25935,
+        "cacheWrite": 7661,
+        "input": 2,
+        "output": null
+      },
+      "usage_period_incomplete": true,
+      "usage_receipts": 2,
+      "usage_sources": 1,
+      "whole_tree_stopped": true
+    }
+  }
+}

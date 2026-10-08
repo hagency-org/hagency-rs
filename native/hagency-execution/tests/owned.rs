@@ -22,6 +22,8 @@ mod approval_fixture;
 mod approvals;
 #[path = "owned/claude_approvals.rs"]
 mod claude_approvals;
+#[path = "owned/claude_live.rs"]
+mod claude_live;
 #[path = "owned/idle.rs"]
 mod idle;
 #[path = "owned/inspection.rs"]
@@ -89,6 +91,21 @@ impl Fixture {
         Self::configured_resource(approvals, managed, resource("pool", "seat", 1000))
     }
     fn configured_resource(approvals: bool, managed: bool, unmanaged_pool: Resource) -> Self {
+        Self::configured_payload(
+            approvals,
+            managed,
+            unmanaged_pool,
+            json!({"instruction":"do the offline work", "task_id":"impostor", "cwd":"/model/override", "model":"model-override", "done":true}),
+        )
+    }
+    /// The same fixture with the dispatch's own payload (the live Claude
+    /// qualification gives each scenario its instruction).
+    fn configured_payload(
+        approvals: bool,
+        managed: bool,
+        unmanaged_pool: Resource,
+        payload: serde_json::Value,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let work = root.path().join("固定 工作目录");
         hagency_store::private::directory(&work).unwrap();
@@ -196,7 +213,17 @@ impl Fixture {
         db.register_workspace("work").unwrap();
         db.create_canonical_task("task", "session", "Exact frozen task", now())
             .unwrap();
-        db.enqueue_dispatch(&DispatchInput { id: "dispatch".into(), session_id: "session".into(), task_id: Some("task".into()), resources: vec![ResourceLease { id:"work".into(), exclusive:true }], payload: json!({"instruction":"do the offline work", "task_id":"impostor", "cwd":"/model/override", "model":"model-override", "done":true}) }).unwrap();
+        db.enqueue_dispatch(&DispatchInput {
+            id: "dispatch".into(),
+            session_id: "session".into(),
+            task_id: Some("task".into()),
+            resources: vec![ResourceLease {
+                id: "work".into(),
+                exclusive: true,
+            }],
+            payload,
+        })
+        .unwrap();
         let cap = db
             .claim_dispatch("owned_host", now(), 60_000, 60_000, 1)
             .unwrap()
