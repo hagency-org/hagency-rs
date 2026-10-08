@@ -23,7 +23,8 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 - **Credentials.** Octos resolves its own provider keys: its auth file, the OS keychain through a profile's `env_vars`, or environment variables.
 - **Tools.** There is no per-session MCP server. A host may instead register its own tools on a session from its own `serve --stdio` connection, without a credential (`peer/tools/register`, UPCR-2026-035). Calls arrive as `peer/tool/call` and are answered with `peer/tool/result`. The same registration, or `session/tool_list/set`, narrows the session's kernel tools.
 - **Traps.**
-  - By default Octos stores a coding session under `<cwd>/.octos/sessions/` and creates `<cwd>/.octos-workspace.toml`, inside the project.
+  - By default Octos stores a coding session under `<cwd>/.octos/sessions/`, and a writable session creates `<cwd>/.octos-workspace.toml` when the project has none, inside the project.
+  - On a default install, a project's `.octos/config.json` replaces the user's own config. It can set hooks, MCP servers, the sandbox and a provider base URL.
   - Background agents (`spawn_agent`, `delegate`) can report after the terminal, and the kernel may start continuation turns.
   - Over stdio, `ask_user_question` blocks the turn unless its feature is left out.
   - One serve runs per data directory unless each has its own `--instance-data-dir`.
@@ -38,7 +39,7 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 1. **A third driver behind the same seam.** `Runner::Octos` sits beside Codex and Claude Code with framework `octos`. Everything above the process stays shared, as ADR-192 decision 1 set out.
 
 2. **One `octos serve --stdio` per dispatch: one session, run until Octos is idle.**
-   - The guardian spawns `octos serve --stdio --cwd <workspace> --no-network --instance-data-dir <short private dir per agent>`.
+   - The guardian spawns `octos serve --stdio --cwd <workspace> --no-network --instance-data-dir <short private dir per agent> --config <Hagency's settings file>` (decision 3).
    - Hagency sends `client_hello` with a fixed feature list: canonical projection v2, typed approvals and the workspace working directory. It never sends `user_question.v1`, so no question blocks a turn.
    - Hagency sets the permission profile, opens a fresh session named for the dispatch and starts one turn with the dispatch payload.
    - Octos's sub-agents and background work stay available (operator decision 3). The dispatch therefore ends only when Octos reports the session idle: the dispatch's turn has reached its `turn_terminal`, and `session/orchestration` reports no running agent and no pending continuation. Continuation turns the kernel starts for that work, and their terminals, belong to the same dispatch.
@@ -50,7 +51,8 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
    - **Permission profile.** `workspace_write` with network denied and approval policy `on-request` while the dispatch holds the write lease; `read_only` without it. `danger_full_access`, `--solo` and approval policy `never` are never used.
    - **Environment.** An allowlisted environment: `HOME`, `USER`, `PATH`, `TMPDIR` and `OCTOS_NO_MODEL_DOWNLOAD=1`. Provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY` and the rest Octos knows) are removed, as for Codex and Claude Code, so Octos uses the keys in its own store.
    - **Tools.** The session keeps Octos's coding tools, including sub-agents, delegation and background work (operator decision 3). Tools that outlive a dispatch or need a person Hagency cannot route are removed: user questions, peers, loops, monitors and cron. The dispatch ends when Octos reports itself idle, never at a bridge-side cut (ADR-183).
-   - **Clean workspace.** No Octos file is written into the project: sessions stay in Octos's per-profile store, outside the workspace. The qualification checks this.
+   - **Hagency's own Octos settings.** On a default install Octos reads a project's `.octos/config.json` in place of the user's own config, and that file can set hooks, MCP servers, the sandbox and a provider base URL. Hagency therefore writes a settings file of its own into the agent's instance directory, with no hooks, no MCP servers and `appui.sessions_in_cwd` off, and passes it with `--config`. Neither the project's nor the user's `config.json` is read, as Claude Code reads no settings file (ADR-192). Octos still takes the model and keys from the user's profile; the qualification checks this.
+   - **Workspace files.** Sessions stay in the instance directory, so Octos writes no `.octos/` folder into the project. Octos does write its workspace policy, `.octos-workspace.toml`, into a writable workspace that has none; Hagency adds it to the workspace's local Git exclude list before the first dispatch. The qualification checks that this is the only Octos file.
 
 4. **Approvals use the same cards.** `approval/requested` becomes an owner approval through the existing store and card pump.
    - The store's request binding takes an Octos form on the same fields: the session ID is the thread, the dispatch's one turn is the turn, and the approval ID is the item. The tool name and the typed details travel in the request, which its digest covers.
@@ -91,7 +93,7 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 - **Approvals.** Every approval Octos raises reaches the owner. Octos records no approval rule of its own, and grants are Hagency's.
 - **Narrower ask set.** Octos asks before fewer commands than Codex. Its sandbox contains the rest: writes only inside the workspace and no network. The qualification proves this per OS before Octos resources are publishable.
 - **Task tools.** They are host tools on Hagency's own private connection, bound to the dispatch's capability. Nothing is written into the user's Octos configuration or profiles.
-- **Isolation.** Each dispatch gets a fresh session and process, so one owner's context is never visible in another's turn. The project workspace holds no Octos file.
+- **Isolation.** Each dispatch gets a fresh session and process, so one owner's context is never visible in another's turn. A project's Octos settings are never read, and the only Octos file in the project is its workspace policy, kept out of Git.
 
 ## Consequences
 
@@ -124,3 +126,4 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 1. A resource runs one of the user's own Octos profiles, its primary model being the resource's model.
 2. Hagency removes provider keys from Octos's environment; Octos uses the keys in its own store.
 3. Octos's sub-agents and background work stay available; a dispatch ends only when Octos reports that all of it is idle.
+4. Hagency gives Octos its own settings file and reads neither the project's nor the user's `config.json`. The one file Octos writes into the project, its workspace policy, is kept out of Git.
