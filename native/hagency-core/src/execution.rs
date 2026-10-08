@@ -52,7 +52,14 @@ pub enum ScopeKind {
     ExactCommand,
     NetworkHost,
     PermissionProfile,
+    /// One Claude Code tool call: its tool name and exact input (ADR-192).
+    ExactToolCall,
 }
+/// The approval method of a Claude Code `can_use_tool` request (ADR-192). Its
+/// params carry the session as `threadId`, the dispatch's one prompt as
+/// `turnId` and the control request as `itemId`, beside `toolName`, an
+/// optional `toolUseId` and the tool's `input`.
+pub const CLAUDE_TOOL_METHOD: &str = "claude/canUseTool";
 #[derive(Serialize)]
 pub struct Scope {
     pub kind: ScopeKind,
@@ -213,6 +220,32 @@ pub fn derive(request: HostRequest<'_>) -> Option<Authorization> {
                 ScopeKind::PermissionProfile,
                 json!({"cwd":cwd,"permissions":permissions}),
                 description,
+            )
+        }
+        CLAUDE_TOOL_METHOD => {
+            // A grant matches the same tool with the same canonical input only.
+            // Nothing is read from the input's meaning: no command prefix, no
+            // path or working directory is widened into the scope.
+            if !keys_within(
+                p,
+                &[
+                    "threadId",
+                    "turnId",
+                    "itemId",
+                    "toolName",
+                    "toolUseId",
+                    "input",
+                ],
+            ) {
+                return None;
+            }
+            let tool = text(p.get("toolName")?)?;
+            let input = p.get("input").filter(|v| v.is_object())?;
+            let input = canonical::encode_payload(input).ok()?;
+            (
+                ScopeKind::ExactToolCall,
+                json!({"tool":tool,"input":input}),
+                format!("Exact tool call:\nTool: {tool}\nInput: {input}"),
             )
         }
         _ => return None,

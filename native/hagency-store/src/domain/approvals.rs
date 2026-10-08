@@ -1004,7 +1004,13 @@ impl DomainRepository {
             .map(|r| {
                 let (id, kind, mode, revoked) = r?;
                 let kind: String = serde_json::from_str(&kind)?;
-                if !["exact_command", "network_host", "permission_profile"].contains(&kind.as_str())
+                if ![
+                    "exact_command",
+                    "network_host",
+                    "permission_profile",
+                    "exact_tool_call",
+                ]
+                .contains(&kind.as_str())
                 {
                     return Err(Error::State);
                 }

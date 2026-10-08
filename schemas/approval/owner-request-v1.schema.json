@@ -212,7 +212,8 @@
               "enum": [
                 "exact_command",
                 "network_host",
-                "permission_profile"
+                "permission_profile",
+                "exact_tool_call"
               ]
             }
           }
