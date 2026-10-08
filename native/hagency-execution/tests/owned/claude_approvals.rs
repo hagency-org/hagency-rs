@@ -32,7 +32,7 @@ fn allow(index: usize) -> serde_json::Value {
 fn deny() -> serde_json::Value {
     json!({"type":"control_response","response":{"subtype":"success",
         "request_id":"owned-permission-1",
-        "response":{"behavior":"deny","message":"Permission denied by Hagency.","interrupt":true}}})
+        "response":{"behavior":"deny","message":"Permission denied by Hagency."}}})
 }
 fn claude_resource() -> Resource {
     super::claude_pool()
@@ -100,24 +100,37 @@ async fn native_claude_approval_once_allows_the_exact_input() {
     f.domain.shutdown().await.unwrap();
 }
 
-/// Deny answers with the fixed deny and `interrupt` (ADR-156). Claude then
-/// ends its turn in an error result, which settles like a failed turn.
+/// Deny answers with the fixed deny and no `interrupt` (ADR-192 decision 4):
+/// Claude continues its turn without the tool and ends it with its own
+/// reply, which settles like any completed turn, as for a Codex decline.
 #[tokio::test]
-async fn native_claude_approval_deny_interrupts_the_turn() {
+async fn native_claude_approval_deny_lets_claude_continue() {
     let f = Fixture::configured_resource(true, false, claude_resource());
     let (mut op, mut notices) = operation(&f, "task-approval", policy());
     let request = notice(&f, &mut op, &mut notices).await;
     choose(&f, &request.request_id, ApprovalChoice::Deny).await;
     let report = op.wait().await.unwrap();
     assert_eq!(answers(&f), vec![deny()]);
-    assert_eq!(report.protocol, Protocol::Failed);
-    assert_eq!(report.turn_failure, "error_during_execution");
-    assert_eq!(report.failure, Some(Failure::Protocol));
+    assert_eq!(
+        report.protocol,
+        Protocol::Completed,
+        "{:?} {:?}",
+        report.failure,
+        report.turn_failure
+    );
+    assert_eq!(
+        report.text.as_deref(),
+        Some("claude fixture reply without the denied tool")
+    );
+    assert_eq!(report.failure, None);
     assert_eq!(
         f.count("SELECT COUNT(*) FROM approval_responses WHERE write_accepted=1"),
         1
     );
-    f.quarantined();
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert_eq!(report.settlement, Settlement::Completed);
+        assert_eq!(f.state(), "completed");
+    }
     drop(report);
     f.domain.shutdown().await.unwrap();
 }
@@ -164,7 +177,8 @@ async fn native_claude_approval_grant_answers_the_next_identical_request() {
 }
 
 /// Nobody answers: at the owner bound the host records the deny and answers
-/// it, as for Codex. The request is decided once and nothing is granted.
+/// it, as for Codex. The request is decided once, nothing is granted, and
+/// Claude goes on to its own reply.
 #[tokio::test]
 async fn native_claude_approval_owner_wait_expiry_denies() {
     let f = Fixture::configured_resource(true, false, claude_resource());
@@ -184,7 +198,11 @@ async fn native_claude_approval_owner_wait_expiry_denies() {
         .unwrap();
     assert_eq!(summary.choice, Some(ApprovalChoice::Deny));
     assert_eq!(f.count("SELECT COUNT(*) FROM approval_grants"), 0);
-    assert_eq!(report.protocol, Protocol::Failed);
+    assert_eq!(report.protocol, Protocol::Completed);
+    assert_eq!(
+        report.text.as_deref(),
+        Some("claude fixture reply without the denied tool")
+    );
     drop(report);
     f.domain.shutdown().await.unwrap();
 }

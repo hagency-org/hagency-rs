@@ -278,8 +278,11 @@ impl<R, W, E> SessionDriver<R, W, E> {
         let input = callback.input.take().ok_or(Error::State)?;
         let response = match decision {
             PermissionDecision::Allow => json!({"behavior":"allow","updatedInput":input}),
+            // A deny never interrupts (ADR-192 decision 4, amending ADR-156):
+            // Claude continues its turn and can say what it could not do, as
+            // Codex does after a decline. Only Claude's own turn ends it.
             PermissionDecision::Deny => {
-                json!({"behavior":"deny","message":"Permission denied by Hagency.","interrupt":true})
+                json!({"behavior":"deny","message":"Permission denied by Hagency."})
             }
         };
         let bytes = crate::claude::encode(json!({"type":"control_response","response":{

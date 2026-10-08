@@ -125,7 +125,7 @@ async fn native_claude_permission_exact_response() {
         let expected = match decision {
             PermissionDecision::Allow => json!({"behavior":"allow","updatedInput":original}),
             PermissionDecision::Deny => {
-                json!({"behavior":"deny","message":"Permission denied by Hagency.","interrupt":true})
+                json!({"behavior":"deny","message":"Permission denied by Hagency."})
             }
         };
         assert_eq!(

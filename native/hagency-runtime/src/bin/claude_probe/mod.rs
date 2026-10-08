@@ -82,7 +82,7 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
         let expected = if mode == "permission-allow" {
             json!({"behavior":"allow","updatedInput":input})
         } else {
-            json!({"behavior":"deny","message":"Permission denied by Hagency.","interrupt":true})
+            json!({"behavior":"deny","message":"Permission denied by Hagency."})
         };
         if response
             != json!({"type":"control_response","response":{
@@ -209,8 +209,9 @@ fn error_result() -> io::Result<()> {
 /// (ADR-158): initialize, then the scoped helper binding, then one prompt.
 /// Never starts the helper or a provider; the reply is the result text.
 /// The approval modes ask for one tool use (twice in `task-approval-twice`)
-/// and continue as the installed CLI does: an allow runs the tool and the
-/// turn succeeds; a deny interrupts it into an error result (ADR-156).
+/// and continue as the installed CLI does: an allow runs the tool, a deny
+/// leaves it unrun, and the turn goes on to its own reply either way
+/// (ADR-192 decision 4: a deny never interrupts).
 pub(super) fn run_task(mode: &str, marker: &Path) -> io::Result<()> {
     if !matches!(
         mode,
@@ -279,7 +280,15 @@ pub(super) fn run_task(mode: &str, marker: &Path) -> io::Result<()> {
                     break;
                 }
             }
-            if allowed { success()? } else { error_result()? }
+            if allowed {
+                success()?
+            } else {
+                emit(
+                    json!({"type":"result","subtype":"success","session_id":"owned-claude",
+                    "is_error":false,"result":"claude fixture reply without the denied tool",
+                    "modelUsage":{"claude-fixture":{"inputTokens":10,"outputTokens":7,"cacheReadInputTokens":20,"cacheCreationInputTokens":30}}}),
+                )?
+            }
         }
     }
     // Alive after its result: only the original guardian's stop or the bounded
