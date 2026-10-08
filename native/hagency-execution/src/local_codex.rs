@@ -100,6 +100,10 @@ pub struct LocalCodex {
     home: Directory,
     codex: Directory,
     path: Option<OsString>,
+    /// The service's OS user name, for Claude only: the installed CLI finds
+    /// the user's existing claude.ai sign-in only with it (ADR-156's operator
+    /// diagnostic). An identity, never a credential.
+    user: Option<OsString>,
 }
 impl LocalCodex {
     pub fn new(
@@ -136,6 +140,10 @@ impl LocalCodex {
             home: Directory::open(home, provider.site())?,
             codex: Directory::open(folder, provider.site())?,
             path: std::env::var_os("PATH"),
+            user: match provider {
+                LocalProvider::Claude => std::env::var_os("USER"),
+                LocalProvider::Codex => None,
+            },
         };
         value.check()?;
         Ok(value)
@@ -240,6 +248,9 @@ impl LocalCodex {
         if let Some(path) = &self.path {
             environment.insert("PATH".into(), path.clone());
         }
+        if let Some(user) = &self.user {
+            environment.insert("USER".into(), user.clone());
+        }
         Ok(())
     }
     pub(crate) async fn watch<T>(
@@ -287,6 +298,11 @@ mod tests {
             Some(&OsString::from("1"))
         );
         assert!(!environment.contains_key(&OsString::from("CODEX_HOME")));
+        // The OS user name the installed CLI needs to find its own sign-in.
+        assert_eq!(
+            environment.get(&OsString::from("USER")),
+            std::env::var_os("USER").as_ref()
+        );
         for key in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
             let mut leaked = environment.clone();
             leaked.insert(key.into(), "synthetic-forbidden".into());
@@ -324,6 +340,8 @@ mod tests {
             environment.get(&OsString::from("CODEX_HOME")),
             Some(&codex.clone().into_os_string())
         );
+        // Codex is never handed the OS user name.
+        assert!(!environment.contains_key(&OsString::from("USER")));
         assert!(
             environment
                 .keys()

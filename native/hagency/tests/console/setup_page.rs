@@ -26,6 +26,20 @@ async fn native_setup_status_reports_agents_and_steps() {
     assert_eq!(value["agents"][0]["kind"], json!("codex"));
     assert!(value["agents"][0]["found"].is_boolean());
     assert!(value["agents"][0]["signedIn"].is_boolean());
+    assert_eq!(value["agents"][0]["signInAssumed"], json!(false));
+    // ADR-192: Claude Code beside Codex; its sign-in is assumed, never checked.
+    assert_eq!(value["agents"][1]["kind"], json!("claude"));
+    assert!(value["agents"][1]["found"].is_boolean());
+    assert_eq!(value["agents"][1]["signInAssumed"], json!(true));
+    // Each choice names its coding agent; Claude choices carry no reasoning.
+    let choices = value["offer"]["choices"].as_array().unwrap();
+    assert!(choices.iter().any(|c| c["framework"] == "codex"));
+    let claude: Vec<_> = choices
+        .iter()
+        .filter(|c| c["framework"] == "claude")
+        .collect();
+    assert!(!claude.is_empty());
+    assert!(claude.iter().all(|c| c["reasoning"].is_null()));
     assert_eq!(value["runtimeConfigured"], json!(false));
     assert_eq!(value["palpo"]["imported"], json!(false));
 }

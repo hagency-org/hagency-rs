@@ -9,16 +9,19 @@ import { fetchSetup, checkSetup, offerResource } from '@/lib/native-api';
 import NativeAssociation from '@/components/NativeAssociation';
 
 const STEPS = ['runtime', 'connection', 'resource', 'track'];
+const AGENT_NAMES = { codex: 'Codex', claude: 'Claude Code' };
 
 function AgentCard({ agent }) {
   const t = useT();
-  const name = agent.kind === 'codex' ? 'Codex' : agent.kind;
+  const name = AGENT_NAMES[agent.kind] ?? agent.kind;
   return <article className="setup-agent">
     <h3>{name}{agent.version ? ` · ${agent.version}` : ''}</h3>
     {!agent.found && <p>{t('st.notFound', { name })}</p>}
-    {agent.found && agent.signedIn && <p>{t('st.signedIn', { kind: agent.signInKind === 'api_key' ? t('st.kindApiKey') : agent.signInKind === 'chatgpt' ? t('st.kindChatgpt') : '—' })}</p>}
+    {/* ADR-192 decision 6: Claude Code's sign-in is assumed, never checked. */}
+    {agent.found && agent.signedIn && agent.signInAssumed && <p>{t('st.signInAssumed', { name })}</p>}
+    {agent.found && agent.signedIn && !agent.signInAssumed && <p>{t('st.signedIn', { kind: agent.signInKind === 'api_key' ? t('st.kindApiKey') : agent.signInKind === 'chatgpt' ? t('st.kindChatgpt') : '—' })}</p>}
     {agent.found && agent.signedIn && agent.signInKind === 'chatgpt' && <p className="note">{t('st.planNote')}</p>}
-    {agent.found && !agent.signedIn && <p>{t('st.notSignedIn', { name })} <code>{agent.kind === 'codex' ? 'codex login' : ''}</code></p>}
+    {agent.found && !agent.signedIn && !agent.signInAssumed && <p>{t('st.notSignedIn', { name })} <code>{agent.kind === 'codex' ? 'codex login' : ''}</code></p>}
     {agent.problem && <p role="status">{agent.problem}</p>}
     {agent.path && <details><summary>{t('guided.runtimeDetails')}</summary><code>{agent.path}</code></details>}
   </article>;
@@ -75,7 +78,7 @@ export default function SetupPage() {
     event.preventDefault(); if (busy || !choice) return;
     setBusy(true); setNote(null);
     try {
-      await offerResource(choice.model, choice.reasoning, Number(tokens));
+      await offerResource(choice.model, choice.reasoning, Number(tokens), choice.framework ?? 'codex');
       await load(); await data.refresh();
     } catch (error) {
       setNote(errorText(t, error.message));
@@ -115,7 +118,7 @@ export default function SetupPage() {
           {!sourceReady && <form className="setup-source-form" onSubmit={prepareSource}>
             <p>{t('guided.sourceHelp')}</p>
             <label>{t('guided.model')}<select value={choiceIndex} onChange={e => setChoiceIndex(Number(e.target.value))} disabled={busy}>
-              {choices.map((c, i) => <option key={`${c.model}:${c.reasoning}`} value={i}>{c.model} · {c.reasoning ?? '—'}</option>)}
+              {choices.map((c, i) => <option key={`${c.framework}:${c.model}:${c.reasoning}`} value={i}>{AGENT_NAMES[c.framework] ?? 'Codex'} · {c.model}{c.reasoning ? ` · ${c.reasoning}` : ''}</option>)}
             </select></label>
             <label>{t('guided.ceiling')}<input type="number" min="1" max={Number.MAX_SAFE_INTEGER} step="1" required value={tokens} onChange={e => setTokens(e.target.value)} disabled={busy} /></label>
             <p className="dim">{t('guided.ceilingHelp')}</p>

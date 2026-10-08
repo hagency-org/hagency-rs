@@ -4,13 +4,37 @@
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 fn run(home: &Path, args: &[&str]) -> std::process::Output {
+    // Hermetic: no coding agent of the machine running the tests is found.
+    let empty = home.parent().unwrap().join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    run_with_path(home, &empty, args)
+}
+fn run_with_path(home: &Path, path: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_hagency"))
         .arg("setup")
         .args(args)
         .env("HOME", home)
+        .env("PATH", path)
         .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap()
+}
+
+/// A native-looking Claude Code binary and its own folder under the fake
+/// home (ADR-192). The folder holds no sign-in: Setup never looks.
+fn claude(root: &Path, home: &Path) -> std::path::PathBuf {
+    let folder = home.join(".claude");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binary = root.join("claude-bin").join("claude");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"\xcf\xfa\xed\xfe fake native claude").unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    binary
+}
+fn written(state: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(state.join("fleet-runtime.json")).unwrap()).unwrap()
 }
 
 /// A native-looking Codex binary and a signed-in Codex folder under a fake
@@ -210,4 +234,144 @@ fn native_start_without_a_console_refuses_before_touching_state() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--console-assets"));
     assert!(!state.exists());
+}
+
+/// ADR-192: a machine with Claude Code only gets a runtime with a Claude block
+/// and its local binding, no Codex at all, and `serve`'s loader accepts it.
+#[test]
+fn native_setup_writes_a_claude_runtime_serve_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, _) = codex(&root);
+    let binary = claude(&root, &home);
+    let state = root.join("state");
+    let output = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--no-codex",
+            "--claude",
+            binary.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Claude Code:"), "{stdout}");
+    assert!(stdout.contains("uses its own sign-in"), "{stdout}");
+    assert!(!stdout.contains("Codex:"), "{stdout}");
+    let written = written(&state);
+    assert!(written.get("executable").is_none());
+    assert!(written.get("local_codex").is_none());
+    assert_eq!(written["claude"]["executable"], binary.to_str().unwrap());
+    let local = &written["claude"]["local_claude"];
+    assert_eq!(local["profile"], "provider_owned_claude_v1");
+    assert_eq!(local["preset"], "local_claude");
+    assert_eq!(local["seat"], "local_claude_seat");
+    assert_eq!(local["home"], home.to_str().unwrap());
+    assert_eq!(local["config_dir"], home.join(".claude").to_str().unwrap());
+}
+
+/// ADR-192 operator decision 3: both coding agents side by side.
+#[test]
+fn native_setup_writes_codex_and_claude_together() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, codex_binary) = codex(&root);
+    let claude_binary = claude(&root, &home);
+    let state = root.join("state");
+    let output = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--codex",
+            codex_binary.to_str().unwrap(),
+            "--claude",
+            claude_binary.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = written(&state);
+    assert_eq!(written["executable"], codex_binary.to_str().unwrap());
+    assert_eq!(written["local_codex"]["seat"], "local_codex_seat");
+    assert_eq!(
+        written["claude"]["executable"],
+        claude_binary.to_str().unwrap()
+    );
+    assert_eq!(
+        written["claude"]["local_claude"]["seat"],
+        "local_claude_seat"
+    );
+}
+
+/// A Claude Code the operator names must be a native binary: a launcher
+/// script's program would run under whatever interpreter PATH finds.
+#[test]
+fn native_setup_refuses_a_named_claude_launcher_script() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, _) = codex(&root);
+    claude(&root, &home);
+    let script = root.join("claude.js");
+    std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+    let state = root.join("state");
+    let output = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--no-codex",
+            "--claude",
+            script.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("launcher script"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!state.join("fleet-runtime.json").exists());
+}
+
+/// A Claude Code merely found on PATH that cannot be used never blocks Codex:
+/// it is left out, and setup says why.
+#[test]
+fn native_setup_leaves_out_an_unusable_claude_found_on_path() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, codex_binary) = codex(&root);
+    let path = root.join("path-with-script");
+    std::fs::create_dir_all(&path).unwrap();
+    let script = path.join("claude");
+    std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let state = root.join("state");
+    let output = run_with_path(
+        &home,
+        &path,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--codex",
+            codex_binary.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Claude Code left out"), "{stdout}");
+    assert!(written(&state).get("claude").is_none());
 }

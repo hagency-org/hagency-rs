@@ -1216,13 +1216,13 @@ async function setupCall(path, method) {
 }
 export function fetchSetup() { return setupCall('setup', 'GET'); }
 export function checkSetup() { return setupCall('setup/check', 'POST'); }
-export async function offerResource(model, reasoning, tokens) {
+export async function offerResource(model, reasoning, tokens, framework = 'codex') {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 20000);
   try {
     const response = await fetch(`${ROOT}/api/setup/resource`, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: abort.signal,
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, reasoning, tokens }),
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ framework, model, reasoning, tokens }),
     });
     let value = null;
     try { value = await response.json(); } catch { /* not JSON: handled below */ }

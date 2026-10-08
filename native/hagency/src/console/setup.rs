@@ -3,10 +3,11 @@
 //! `GET /console/api/setup` reports each step: the coding agents found on
 //! this machine (path, version, whether and how they are signed in), whether
 //! the runtime is configured, and the Palpo connection. `POST
-//! /console/api/setup/check` detects again and, when a signed-in Codex is
-//! found and no runtime is configured yet, writes and validates
-//! `fleet-runtime.json` with `hagency setup`'s code. Hagency never signs a
-//! coding agent in; the page asks the user to.
+//! /console/api/setup/check` detects again and, when a signed-in Codex or a
+//! Claude Code (ADR-192) is found and the runtime is missing or stale, writes
+//! and validates `fleet-runtime.json` with `hagency setup`'s code. Hagency
+//! never signs a coding agent in; the page asks the user to sign Codex in,
+//! and assumes Claude Code is signed in (ADR-192 decision 6).
 use super::engagements::check_lifecycle;
 use super::{failed, recheck};
 use crate::refusal;
@@ -20,30 +21,87 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("resource").post(offer))
 }
 
-/// The model and reasoning pairs Hagency qualifies for Codex
-/// (`role-capacity.json`): only these are published to Palpo.
-fn codex_choices() -> Vec<serde_json::Value> {
+/// The provider each framework's resources name.
+fn provider(framework: &str) -> &'static str {
+    if framework == "claude" {
+        "anthropic"
+    } else {
+        "openai"
+    }
+}
+
+/// The model and reasoning pairs Hagency qualifies for one framework
+/// (`role-capacity.json`): only these are published to Palpo. Claude models
+/// carry no reasoning setting (ADR-192 decision 8).
+fn choices(framework: &'static str) -> Vec<serde_json::Value> {
     let profile = hagency_core::qualification::ModelProfile {
-        framework: "codex".into(),
+        framework: framework.into(),
         model: String::new(),
-        provider: Some("openai".into()),
+        provider: Some(provider(framework).into()),
         reasoning: None,
     };
     hagency_core::qualification::configuration_choices(&profile)
         .unwrap_or_default()
         .into_iter()
-        .map(|c| json!({"model": c.model, "reasoning": c.reasoning, "roles": c.roles}))
+        .map(|c| {
+            json!({"framework": framework, "model": c.model,
+                "reasoning": c.reasoning, "roles": c.roles})
+        })
         .collect()
 }
 
-/// The seat a fleet resource must name: the `local_codex` block's, else the
-/// default `setup` writes.
-fn runtime_seat(state: &std::path::Path) -> String {
+fn runtime(state: &std::path::Path) -> Option<serde_json::Value> {
     std::fs::read(state.join("fleet-runtime.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|v| v["local_codex"]["seat"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| "local_codex_seat".into())
+}
+
+/// The coding agents `fleet-runtime.json` configures: Codex, Claude Code or
+/// both (ADR-192).
+fn runtime_frameworks(state: &std::path::Path) -> Vec<&'static str> {
+    let Some(value) = runtime(state) else {
+        return Vec::new();
+    };
+    let mut frameworks = Vec::new();
+    if value["executable"].is_string() {
+        frameworks.push("codex");
+    }
+    if value["claude"]["executable"].is_string() {
+        frameworks.push("claude");
+    }
+    frameworks
+}
+
+/// The preset and seat a fleet resource must name: the local binding's,
+/// else the defaults `setup` writes.
+fn runtime_seat(state: &std::path::Path, framework: &str) -> (String, String) {
+    let value = runtime(state).unwrap_or_default();
+    let block = if framework == "claude" {
+        &value["claude"]["local_claude"]
+    } else {
+        &value["local_codex"]
+    };
+    let field =
+        |name: &str, default: String| block[name].as_str().map(str::to_owned).unwrap_or(default);
+    (
+        field("preset", format!("local_{framework}")),
+        field("seat", format!("local_{framework}_seat")),
+    )
+}
+
+/// The executables Setup would configure: Codex when found, Claude Code when
+/// found with its own folder (its sign-in is assumed). A found Codex is named
+/// even before it is signed in, so signing out never rewrites it away.
+fn found(agents: &[crate::setup::AgentStatus], kind: &str) -> Option<std::path::PathBuf> {
+    agents
+        .iter()
+        .find(|a| a.kind == kind && a.found && (kind == "codex" || a.signed_in))
+        .and_then(|a| a.path.clone())
+}
+
+async fn detect() -> Vec<crate::setup::AgentStatus> {
+    let (codex, claude) = tokio::join!(crate::setup::detect_codex(), crate::setup::detect_claude());
+    vec![codex, claude]
 }
 
 fn domain(depot: &Depot) -> Option<hagency_store::DomainStore> {
@@ -68,14 +126,21 @@ async fn report(
     replaced: bool,
 ) -> serde_json::Value {
     let runtime = live.state_dir().join("fleet-runtime.json").is_file();
-    // A configured runtime that no longer names the detected Codex (an
-    // update changed the binary) is stale: serve refuses it until rewritten.
+    // A configured runtime that no longer names exactly the detected agents
+    // (an update changed a binary, or an agent was installed) is stale:
+    // serve refuses a changed binary until the file is rewritten.
     let stale = runtime
-        && agents
-            .iter()
-            .find(|a| a.kind == "codex")
-            .and_then(|a| a.path.as_deref())
-            .is_some_and(|path| !crate::setup::runtime_matches(live.state_dir(), path));
+        && !crate::setup::runtime_matches(
+            live.state_dir(),
+            found(&agents, "codex").as_deref(),
+            found(&agents, "claude").as_deref(),
+        );
+    // The choices of the agents the runtime runs; before it exists (when
+    // the page cannot offer yet) those of every agent Hagency supports.
+    let mut frameworks = runtime_frameworks(live.state_dir());
+    if frameworks.is_empty() {
+        frameworks = vec!["codex", "claude"];
+    }
     let resources = match domain {
         Some(store) => store
             .catalog(String::new(), 64)
@@ -103,7 +168,7 @@ async fn report(
             "transport": live.status().get(),
         },
         "offer": {
-            "choices": codex_choices(),
+            "choices": frameworks.into_iter().flat_map(choices).collect::<Vec<_>>(),
             "resources": resources,
             "sourceResources": sources,
         },
@@ -128,7 +193,7 @@ async fn status(depot: &mut Depot, res: &mut Response) {
         res.render(Json(json!({"ok": true, "applicable": false, "agents": []})));
         return;
     };
-    let agents = vec![crate::setup::detect_codex().await];
+    let agents = detect().await;
     if let Err(error) = recheck(depot) {
         failed(res, error);
         return;
@@ -154,21 +219,28 @@ async fn check(depot: &mut Depot, res: &mut Response) {
         refusal(res, StatusCode::CONFLICT, "setup_not_fleet");
         return;
     };
-    let codex = crate::setup::detect_codex().await;
+    let agents = detect().await;
     let state = live.state_dir().to_owned();
     let present = state.join("fleet-runtime.json").is_file();
-    let stale = present
-        && codex
-            .path
-            .as_deref()
-            .is_some_and(|path| !crate::setup::runtime_matches(&state, path));
-    let configured_now = if (!present || stale) && codex.found && codex.signed_in {
+    let (codex, claude) = (found(&agents, "codex"), found(&agents, "claude"));
+    let stale =
+        present && !crate::setup::runtime_matches(&state, codex.as_deref(), claude.as_deref());
+    // A signed-in Codex or a found Claude Code is enough to configure; each
+    // found agent is written (ADR-192 decision 7).
+    let usable = agents
+        .iter()
+        .any(|a| a.found && a.signed_in && (a.kind == "codex" || a.kind == "claude"));
+    let configured_now = if (!present || stale) && usable {
         let options = crate::setup::Options {
             state_dir: state,
             listen: address,
-            codex: codex.path.clone(),
+            no_codex: codex.is_none(),
+            codex,
             codex_home: None,
             no_local_codex: false,
+            no_claude: claude.is_none(),
+            claude,
+            claude_config_dir: None,
             // Rewrite a stale file (the old one is kept as a .bak copy).
             force: stale,
         };
@@ -185,20 +257,16 @@ async fn check(depot: &mut Depot, res: &mut Response) {
         return;
     }
     res.render(Json(
-        report(
-            &live,
-            domain(depot).as_ref(),
-            vec![codex],
-            configured_now,
-            stale,
-        )
-        .await,
+        report(&live, domain(depot).as_ref(), agents, configured_now, stale).await,
     ));
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Offer {
+    /// `codex` (the default) or `claude` (ADR-192).
+    #[serde(default)]
+    framework: Option<String>,
     model: String,
     reasoning: Option<String>,
     /// Monthly token ceiling; 20 million when omitted.
@@ -240,7 +308,20 @@ async fn offer(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         refusal(res, StatusCode::BAD_REQUEST, "invalid_domain_command");
         return;
     };
-    let qualified = codex_choices()
+    let framework = match input.framework.as_deref().unwrap_or("codex") {
+        "codex" => "codex",
+        "claude" => "claude",
+        _ => {
+            refusal(res, StatusCode::BAD_REQUEST, "setup_unqualified_model");
+            return;
+        }
+    };
+    // A source names a coding agent the runtime actually runs.
+    if !runtime_frameworks(live.state_dir()).contains(&framework) {
+        refusal(res, StatusCode::CONFLICT, "setup_runtime_missing");
+        return;
+    }
+    let qualified = choices(framework)
         .iter()
         .any(|c| c["model"] == json!(input.model) && c["reasoning"] == json!(input.reasoning));
     let tokens = input.tokens.unwrap_or(20_000_000);
@@ -248,12 +329,13 @@ async fn offer(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         refusal(res, StatusCode::BAD_REQUEST, "setup_unqualified_model");
         return;
     }
+    let (preset, seat) = runtime_seat(live.state_dir(), framework);
     let resource = serde_json::from_value::<hagency_core::project::Resource>(json!({
-        "presetId": "local_codex",
-        "seatId": runtime_seat(live.state_dir()),
-        "framework": "codex",
+        "presetId": preset,
+        "seatId": seat,
+        "framework": framework,
         "model": input.model,
-        "provider": "openai",
+        "provider": provider(framework),
         "reasoning": input.reasoning,
         "ceiling": {"tokens": tokens, "period": "monthly"},
         "published": false,
