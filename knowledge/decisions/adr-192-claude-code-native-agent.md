@@ -2,7 +2,7 @@
 kind: decision
 id: ADR-192
 title: "Claude Code runs as a native agent beside Codex, on the existing Claude stream pieces, set up and approved the same way"
-status: Proposed
+status: Accepted
 satisfies: [REQ-RUST-MIGRATION-EXECUTION]
 amends: [ADR-155, ADR-189]
 tags: [native, claude, runtime, setup, approvals, usage, qualification]
