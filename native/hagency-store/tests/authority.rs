@@ -86,3 +86,30 @@ fn project_authority_fails_closed() {
         hagency_core::project::EngagementState::Pending
     );
 }
+
+/// A requester never decides where folders are made or what runs on the
+/// machine: a request naming any workspace setting is refused before
+/// admission, even `shared`, while the same request without them verifies.
+#[test]
+fn native_request_cannot_set_the_agent_workspace() {
+    let resource = resource("preset", "seat", 100);
+    let plain = request("req", "worker", &resource, 10);
+    assert!(verify_request(&registration(), plain.clone(), observation(&plain)).is_ok());
+    for (key, setting) in [
+        ("workspaceMode", json!("worktree")),
+        ("workspaceMode", json!("shared")),
+        ("worktreesDir", json!("/anywhere/on/the/host")),
+        ("worktreeBootstrap", json!(["sh", "-c", "anything"])),
+    ] {
+        let mut value = serde_json::to_value(&plain).unwrap();
+        value["agentDefinition"][key] = setting;
+        let carrying: ProjectRequest = serde_json::from_value(value).unwrap();
+        // The observed event carries the same content, so only this rule refuses.
+        let refused =
+            verify_request(&registration(), carrying.clone(), observation(&carrying)).unwrap_err();
+        assert_eq!(
+            refused.0, "a request cannot set the agent's workspace",
+            "{key}"
+        );
+    }
+}

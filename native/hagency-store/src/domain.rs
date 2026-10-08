@@ -2232,13 +2232,11 @@ impl DomainRepository {
             requested_tokens: request.requested_tokens,
             state: EngagementState::Pending,
             cleanup: CleanupState::NotRequired,
-            workspace_mode: request
-                .agent_definition
-                .workspace_mode
-                .clone()
-                .unwrap_or_else(|| "shared".into()),
-            worktrees_dir: request.agent_definition.worktrees_dir.clone(),
-            worktree_bootstrap: request.agent_definition.worktree_bootstrap.clone(),
+            // Never the request's: `verify_request` refuses a request that
+            // names any workspace setting.
+            workspace_mode: "shared".into(),
+            worktrees_dir: None,
+            worktree_bootstrap: Vec::new(),
         };
         tx.execute("INSERT INTO projects(fleet_id,id,generation,room_id,owner_mxid,owner_room_id) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(fleet_id,id) DO NOTHING",
             params![request.fleet_id,request.target_project_id,proof.registration().generation,request.target_room_id,request.owner_mxid,request.owner_dm_room_id])?;
