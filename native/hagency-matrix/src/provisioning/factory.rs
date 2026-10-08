@@ -57,7 +57,10 @@ impl Custody {
     ) -> Result<hagency_core::project::Engagement, Error> {
         let mut runtime = self.runtime.lock().await;
         let owner = runtime.as_mut().ok_or(Error::OutcomeUnknown)?;
-        let result = tokio::select! {result=owner.activate()=>result.map_err(|_|Error::OutcomeUnknown),_ = cancel.cancelled()=>Err(Error::Cancelled)};
+        let result = tokio::select! {result=owner.activate()=>result.map_err(|error| {
+            eprintln!("agent factory runtime activation refused: {error:?}");
+            Error::OutcomeUnknown
+        }),_ = cancel.cancelled()=>Err(Error::Cancelled)};
         if result.is_err() {
             owner.cancel();
         }

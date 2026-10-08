@@ -249,6 +249,18 @@ impl Binding {
             local_codex,
         }
     }
+    pub(crate) fn scope(&self) -> &OwnedProvisionScope {
+        &self.scope
+    }
+    /// ADR-192: an attached agent with no warm child is ready while its
+    /// workspace root and its local sign-in folder still check.
+    pub(crate) fn check_attached(&self) -> Result<(), Failure> {
+        self.root.check().map_err(|_| Failure::Admission)?;
+        if let Some(local) = &self.local_codex {
+            local.check()?;
+        }
+        Ok(())
+    }
     async fn current(
         &self,
         domain: &DomainStore,

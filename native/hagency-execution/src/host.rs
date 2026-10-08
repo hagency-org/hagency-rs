@@ -714,13 +714,21 @@ impl Host {
             return Err(super::Failure::Admission);
         }
         let resource = scope.resource();
-        if resource.framework == "claude" {
+        // ADR-192: the agent's own runner, by name; then its provider.
+        if resource.framework != self.runner.framework()
+            && matches!(resource.framework.as_str(), "codex" | "claude")
+        {
             return Err(super::Failure::UnsupportedRunner {
                 framework: resource.framework.clone(),
             });
         }
-        if resource.framework != "codex"
-            || resource.provider.as_deref().is_some_and(|v| v != "openai")
+        let provider = match self.runner {
+            Runner::Codex => "openai",
+            Runner::Claude => "anthropic",
+        };
+        if resource.framework != self.runner.framework()
+            || resource.provider.as_deref().is_some_and(|v| v != provider)
+            || (self.runner == Runner::Claude && resource.reasoning.is_some())
         {
             return Err(super::Failure::Admission);
         }
