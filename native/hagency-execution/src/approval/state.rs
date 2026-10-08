@@ -141,6 +141,9 @@ pub(super) struct Callbacks {
     pub notices: Option<mpsc::Sender<ApprovalNotice>>,
     pub context: Option<HostApprovalContext>,
     pub entries: BTreeMap<RequestId, Pending>,
+    /// A Claude turn's requests, by control request ID (ADR-192). A run
+    /// drives one runner, so one of the two maps stays empty.
+    pub claude: BTreeMap<String, super::claude::Entry>,
     pub parked: Option<Reservation>,
     #[cfg(test)]
     pub fault: Option<super::Fault>,
@@ -168,6 +171,7 @@ impl ApprovalRun {
                 notices: Some(notices),
                 context: None,
                 entries: BTreeMap::new(),
+                claude: BTreeMap::new(),
                 parked: None,
                 #[cfg(test)]
                 fault: None,
@@ -209,6 +213,9 @@ impl ApprovalRun {
         self.callbacks
             .entries
             .retain(|_, entry| !(entry.in_flight && entry.write.is_none()));
+        self.callbacks
+            .claude
+            .retain(|_, entry| !entry.in_flight || entry.written());
     }
 }
 impl Callbacks {

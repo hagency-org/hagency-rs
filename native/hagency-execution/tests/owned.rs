@@ -20,6 +20,8 @@ mod accounts;
 mod approval_fixture;
 #[path = "owned/approvals.rs"]
 mod approvals;
+#[path = "owned/claude_approvals.rs"]
+mod claude_approvals;
 #[path = "owned/idle.rs"]
 mod idle;
 #[path = "owned/inspection.rs"]

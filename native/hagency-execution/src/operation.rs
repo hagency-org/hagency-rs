@@ -1493,12 +1493,22 @@ struct ClaudeTurn<'a> {
     cancel: &'a Arc<AtomicBool>,
     until: Instant,
     ceiling: Instant,
+    /// The approval context's workspace facts, when the host has approvals.
+    approval: Option<ClaudeApproval>,
+}
+struct ClaudeApproval {
+    workspace: String,
+    resource: String,
+    may_write: bool,
+    expires_at: u64,
 }
 /// One Claude turn on a fresh guardian-owned session (ADR-192), between the
 /// shared admission in `execute` and the shared `settle`: initialize, bind the
 /// scoped helper (ADR-158), one prompt, then read to its result (ADR-155).
-/// A permission request reaches no owner card yet: like a Codex turn without
-/// approvals, it refuses the turn. The child is stopped before this returns;
+/// With approvals, `system/init` binds the approval context and the Claude
+/// coordinator drives the rest of the turn, so every permission request
+/// becomes an owner card (decision 4). Without them a permission request
+/// refuses the turn, as for Codex. The child is stopped before this returns;
 /// the returned value is the drive's outcome for `settle`.
 async fn run_claude_turn(
     turn: ClaudeTurn<'_>,
@@ -1519,6 +1529,7 @@ async fn run_claude_turn(
         cancel,
         until,
         ceiling,
+        mut approval,
     } = turn;
     note(
         domain,
@@ -1537,12 +1548,12 @@ async fn run_claude_turn(
     )
     .await;
     let refused = |_: hagency_runtime::claude::session::Error| Failure::Protocol;
-    let mut text = None;
-    let mut ended = false;
-    let mut turn_failure = String::new();
+    let mut outcome = crate::approval::claude::ClaudeOutcome::default();
     let local = report.local_codex.clone();
     let status = &mut report.canonical_status;
     let usage = report.usage.as_mut().ok_or(Failure::UsageBinding)?;
+    let mut approvals = report.approvals.as_mut();
+    let settlement_cause = &mut report.settlement_cause;
     let drive = async {
         watched_with(
             session.initialize(),
@@ -1619,10 +1630,10 @@ async fn run_claude_turn(
                 status,
             )
             .await?;
-            match message {
+            match &message {
                 // The usage source exists from `system/init` on (ADR-157).
                 Message::Event { kind, payload, .. }
-                    if kind == EventKind::System && payload["subtype"] == "init" =>
+                    if *kind == EventKind::System && payload["subtype"] == "init" =>
                 {
                     usage.attach(&*session);
                     note(
@@ -1632,26 +1643,67 @@ async fn run_claude_turn(
                         serde_json::json!({"session_id": session.session_id()}),
                     )
                     .await;
+                    let (Some(run), Some(approval)) = (approvals.take(), approval.take()) else {
+                        continue;
+                    };
+                    // The session is the thread and the one prompt the turn,
+                    // as Codex names its thread and turn (ADR-192).
+                    let thread = crate::approval::claude::opaque(
+                        session.session_id().ok_or(Failure::Protocol)?,
+                    );
+                    let turn = crate::approval::claude::TURN;
+                    let connection = hagency_core::canonical::digest(&serde_json::json!([
+                        cap,
+                        session.id(),
+                        thread,
+                        turn
+                    ]))
+                    .map_err(|_| Failure::Admission)?;
+                    let context = hagency_core::approvals::HostApprovalContext {
+                        id: format!("owned_{connection}"),
+                        connection_id: connection,
+                        thread_id: thread,
+                        turn_id: turn.into(),
+                        workspace_resource: approval.resource,
+                        workspace: approval.workspace,
+                        windows_paths: cfg!(windows),
+                        environment_id: None,
+                        may_write: approval.may_write,
+                        yolo: false,
+                    };
+                    run.bind_claude(
+                        domain,
+                        cap,
+                        expected,
+                        context,
+                        Deadline {
+                            until: ceiling,
+                            expires_at: approval.expires_at,
+                        },
+                        session,
+                    )
+                    .await?;
+                    return run
+                        .drive_claude(
+                            crate::approval::claude::ClaudeDrive {
+                                domain,
+                                cap,
+                                cancel,
+                                until: ceiling,
+                                status,
+                                usage,
+                                outcome: &mut outcome,
+                                settlement_cause,
+                            },
+                            session,
+                        )
+                        .await;
                 }
-                Message::Event { kind, payload, .. } => {
-                    if let Some(observation) = session.last_observation()
-                        && usage.observe(observation)
+                Message::Event { .. } => {
+                    if outcome
+                        .observe(session, usage, &message, cancel, ceiling)
+                        .await?
                     {
-                        // Storage refusal closes capture only, as for Codex.
-                        let _ = bounded(usage.record_pending(), cancel, ceiling).await?;
-                    }
-                    if kind == EventKind::Result {
-                        ended = true;
-                        if payload["subtype"] == "success" && payload["is_error"] == false {
-                            text = payload["result"].as_str().map(str::to_owned);
-                        } else {
-                            turn_failure = payload["subtype"]
-                                .as_str()
-                                .unwrap_or("error")
-                                .chars()
-                                .take(512)
-                                .collect();
-                        }
                         return Ok(());
                     }
                 }
@@ -1670,14 +1722,19 @@ async fn run_claude_turn(
     // ADR-183 decision D: the budget only notifies under the turn.
     let (drive, over_budget) = budget.watch(drive, domain, cap).await;
     report.over_budget = over_budget;
-    report.protocol = match text {
+    report.protocol = match outcome.text {
         Some(text) => {
             report.text = Some(text);
             Protocol::Completed
         }
-        None if ended => Protocol::Failed,
+        None if outcome.ended => Protocol::Failed,
         None => Protocol::Unknown,
     };
+    // A drive that ended in a settlement verdict outranks Claude's own result,
+    // as for Codex (ADR-046): no `SettlementUnknown` beside a completion.
+    if matches!(drive, Err(Failure::SettlementUnknown)) && report.protocol == Protocol::Completed {
+        report.protocol = Protocol::Unknown;
+    }
     note(
         domain,
         cap,
@@ -1690,7 +1747,7 @@ async fn run_claude_turn(
     report.exit_identity = session.exit_identity();
     report.stderr_tail = session.stderr_tail(512);
     report.guardian_stderr_tail = session.guardian_stderr_tail();
-    report.turn_failure = turn_failure;
+    report.turn_failure = outcome.failure;
     drive
 }
 async fn execute(
@@ -1873,6 +1930,21 @@ async fn execute(
                     cancel,
                     until,
                     ceiling,
+                    approval: match approval_workspace {
+                        Some(workspace) => Some(ClaudeApproval {
+                            workspace,
+                            resource: scope
+                                .input()
+                                .resources
+                                .first()
+                                .ok_or(Failure::Admission)?
+                                .id
+                                .clone(),
+                            may_write: approval_may_write,
+                            expires_at: ceiling_expires_at,
+                        }),
+                        None => None,
+                    },
                 },
                 launch,
                 prompt,
