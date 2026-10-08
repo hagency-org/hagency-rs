@@ -98,6 +98,23 @@ impl OwnedClaudeSession {
     pub fn stderr_snapshot(&self) -> StderrSnapshot {
         self.session.stderr_snapshot()
     }
+    /// The leader's exit as the guardian reaped it, `code:N` or `signal:N`.
+    /// Evidence for the attempt record only (ADR-181), as for Codex.
+    pub fn exit_identity(&self) -> Option<String> {
+        let Cleanup::Observed(report) = self.cleanup else {
+            return None;
+        };
+        super::session::exit_identity(report.leader_status?)
+    }
+    /// The last `max` bytes of the retained stderr tail, control characters
+    /// other than newline replaced. Private diagnostic text.
+    pub fn stderr_tail(&self, max: usize) -> String {
+        super::session::stderr_tail(&self.session.stderr_snapshot().tail, max)
+    }
+    /// The guardian's own stderr tail as the platform collected it (ADR-181).
+    pub fn guardian_stderr_tail(&self) -> String {
+        self.owner.guardian_stderr_tail()
+    }
     pub fn enable_approval_control(&mut self, policy: ApprovalControlPolicy) -> Result<(), Error> {
         let operation = Operation::new(self)?;
         let result = operation.runner.session.enable_approval_control(policy);

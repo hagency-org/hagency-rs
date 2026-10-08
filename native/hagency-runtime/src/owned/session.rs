@@ -214,19 +214,7 @@ impl OwnedSession {
     /// tail), cut on a character boundary, with control characters other than
     /// newline replaced. Private diagnostic text: no projection reads it.
     pub fn stderr_tail(&self, max: usize) -> String {
-        let snapshot = self.session.stderr_snapshot();
-        let text = String::from_utf8_lossy(&snapshot.tail);
-        let start = text.ceil_char_boundary(text.len().saturating_sub(max));
-        text[start..]
-            .chars()
-            .map(|c| {
-                if c.is_control() && c != '\n' {
-                    '\u{FFFD}'
-                } else {
-                    c
-                }
-            })
-            .collect()
+        stderr_tail(&self.session.stderr_snapshot().tail, max)
     }
     /// The guardian's own stderr tail as the platform collected it (ADR-181).
     pub fn guardian_stderr_tail(&self) -> String {
@@ -375,7 +363,7 @@ fn observe_stop(owner: &mut SupervisedProcess) -> Cleanup {
     }
 }
 #[cfg(unix)]
-fn exit_identity(status: i32) -> Option<String> {
+pub(super) fn exit_identity(status: i32) -> Option<String> {
     use std::os::unix::process::ExitStatusExt;
     let status = std::process::ExitStatus::from_raw(status);
     if let Some(code) = status.code() {
@@ -385,8 +373,24 @@ fn exit_identity(status: i32) -> Option<String> {
     }
 }
 #[cfg(not(unix))]
-fn exit_identity(_status: i32) -> Option<String> {
+pub(super) fn exit_identity(_status: i32) -> Option<String> {
     None
+}
+/// The last `max` bytes of a retained stderr tail, cut on a character
+/// boundary, with control characters other than newline replaced.
+pub(super) fn stderr_tail(tail: &[u8], max: usize) -> String {
+    let text = String::from_utf8_lossy(tail);
+    let start = text.ceil_char_boundary(text.len().saturating_sub(max));
+    text[start..]
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 struct Operation<'a> {
     runner: &'a mut OwnedSession,
