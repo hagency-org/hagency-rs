@@ -38,7 +38,11 @@ export default function SetupPage() {
   const verified = selected?.phase === 'connected';
   const runtimeReady = !!setup?.runtimeConfigured && setup.agents?.some(agent => agent.found && agent.signedIn);
   const sourceReady = (setup?.offer?.sourceResources ?? setup?.offer?.resources ?? 0) > 0;
-  const choices = setup?.offer?.choices ?? [], choice = choices[choiceIndex];
+  // A coding agent configured after the first source (ADR-192: Claude Code
+  // beside Codex) still gets its own offer: only agents with a source drop out.
+  const sourceFrameworks = setup?.offer?.sourceFrameworks ?? [];
+  const choices = (setup?.offer?.choices ?? []).filter(c => !sourceFrameworks.includes(c.framework ?? 'codex'));
+  const choiceAt = choiceIndex < choices.length ? choiceIndex : 0, choice = choices[choiceAt];
   const load = useCallback(async () => {
     try {
       await data.ready;
@@ -115,9 +119,9 @@ export default function SetupPage() {
         {step === 2 && <section className="panel setup-stage" aria-labelledby="resource-title">
           <h2 id="resource-title">{t('guided.resourceTitle')}</h2><p>{t('guided.resourceHelp')}</p>
           {!verified && <p className="note">{t('guided.connectionRequired')}</p>}
-          {!sourceReady && <form className="setup-source-form" onSubmit={prepareSource}>
+          {choices.length > 0 && <form className="setup-source-form" onSubmit={prepareSource}>
             <p>{t('guided.sourceHelp')}</p>
-            <label>{t('guided.model')}<select value={choiceIndex} onChange={e => setChoiceIndex(Number(e.target.value))} disabled={busy}>
+            <label>{t('guided.model')}<select value={choiceAt} onChange={e => setChoiceIndex(Number(e.target.value))} disabled={busy}>
               {choices.map((c, i) => <option key={`${c.framework}:${c.model}:${c.reasoning}`} value={i}>{AGENT_NAMES[c.framework] ?? 'Codex'} · {c.model}{c.reasoning ? ` · ${c.reasoning}` : ''}</option>)}
             </select></label>
             <label>{t('guided.ceiling')}<input type="number" min="1" max={Number.MAX_SAFE_INTEGER} step="1" required value={tokens} onChange={e => setTokens(e.target.value)} disabled={busy} /></label>

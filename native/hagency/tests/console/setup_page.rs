@@ -32,6 +32,9 @@ async fn native_setup_status_reports_agents_and_steps() {
     assert!(value["agents"][1]["found"].is_boolean());
     assert_eq!(value["agents"][1]["signInAssumed"], json!(true));
     // Each choice names its coding agent; Claude choices carry no reasoning.
+    // The fixture already holds a Codex source; Claude Code can still be
+    // offered, so the page keeps its offer form for Claude choices.
+    assert_eq!(value["offer"]["sourceFrameworks"], json!(["codex"]));
     let choices = value["offer"]["choices"].as_array().unwrap();
     assert!(choices.iter().any(|c| c["framework"] == "codex"));
     let claude: Vec<_> = choices

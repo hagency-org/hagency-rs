@@ -153,10 +153,14 @@ async fn report(
         Some(store) => store
             .resource_configurations(String::new(), 64)
             .await
-            .map(|rows| rows.len())
-            .unwrap_or(0),
-        None => 0,
+            .unwrap_or_default(),
+        None => Vec::new(),
     };
+    // The coding agents that already have a source; the page offers the others.
+    let source_frameworks: std::collections::BTreeSet<_> = sources
+        .iter()
+        .map(|source| source.config.framework.clone())
+        .collect();
     let mut value = json!({
         "ok": true,
         "applicable": live.fleet_address().is_some(),
@@ -170,7 +174,8 @@ async fn report(
         "offer": {
             "choices": frameworks.into_iter().flat_map(choices).collect::<Vec<_>>(),
             "resources": resources,
-            "sourceResources": sources,
+            "sourceResources": sources.len(),
+            "sourceFrameworks": source_frameworks,
         },
     });
     if let Some(result) = configured_now {
