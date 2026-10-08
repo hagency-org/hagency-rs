@@ -530,6 +530,14 @@ fn main() -> io::Result<()> {
                 "home": std::env::var_os("HOME").is_some(),
             }))?,
         )?;
+        // The settings file the Host passed, exactly as this child reads it.
+        if let Some(config) = args
+            .iter()
+            .position(|value| value == "--config")
+            .and_then(|index| args.get(index + 1))
+        {
+            fs::write(marker.with_extension("config"), fs::read(config)?)?;
+        }
         let mode = std::env::var("HAGENCY_OFFLINE_MODE").map_err(io::Error::other)?;
         return octos_probe::run(&mode, &marker);
     }

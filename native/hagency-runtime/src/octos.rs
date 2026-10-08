@@ -441,10 +441,24 @@ pub fn request(id: &str, method: &str, params: Value) -> Result<Vec<u8>, Error> 
     }
     encode(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
 }
+/// Hagency's own Octos settings (ADR-193 decision 3), passed with `--config`
+/// so Octos reads neither a project's `.octos/config.json` nor the user's
+/// config: no hooks, no MCP servers, and sessions kept out of the project.
+/// The model and keys still come from the user's profile.
+pub const CONFIG: &[u8] =
+    br#"{"version":1,"hooks":[],"mcp_servers":[],"appui":{"sessions_in_cwd":false}}"#;
+/// The one file Octos writes into a writable workspace that has none: its
+/// workspace policy, kept out of Git by the host.
+pub const WORKSPACE_POLICY: &str = ".octos-workspace.toml";
 /// The argv after the executable: one private stdio server bound to the
-/// dispatch's workspace, network denied, runtime state in its own directory.
-pub fn serve_arguments(workspace: &str, instance_dir: &str) -> Result<Vec<String>, Error> {
-    if [workspace, instance_dir]
+/// dispatch's workspace, network denied, runtime state in its own directory
+/// and Hagency's own settings file.
+pub fn serve_arguments(
+    workspace: &str,
+    instance_dir: &str,
+    config: &str,
+) -> Result<Vec<String>, Error> {
+    if [workspace, instance_dir, config]
         .iter()
         .any(|path| !path.starts_with('/') || path.len() > 1024 || path.contains('\0'))
     {
@@ -458,6 +472,8 @@ pub fn serve_arguments(workspace: &str, instance_dir: &str) -> Result<Vec<String
         "--no-network",
         "--instance-data-dir",
         instance_dir,
+        "--config",
+        config,
     ]
     .map(str::to_owned)
     .to_vec())

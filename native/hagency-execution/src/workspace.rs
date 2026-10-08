@@ -98,6 +98,48 @@ impl Root {
         }
         Ok(())
     }
+    /// Adds `pattern` to the workspace's own Git exclude list when the
+    /// workspace is a Git checkout of its own, its `.git` a directory in it
+    /// (ADR-193 decision 3). Every step goes through the retained handle, and
+    /// cap-std refuses a path or link out of the workspace, so neither the
+    /// project nor an agent can point this write elsewhere. A linked
+    /// worktree's `.git` file, or a link, is left alone.
+    pub(crate) fn exclude_from_git(&self, pattern: &str) -> Result<(), Failure> {
+        use std::io::{ErrorKind, Write};
+        let dir = Dir::from_std_file(self.file.try_clone().map_err(|_| Failure::Admission)?);
+        match dir.symlink_metadata(".git") {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(Failure::Admission),
+        }
+        let git = dir.open_dir(".git").map_err(|_| Failure::Admission)?;
+        match git.create_dir("info") {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(Failure::Admission),
+        }
+        let current = match git.read_to_string("info/exclude") {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+            Err(_) => return Err(Failure::Admission),
+        };
+        if current.lines().any(|line| line.trim() == pattern) {
+            return Ok(());
+        }
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.append(true).create(true);
+        let mut file = git
+            .open_with("info/exclude", &options)
+            .map_err(|_| Failure::Admission)?;
+        let separator = if current.is_empty() || current.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        file.write_all(format!("{separator}{pattern}\n").as_bytes())
+            .map_err(|_| Failure::Admission)
+    }
 }
 
 pub(crate) struct Workspaces(BTreeMap<String, Arc<Root>>);
@@ -272,5 +314,77 @@ impl StartedWorkspace {
             .map_err(WorkspaceError::Snapshot)?;
         self.binding.check(cap)?;
         Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn root(base: &Path, name: &str) -> (PathBuf, Root) {
+        let path = base.join(name);
+        private::directory(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let root = Root::open(path.clone()).unwrap();
+        (path, root)
+    }
+    /// ADR-193 decision 3: the one Octos file is added to a checkout's own
+    /// exclude list once, after what is there, and never anywhere else.
+    #[test]
+    fn native_octos_policy_exclusion_stays_in_the_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let pattern = "/.octos-workspace.toml";
+
+        // No checkout: nothing to keep out, and no `.git` is made.
+        let (plain, root_plain) = root(temp.path(), "plain");
+        root_plain.exclude_from_git(pattern).unwrap();
+        assert!(!plain.join(".git").exists());
+
+        // A checkout: added once, and kept once.
+        let (checkout, root_checkout) = root(temp.path(), "checkout");
+        std::fs::create_dir(checkout.join(".git")).unwrap();
+        root_checkout.exclude_from_git(pattern).unwrap();
+        root_checkout.exclude_from_git(pattern).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(checkout.join(".git/info/exclude")).unwrap(),
+            "/.octos-workspace.toml\n"
+        );
+
+        // After an existing line without its newline.
+        let (existing, root_existing) = root(temp.path(), "existing");
+        std::fs::create_dir_all(existing.join(".git/info")).unwrap();
+        std::fs::write(existing.join(".git/info/exclude"), "*.log").unwrap();
+        root_existing.exclude_from_git(pattern).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(existing.join(".git/info/exclude")).unwrap(),
+            "*.log\n/.octos-workspace.toml\n"
+        );
+
+        // A linked worktree's `.git` file names a directory elsewhere: left alone.
+        let (linked, root_linked) = root(temp.path(), "linked");
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", outside.display()),
+        )
+        .unwrap();
+        root_linked.exclude_from_git(pattern).unwrap();
+
+        #[cfg(unix)]
+        {
+            // `.git` itself a link out of the workspace: left alone.
+            let (symlinked, root_symlinked) = root(temp.path(), "symlinked");
+            std::os::unix::fs::symlink(&outside, symlinked.join(".git")).unwrap();
+            root_symlinked.exclude_from_git(pattern).unwrap();
+            // `info` a link out of the workspace: refused, never followed.
+            let (escaping, root_escaping) = root(temp.path(), "escaping");
+            std::fs::create_dir(escaping.join(".git")).unwrap();
+            std::os::unix::fs::symlink(&outside, escaping.join(".git/info")).unwrap();
+            assert!(matches!(
+                root_escaping.exclude_from_git(pattern),
+                Err(Failure::Admission)
+            ));
+        }
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 }

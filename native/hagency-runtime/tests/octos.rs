@@ -210,7 +210,12 @@ fn native_octos_requests_and_launch_arguments_are_bounded() {
         Err(Error::Capacity)
     ));
     assert_eq!(
-        serve_arguments("/work/space", "/state/octos/agent").unwrap(),
+        serve_arguments(
+            "/work/space",
+            "/state/octos/agent",
+            "/state/octos/agent/config.json"
+        )
+        .unwrap(),
         [
             "serve",
             "--stdio",
@@ -218,16 +223,26 @@ fn native_octos_requests_and_launch_arguments_are_bounded() {
             "/work/space",
             "--no-network",
             "--instance-data-dir",
-            "/state/octos/agent"
+            "/state/octos/agent",
+            "--config",
+            "/state/octos/agent/config.json"
         ]
     );
-    for (workspace, instance) in [
-        ("work", "/state"),
-        ("/work", "state"),
-        ("/work\0", "/state"),
+    for (workspace, instance, config) in [
+        ("work", "/state", "/state/c.json"),
+        ("/work", "state", "/state/c.json"),
+        ("/work", "/state", "c.json"),
+        ("/work\0", "/state", "/state/c.json"),
     ] {
-        assert!(serve_arguments(workspace, instance).is_err());
+        assert!(serve_arguments(workspace, instance, config).is_err());
     }
+    // Hagency's own settings, as Octos reads them: no hooks, no MCP servers,
+    // sessions out of the project.
+    let config: Value = serde_json::from_slice(hagency_runtime::octos::CONFIG).unwrap();
+    assert_eq!(
+        config,
+        json!({"version":1,"hooks":[],"mcp_servers":[],"appui":{"sessions_in_cwd":false}})
+    );
     assert!(profile_id("coding") && profile_id("deep_seek-2"));
     let long = "p".repeat(65);
     for invalid in ["", "-lead", "a:b", "a b", "a#b", long.as_str()] {

@@ -27,6 +27,8 @@ live qualification are later slices.
 - Take the reply as the last turn's last persisted text after its last tool start.
 - Record each terminal's usage as it arrives and the session totals at idle; absent usage is unknown, never zero.
 - Remove provider keys from the launch, set `OCTOS_NO_MODEL_DOWNLOAD=1`, and give each agent its own private instance directory.
+- Pass Hagency's own settings file with `--config` (no hooks, no MCP servers, sessions out of the project), so neither a project's nor the user's `config.json` is read.
+- Add Octos's workspace policy to a checkout's own Git exclude list through the retained workspace handle, never following a `.git` file or a link out of the workspace.
 - Refuse an Octos approval or host tool call until those slices land, stopping the child.
 
 ### Must Not
@@ -61,6 +63,7 @@ live qualification are later slices.
 - native/hagency-execution/src/lib.rs
 - native/hagency-execution/src/operation.rs
 - native/hagency-execution/src/usage/capture.rs
+- native/hagency-execution/src/workspace.rs
 - native/hagency-execution/tests/owned.rs
 - native/hagency-execution/tests/owned/octos.rs
 - specs/task-rust-octos-runner-seam.spec.md
@@ -169,6 +172,15 @@ Scenario: Failures and refusals settle as they do for the other runners
   Given an errored turn, an approval, another runner's dispatch and resources with and without a profile
   When the dispatch runs or the resource is checked
   Then each is a failure, a refusal by name or an invalid resource
+
+Scenario: Octos reads Hagency's settings and its one project file stays out of Git
+  Test: native_octos_workspace_policy_stays_out_of_git
+  Test: native_octos_policy_exclusion_stays_in_the_workspace
+  Level: integration
+  Test Double: offline OUP peer that writes its workspace policy, and retained workspace roots
+  Given a Git checkout, a plain folder, and `.git` files or links that lead out of the workspace
+  When an Octos dispatch is prepared and runs
+  Then the policy is added once to the checkout's exclude list, nothing is written outside the workspace, and the child reads only Hagency's settings
 
 Scenario: The ledger and the claim take Octos
   Test: native_metering_octos_runtime

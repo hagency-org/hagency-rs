@@ -160,6 +160,15 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
         return super::pulse(marker);
     }
     let params = &open["params"];
+    // A writable session writes its workspace policy into a project that has
+    // none, as Octos main does.
+    if set["params"]["update"]["mode"] == "workspace_write" {
+        let policy = Path::new(params["cwd"].as_str().ok_or(io::ErrorKind::InvalidInput)?)
+            .join(".octos-workspace.toml");
+        if !policy.exists() {
+            fs::write(policy, "[workspace]\n")?;
+        }
+    }
     answer(
         &open,
         json!({"opened":{"session_id":params["session_id"],"active_profile_id":params["profile_id"],

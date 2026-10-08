@@ -112,6 +112,21 @@ async fn native_octos_dispatch_completes_at_idle_with_its_reply() {
     );
     assert_eq!(instance.file_name().unwrap().len(), 16);
     hagency_store::private::directory(&instance).unwrap();
+    // Hagency's own settings (decision 3), private in the instance directory,
+    // and exactly what the child read: no project or user config.
+    let config = instance.join("hagency-octos-config.json");
+    assert_eq!(argv[7..], ["--config", config.to_str().unwrap()]);
+    assert_eq!(
+        hagency_store::private::read_secret(&config).unwrap(),
+        hagency_runtime::octos::CONFIG
+    );
+    assert_eq!(
+        fs::read(f.work.join("owned-dispatch.config")).unwrap(),
+        hagency_runtime::octos::CONFIG
+    );
+    // Not a checkout: Octos's policy file is there, and no `.git` was made.
+    assert!(f.work.join(".octos-workspace.toml").exists());
+    assert!(!f.work.join(".git").exists());
     let environment: serde_json::Value =
         serde_json::from_slice(&fs::read(f.work.join("owned-dispatch.environment")).unwrap())
             .unwrap();
@@ -239,6 +254,49 @@ async fn native_octos_host_and_codex_host_refuse_each_others_dispatch() {
     assert_eq!(
         report.settlement,
         Settlement::Negative(OwnedObservation::Unstarted)
+    );
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+/// ADR-193 decision 3: in a workspace that is a Git checkout, the one file
+/// Octos writes there, its workspace policy, is kept out of Git: added to the
+/// checkout's own exclude list after what is there, before Octos starts.
+#[tokio::test]
+async fn native_octos_workspace_policy_stays_out_of_git() {
+    let f = Fixture::configured_resource(false, false, octos_pool());
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "t@e.com"],
+        vec!["config", "user.name", "T"],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&f.work)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    // `git init` writes `info/` only from its templates, which not every
+    // install has.
+    fs::create_dir_all(f.work.join(".git/info")).unwrap();
+    fs::write(f.work.join(".git/info/exclude"), "*.log").unwrap();
+    let report = run(&f, "normal").await;
+    assert_eq!(report.protocol, Protocol::Completed);
+    assert!(f.work.join(".octos-workspace.toml").exists());
+    assert_eq!(
+        fs::read_to_string(f.work.join(".git/info/exclude")).unwrap(),
+        "*.log\n/.octos-workspace.toml\n"
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["check-ignore", "--quiet", ".octos-workspace.toml"])
+            .current_dir(&f.work)
+            .status()
+            .unwrap()
+            .success()
     );
     drop(report);
     f.domain.shutdown().await.unwrap();

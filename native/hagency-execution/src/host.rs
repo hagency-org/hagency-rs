@@ -799,9 +799,17 @@ impl Host {
         .map_err(|_| super::Failure::Admission)?;
         let instance = instances.join(agent.get(..16).ok_or(super::Failure::Admission)?);
         hagency_store::private::directory(&instance).map_err(|_| super::Failure::Admission)?;
+        // Hagency's own settings (decision 3): Octos reads neither a project's
+        // `.octos/config.json` nor the user's config.
+        let config = instance.join("hagency-octos-config.json");
+        hagency_store::private::replace(&config, hagency_runtime::octos::CONFIG)
+            .map_err(|_| super::Failure::Admission)?;
+        // The one file Octos writes into a writable workspace stays out of Git.
+        root.exclude_from_git(&format!("/{}", hagency_runtime::octos::WORKSPACE_POLICY))?;
         let arguments = hagency_runtime::octos::serve_arguments(
             path.to_str().ok_or(super::Failure::Admission)?,
             instance.to_str().ok_or(super::Failure::Admission)?,
+            config.to_str().ok_or(super::Failure::Admission)?,
         )
         .map_err(|_| super::Failure::Admission)?
         .into_iter()
