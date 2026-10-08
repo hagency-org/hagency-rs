@@ -33,6 +33,13 @@ impl Fixture {
             pool.model = "claude-sonnet-5".into();
             pool.reasoning = None;
         }
+        if framework == Framework::Octos {
+            pool.framework = "octos".into();
+            pool.model = "kimi-k3".into();
+            pool.provider = Some("moonshot".into());
+            pool.reasoning = None;
+            pool.octos_profile = Some("coding".into());
+        }
         db.put_resource(&pool).unwrap();
         let p = proof(&request("usage_request", "Worker", &pool, 100));
         let engagement = db.admit(&p, 1000).unwrap();
@@ -114,6 +121,22 @@ fn codex(fresh: u64, output: u64, cached: u64) -> UsageObservation {
 }
 fn claude(input: u64, output: u64, write: u64, read: u64) -> UsageObservation {
     UsageObservation::parse(Framework::Claude,&json!({"uuid":"message","message":{"usage":{"input_tokens":input,"output_tokens":output,"cache_creation_input_tokens":write,"cache_read_input_tokens":read}}}).to_string()).unwrap()
+}
+fn octos(input: u64, output: u64) -> UsageObservation {
+    use hagency_metering::{TokenCounts, octos_usage::*, runtime_usage::ProjectionDiagnostics};
+    UsageObservation::octos_runtime(OctosUsage {
+        counts: TokenCounts {
+            input: Some(input),
+            output: Some(output),
+            cache_write: Some(30),
+            cache_read: Some(20),
+        },
+        reasoning: Some(2),
+        coverage: Coverage::Session,
+        turns: 1,
+        diagnostics: ProjectionDiagnostics::default(),
+    })
+    .unwrap()
 }
 fn empty() -> UsageObservation {
     UsageObservation::parse(Framework::Codex, "").unwrap()
@@ -467,4 +490,120 @@ fn native_usage_summary_all_unobserved_stays_unknown() {
         .expect("a bound source keeps the Some(all-null) shape");
     assert_eq!(latest.input, None, "unknown, never zero");
     assert_eq!(latest.output, None);
+}
+
+/// ADR-193: an Octos dispatch's usage source carries framework octos and
+/// takes Octos runtime evidence only; another framework's evidence is refused
+/// both ways.
+#[test]
+fn native_usage_octos_runtime_source() {
+    let mut f = Fixture::new(Framework::Octos);
+    let (_, _, source) = f.start();
+    assert_eq!(
+        f.sql()
+            .query_row("SELECT framework FROM usage_sources", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "octos"
+    );
+    assert!(
+        f.db.record_usage_observation(&source, "codex", &codex(1, 2, 3), 2000)
+            .is_err()
+    );
+    f.db.record_usage_observation(&source, "runtime_v1_1", &octos(10, 7), 2000)
+        .unwrap();
+    let totals = f.totals();
+    assert_eq!(totals.sources, 1);
+    let counts = totals.latest_counts.unwrap();
+    assert_eq!((counts.input, counts.output), (Some(10), Some(7)));
+    let mut other = Fixture::new(Framework::Codex);
+    let (_, _, codex_source) = other.start();
+    assert!(
+        other
+            .db
+            .record_usage_observation(&codex_source, "octos", &octos(1, 1), 2000)
+            .is_err()
+    );
+}
+
+/// ADR-193: migration 69 widens a v68 ledger's framework CHECK to octos and
+/// keeps every source and receipt it holds, each receipt still naming its
+/// source.
+#[test]
+fn native_usage_migration_admits_octos_sources() {
+    let mut f = Fixture::new(Framework::Codex);
+    let (_, _, source) = f.start();
+    f.db.record_usage_observation(&source, "before", &codex(10, 2, 3), 2000)
+        .unwrap();
+    let path = f.root.path().join("state");
+    let engagement = f.engagement.clone();
+    drop(f.db);
+    let sql = rusqlite::Connection::open(path.join("domain.sqlite3")).unwrap();
+    // A v68 ledger: the 017 CHECK names two frameworks. Rewritten here with
+    // foreign keys off; the migration itself runs with them on.
+    sql.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    sql.execute_batch(
+        "CREATE TABLE usage_sources_68 (
+ id TEXT PRIMARY KEY, dispatch_id TEXT NOT NULL REFERENCES runner_dispatches(id),
+ fence INTEGER NOT NULL, engagement_id TEXT NOT NULL REFERENCES engagements(id),
+ identity_digest TEXT NOT NULL, framework TEXT NOT NULL CHECK(framework IN ('claude','codex')),
+ attribution TEXT NOT NULL CHECK(json_valid(attribution)),
+ high_water TEXT NOT NULL CHECK(json_valid(high_water)),
+ latest_counts TEXT NOT NULL CHECK(json_valid(latest_counts)),
+ latest_observation TEXT CHECK(latest_observation IS NULL OR json_valid(latest_observation)),
+ latest_incomplete INTEGER NOT NULL DEFAULT 1 CHECK(latest_incomplete IN (0,1)),
+ latest_regressed INTEGER NOT NULL DEFAULT 0 CHECK(latest_regressed IN (0,1)),
+ historical_incomplete INTEGER NOT NULL DEFAULT 0 CHECK(historical_incomplete IN (0,1)),
+ regressions INTEGER NOT NULL DEFAULT 0, observations INTEGER NOT NULL DEFAULT 0,
+ observed_at INTEGER, UNIQUE(dispatch_id,fence)) STRICT;
+INSERT INTO usage_sources_68 SELECT * FROM usage_sources;
+DROP TABLE usage_sources;
+ALTER TABLE usage_sources_68 RENAME TO usage_sources;
+CREATE INDEX usage_sources_engagement ON usage_sources(engagement_id);
+PRAGMA user_version=68;",
+    )
+    .unwrap();
+    assert!(
+        sql.execute("UPDATE usage_sources SET framework='octos'", [])
+            .is_err()
+    );
+    drop(sql);
+    let db = DomainRepository::open(&path).unwrap();
+    let summary = db.usage_summary(&engagement).unwrap();
+    assert_eq!(summary.sources, 1);
+    assert_eq!(summary.latest_counts.unwrap().output, Some(2));
+    drop(db);
+    let sql = rusqlite::Connection::open(path.join("domain.sqlite3")).unwrap();
+    assert_eq!(
+        sql.pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
+            .unwrap(),
+        hagency_store::DOMAIN_SCHEMA_VERSION as u64
+    );
+    // The rebuilt receipts reference the rebuilt sources by their own name.
+    let schema: String = sql
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='usage_receipts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(schema.contains("source_id TEXT NOT NULL REFERENCES usage_sources(id)"));
+    let receipts: u64 = sql
+        .query_row("SELECT COUNT(*) FROM usage_receipts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(receipts, 1);
+    let orphans: u64 = sql
+        .query_row(
+            "SELECT COUNT(*) FROM usage_receipts r WHERE NOT EXISTS(SELECT 1 FROM usage_sources s WHERE s.id=r.source_id)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0);
+    sql.execute("UPDATE usage_sources SET framework='octos'", [])
+        .unwrap();
+    assert!(
+        sql.execute("UPDATE usage_sources SET framework='hermes'", [])
+            .is_err()
+    );
 }

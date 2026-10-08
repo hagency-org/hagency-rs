@@ -5,6 +5,7 @@ pub mod attribution;
 pub mod claude_usage;
 mod json;
 pub mod observation;
+pub mod octos_usage;
 pub mod reader;
 pub mod runtime_usage;
 
@@ -24,6 +25,8 @@ pub const MAX_TOKEN_COUNT: u64 = 9_007_199_254_740_991;
 pub enum Framework {
     Claude,
     Codex,
+    /// Runtime evidence only (ADR-193): Octos has no transcript parser.
+    Octos,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -194,6 +197,7 @@ pub fn parse_session(framework: Framework, snapshot: &str) -> Result<SessionRepo
         match framework {
             Framework::Claude => parser.claude(record)?,
             Framework::Codex => parser.codex(record)?,
+            Framework::Octos => return Err(MeteringError::InvalidRecord),
         }
     }
     if let Some(totals) = parser.totals {
@@ -213,6 +217,7 @@ pub fn parse_session(framework: Framework, snapshot: &str) -> Result<SessionRepo
                 models,
             }
         }
+        Framework::Octos => return Err(MeteringError::InvalidRecord),
         Framework::Codex => SessionDetails::Codex {
             turns: (parser.totals.is_some() && parser.turns_known).then_some(parser.turns),
             reasoning_output: parser.reasoning,

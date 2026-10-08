@@ -14,7 +14,7 @@ mod workspace;
 pub use approval::diagnostics;
 pub use approval::{ApprovalHost, ApprovalNotice, ApprovalRequests};
 pub use factory::{FactoryDispatch, FactoryRuntime, WarmHostPlan, WarmTaskBridge};
-pub use host::{Host, Limits, SharedHost};
+pub use host::{Host, Limits, Runner, SharedHost};
 pub use inspection::StopInspectionStatus;
 pub use local_codex::{LocalCodex, LocalProvider};
 pub use operation::{

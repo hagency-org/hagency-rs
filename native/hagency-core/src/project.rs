@@ -142,6 +142,10 @@ pub struct Resource {
     pub model: String,
     pub provider: Option<String>,
     pub reasoning: Option<String>,
+    /// The user's Octos profile an `octos` resource runs: its primary model is
+    /// the resource's model (ADR-193 decision 7). No other framework names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub octos_profile: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
     pub ceiling: Option<Ceiling>,
@@ -171,6 +175,17 @@ impl Resource {
                 return Err(InvalidInput("invalid model profile"));
             }
         }
+        if let Some(profile) = &self.octos_profile
+            && (self.framework != "octos"
+                || profile.is_empty()
+                || profile.len() > 64
+                || profile.starts_with('-')
+                || !profile
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+        {
+            return Err(InvalidInput("invalid Octos profile"));
+        }
         Ok(())
     }
     pub fn id(&self) -> String {
@@ -192,6 +207,7 @@ impl Resource {
     }
     pub fn provisionable(&self) -> bool {
         matches!(self.framework.as_str(), "claude" | "codex")
+            || (self.framework == "octos" && self.octos_profile.is_some())
     }
     pub fn eligible_roles(&self) -> Vec<String> {
         crate::qualification::roles()
