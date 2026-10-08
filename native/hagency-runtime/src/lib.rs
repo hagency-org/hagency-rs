@@ -3,5 +3,6 @@
 pub mod claude;
 pub mod codex;
 mod json;
+pub mod octos;
 pub mod owned;
 pub mod task_mcp;
