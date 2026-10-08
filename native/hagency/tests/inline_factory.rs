@@ -1609,3 +1609,91 @@ fn native_provisioning_factory_dispatch_custody() {
         }
     });
 }
+
+/// ADR-192: a Claude Code resource provisions an agent with no warm child:
+/// it is attached as a restart attaches, activated by the store's provision
+/// completion between its own checks, and its first task launches a fresh
+/// Claude session with the fixed task profile and completes with its reply.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn native_provisioning_claude_agent_first_dispatch() {
+    let mut f = Fixture::new_claude(false).await;
+    f.provision().await;
+    assert_eq!(f.target_state(), ("complete".into(), "active".into()));
+    assert!(
+        !f.work().join("owned-mcp.warm-entered").exists(),
+        "a Claude agent starts no warm app server"
+    );
+    let mut agent = f.collector.take_provisioned_agent(&f.engagement()).unwrap();
+    let session = agent.session().id.clone();
+    let workspace = agent.workspace_id().to_owned();
+    f.base
+        .store
+        .create_canonical_task(
+            "claude_task".into(),
+            session.clone(),
+            "Claude factory task".into(),
+            now(),
+        )
+        .await
+        .unwrap();
+    f.base
+        .store
+        .enqueue_dispatch(DispatchInput {
+            id: "claude_dispatch".into(),
+            session_id: session,
+            task_id: Some("claude_task".into()),
+            resources: vec![ResourceLease {
+                id: workspace,
+                exclusive: true,
+            }],
+            payload: serde_json::json!({"instruction":"offline Claude task"}),
+        })
+        .await
+        .unwrap();
+    let profile = agent.claim_profile().await.unwrap();
+    let cap = f
+        .base
+        .store
+        .claim_owned_dispatch_for_host(profile, "claude_host".into(), 30_000, 30_000, 2)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut operation = agent
+        .dispatch(cap.clone(), execution_limits())
+        .await
+        .unwrap();
+    let registration = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(registration) = operation.take_workspace_registration() {
+                break registration;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (binding, ack) = registration.into_parts();
+    binding.validate_current(&cap).await.unwrap();
+    ack.registered().unwrap();
+    let mut report = operation.wait().await.unwrap();
+    assert_eq!(
+        report.protocol,
+        hagency_execution::Protocol::Completed,
+        "Claude factory dispatch failed: {:?}",
+        report.failure
+    );
+    assert_eq!(report.text.as_deref(), Some("claude fixture reply"));
+    let argv: Vec<String> =
+        serde_json::from_slice(&fs::read(f.work().join("owned-dispatch.argv")).unwrap()).unwrap();
+    assert_eq!(
+        argv,
+        hagency_runtime::claude::task_arguments("claude-opus-5", true).unwrap()
+    );
+    report.retry_stop();
+    drop(report);
+    drop(operation);
+    drop(binding);
+    agent.close().await.unwrap();
+    f.close().await;
+}
