@@ -2,9 +2,9 @@
 
 # Hagency
 
-**Run local Codex agents for Palpo Matrix projects, with coordinator approval and token budgets.**
+**Run local Codex and Claude Code agents for Palpo Matrix projects, with coordinator approval and token budgets.**
 
-Hagency is one Rust binary, `hagency`, that runs as a service on your machine and uses your local Codex installation. The *operator* configures resources: a model, reasoning effort and token budget bound to a server engagement. The engagement's designated Matrix *coordinator* reviews project and agent requests in Rinx's Palpo Inbox. Once an agent's allocation is accepted, Hagency creates its Matrix identity and starts its runtime. People @mention it in the project room; its owner can message it directly and approve protected operations in a private encrypted room.
+Hagency is one Rust binary, `hagency`, that runs as a service on your machine and uses your local Codex installation, your local Claude Code installation, or both. The *operator* configures resources: a model, reasoning effort and token budget bound to a server engagement. The engagement's designated Matrix *coordinator* reviews project and agent requests in Rinx's Palpo Inbox. Once an agent's allocation is accepted, Hagency creates its Matrix identity and starts its runtime. People @mention it in the project room; its owner can message it directly and approve protected operations in a private encrypted room.
 
 These instructions describe this source checkout. Older pre-release binaries may not include the server-engagement UI.
 
@@ -20,7 +20,7 @@ This repository holds the Rust service in [native/](native/) and the console sou
 | --- | --- |
 | [What it does](#what-it-does) | The capability surface |
 | [Architecture](#architecture) | One process, its threads and its crates |
-| [Set up Hagency](#set-up-hagency) | Sign in to Codex, start Hagency, finish setup in the console |
+| [Set up Hagency](#set-up-hagency) | Sign in to your coding agent, start Hagency, finish setup in the console |
 | [Set up from the command line](#set-up-from-the-command-line) | `hagency setup`, `hagency serve`, the installer, coordinator installs, the operator API |
 | [Operating](#operating) | Health, logs, backup, credential rotation |
 | [Configuration](#configuration) | The state directory, `fleet-runtime.json` and `agent-driver.json` |
@@ -99,7 +99,7 @@ You need:
 | | |
 | --- | --- |
 | Host | macOS, or Linux with systemd. You use the console on the machine that runs Hagency. |
-| Coding agent | Codex CLI, installed and on your `PATH` |
+| Coding agent | Codex CLI, Claude Code, or both, installed and on your `PATH`. Claude Code must be its native install (`claude install`), not the npm launcher. |
 | Palpo and Rinx | A compatible Palpo server and Rinx client, plus existing resource-owner, coordinator and administrator accounts on that server |
 
 Your terminal work is steps 1 to 3. Then use the Hagency console for local setup and Rinx for Matrix approvals.
@@ -114,7 +114,9 @@ codex login
 
 On a machine without a browser, add `--device-auth`.
 
-Hagency never signs in for you. The console's Setup page only asks Codex whether it is signed in, and how (`codex login status`); `hagency setup` checks for a sign-in file instead (see [`hagency setup`](#prepare-a-state-directory-with-hagency-setup)). Hagency never reads or stores your credentials.
+Sign in to Claude Code the usual way: run `claude` in a terminal on this machine and follow its login prompt.
+
+Hagency never signs in for you. The console's Setup page only asks Codex whether it is signed in, and how (`codex login status`); `hagency setup` checks for a sign-in file instead (see [`hagency setup`](#prepare-a-state-directory-with-hagency-setup)). For Claude Code, Hagency neither asks nor checks: it runs only `claude --version` and assumes Claude Code is signed in. If Claude Code is signed out, its agents' turns are refused until you sign in again. Hagency never reads or stores your credentials.
 
 ### 2. Get the hagency binary
 
@@ -199,7 +201,7 @@ Choose one:
 `hagency service install` registers a per-user service that runs `hagency start --no-open`, and starts it:
 - **macOS:** a LaunchAgent, `~/Library/LaunchAgents/io.hagency.plist`. It starts at login and restarts after a crash. Its log is `~/Library/Logs/Hagency/hagency.log`.
 - **Linux:** a `systemd --user` unit, `${XDG_CONFIG_HOME:-~/.config}/systemd/user/hagency.service`. No `sudo` is needed. A user service stops when you log out. To keep it running, run `loginctl enable-linger $USER` once.
-- The service runs as you, so it uses your Codex sign-in. It records your current `PATH`, so it finds the same `codex` you do.
+- The service runs as you, so it uses your Codex and Claude Code sign-ins. It records your current `PATH`, so it finds the same `codex` and `claude` you do.
 - It takes `--state-dir`, `--listen` and `--no-open`, like `start`. When the service answers, the command prints the sign-in link and opens it.
 - It records the binary's resolved (canonical) path. Run it again to replace the service, for example after you move or replace the binary. Re-running it restarts the service on both systems: on macOS it unloads the agent (`launchctl bootout`) and loads it again; on Linux it runs `systemctl --user enable --now` and then `restart`, so the new binary runs.
 - `hagency service uninstall` stops and removes the service. It keeps the state directory.
@@ -221,11 +223,11 @@ Pass the same `--state-dir` and `--listen` you gave `start`, if you changed them
 
 ### 5. Finish setup in the console
 
-1. Open **Setup → Coding agents**. Hagency detects Codex and its sign-in, then writes and validates `fleet-runtime.json`. Use **Check again** after installing or signing in to Codex. Follow the restart notice if Codex's executable changed.
+1. Open **Setup → Coding agents**. Hagency detects Codex and its sign-in, and Claude Code, then writes and validates `fleet-runtime.json` with a block for each one it finds. Use **Check again** after installing a coding agent or signing in to Codex. Follow the restart notice when an agent's executable changed (for example after an update) or a new agent was found; Hagency keeps your other settings in the file.
 2. Under **Connect Palpo**, click **New server engagement**. Enter the HTTPS Matrix server address, the resource owner's full Matrix ID, the coordinator's full Matrix ID, a connection name and delegation duration. Use existing accounts on that server. Leave **Separate Palpo address** blank unless the administrator supplies a separate operations address.
 3. Click **Request connection**. In Rinx, the resource owner opens **Palpo → Inbox** and confirms the request. The server administrator then approves it in their own Inbox. Hagency receives the approved configuration automatically; no JSON download or import is needed for this flow.
 4. In the resource owner's Rinx Inbox, open the approved request and click **Verify connection** once. The button is disabled while verification runs; wait for **Connection verified** in Rinx and Hagency.
-5. Open **My resources → New resource configuration**. Choose the verified engagement and an existing local **Source configuration**, then choose the model, reasoning effort, monthly token budget and eligible project managers. Click **Create resource**. The source supplies the framework, provider and account; it is not an agent, project or role. The [quick start](docs/user-guide/README.md#step-5-create-a-resource) covers the fields and the first-source prerequisite.
+5. Setup's **Offer a resource** step prepares the first local source for each configured coding agent: choose a qualified model (Claude models have no reasoning setting) and a monthly token ceiling. Then open **My resources → New resource configuration**. Choose the verified engagement and an existing local **Source configuration**, then choose the model, reasoning effort, monthly token budget and eligible project managers. Click **Create resource**. The source supplies the framework, provider and account; it is not an agent, project or role. The [quick start](docs/user-guide/README.md#step-5-create-a-resource) covers the fields and the first-source prerequisite.
 
 Create additional resources through that same entry. Each resource has one budget for its engagement; do not allocate it again on the connection page. **Edit configuration** updates an existing resource. A budget cannot fall below consumed or reserved tokens, and an in-use resource may prevent model changes.
 
@@ -265,11 +267,16 @@ hagency setup --state-dir /abs/path/state
 - finds the Codex sign-in folder: `--codex-home DIR`, or else `$CODEX_HOME`, or else `~/.codex`. The folder must exist; if it does not, setup asks you to run `codex login` first. With `--no-local-codex`, setup does not look for this folder, so no `~/.codex` is needed: agents sign in to `<state>/runtime-home` instead, setup reports that folder, and the file gets no `local_codex` block.
 - creates `<state>-agent-homes` and writes `fleet-runtime.json` with mode 0600 and the defaults listed under [Configuration](#configuration).
 - validates the file with the same loader `serve` uses. A file that fails is renamed to `fleet-runtime.json.rejected`, so the service never starts on it.
-- refuses to replace an existing `fleet-runtime.json` unless you pass `--force`. With `--force`, it keeps the old file as `fleet-runtime.json.bak-<seconds>`. A running service keeps the configuration it loaded at start, so restart it to use the new file.
+- finds Claude Code: `--claude PATH`, or else `claude` on `PATH`. The native installer's `claude` is a link to one version's binary, and setup pins that binary. A launcher script you name is refused; a Claude Code merely found on `PATH` that cannot be used (a launcher script, or no Claude folder yet) is left out with the reason, and never stops Codex from being configured.
+- finds Claude Code's folder: `--claude-config-dir DIR`, or else `$CLAUDE_CONFIG_DIR`, or else `~/.claude`. Setup never looks at the sign-in in it.
+- configures each agent it finds. `--no-codex` or `--no-claude` leaves one out, so a machine with only Claude Code gets a runtime with only Claude Code.
+- refuses to replace an existing `fleet-runtime.json` unless you pass `--force`. With `--force`, it keeps the old file as `fleet-runtime.json.bak-<seconds>` and writes a new one that keeps every setting of the old file except the coding-agent blocks. A running service keeps the configuration it loaded at start, so restart it to use the new file.
 
 It prints the Codex binary it chose, the file it wrote, and whether Codex is signed in. Setup decides that only by whether the Codex sign-in folder holds `auth.json`; it does not run `codex login status`. A sign-in that Codex keeps only in the system keychain therefore shows as not signed in here, while the console's Setup page asks Codex (`codex login status`) and reports it. If Codex is not signed in, it prints the command to run, `CODEX_HOME=<folder> codex login`. It ends with the next commands to run. Pass `--listen` if `serve` will use an address other than `127.0.0.1:13300`. `--console-assets` only fills in the printed `serve` command.
 
 With a `local_codex` block, Codex runs with `HOME` set to `local_codex.home` and `CODEX_HOME` set to `local_codex.codex_home`. Without one, both are `<state>/runtime-home`. Managed accounts and `hagency account login` serve coordinator installs only.
+
+With a `claude.local_claude` block, Claude Code runs with `HOME` set to `local_claude.home` and with your OS user name (`USER`), which Claude Code needs on macOS to find its own login in the Keychain. Hagency sets `CLAUDE_CONFIG_DIR` only when the folder is not the default `~/.claude`: naming the default makes Claude Code read a different config file and report you signed out. The service's Claude Code never updates itself (`DISABLE_AUTOUPDATER=1`); when you update Claude Code, Setup sees the new binary and rewrites the block.
 
 ### Run in the foreground with `hagency serve`
 
@@ -333,7 +340,7 @@ install/install-native.sh --mode coordinator \
 
 ### Create a resource with the operator API
 
-The resource wizard currently needs an existing source configuration. On a fresh state directory, **Setup** configures the Codex runtime but does not create this source. Use the operator API once to create a local Codex source, then create engagement resources through **New resource configuration**. This is an onboarding prerequisite, not an additional engagement token pool.
+The resource wizard needs an existing source configuration. Setup's **Offer a resource** step creates the local source for each configured coding agent; from the command line, the operator API below does the same. Then create engagement resources through **New resource configuration**. This is an onboarding prerequisite, not an additional engagement token pool.
 
 Replace the state directory and, if changed, the default listen address. This example uses the preset and seat written by `hagency setup` and keeps the source out of the published catalog:
 
@@ -384,12 +391,12 @@ The commands below name the per-user service from `hagency service install`. ins
 
 The two `awaiting_*` stages are checked again every 5 s. A failed `identities` stage, and a configuration the service refuses (shown as `refused_config`), are retried with a backoff from 1 s to 60 s.
 
-**After a Codex update.** `fleet-runtime.json` pins the Codex binary's path and SHA-256. The fleet service loads and checks the file once, when the service starts; a running service keeps the configuration it loaded until it is restarted. Once Codex is updated:
+**After a coding-agent update.** `fleet-runtime.json` pins the Codex and Claude Code binaries' paths and SHA-256. The fleet service loads and checks the file once, when the service starts; a running service keeps the configuration it loaded until it is restarted. Once Codex or Claude Code is updated, or a coding agent is installed:
 
 1. Open **Setup** in the console. It reports that the coding agent changed, rewrites the configuration and keeps the old file as `fleet-runtime.json.bak-<seconds>`.
 2. Restart the service, as the page tells you: `launchctl kickstart -k gui/$(id -u)/io.hagency` (macOS), `systemctl --user restart hagency` (Linux), or stop `hagency start` and run it again. The running service does not pick up the rewritten file by itself.
 
-The console rewrites the file with `hagency setup`'s defaults: `local_codex` from `$CODEX_HOME`, or `~/.codex`. If you first ran `hagency setup` with `--codex-home` or `--no-local-codex`, run `hagency setup --state-dir <state> --force` again with the same options instead, then restart. Without the console, that command is also the way to rewrite the file. If the restarted service still refuses the file, it reports `refused_config` and retries with a backoff from 1 s to 60 s, so a corrected file is picked up without another restart.
+The console rewrites only the coding-agent blocks, with `hagency setup`'s defaults (`local_codex` from `$CODEX_HOME`, or `~/.codex`; `local_claude` from `$CLAUDE_CONFIG_DIR`, or `~/.claude`), and keeps every other setting of the file. If you first ran `hagency setup` with `--codex-home` or `--no-local-codex`, run `hagency setup --state-dir <state> --force` again with the same options instead, then restart. Without the console, that command is also the way to rewrite the file. If the restarted service still refuses the file, it reports `refused_config` and retries with a backoff from 1 s to 60 s, so a corrected file is picked up without another restart.
 
 **Owner keys.** The first time Hagency needs an owner's cross-signing master key, it reads the key from the homeserver and pins it in the store. An owner without cross-signing has no key yet, so that owner's agents wait. A pinned key is never replaced by what the homeserver reports later. The console and CLI do not offer a re-pin yet. An owner who resets cross-signing therefore cannot be served until the pin is changed. Even then, a re-pin does not repair agents already enrolled: their frozen key list keeps the old key, so their sends to the owner fail until each agent is provisioned again, and the owner gets a new approval device (ADR-187 amendment; see [known gaps](docs/architecture-walkthrough.md#15-implemented-not-built-yet-and-known-gaps)).
 
@@ -404,7 +411,7 @@ The service reads no environment file. Its configuration is the files in its sta
 | File | Purpose |
 | --- | --- |
 | `operator.token` | Operator bearer secret, created by `hagency init` |
-| `fleet-runtime.json` | Codex runtime settings for an imported fleet, described below. Written by the Setup page or `hagency setup`. |
+| `fleet-runtime.json` | Coding-agent runtime settings for an imported fleet (Codex, Claude Code or both), described below. Written by the Setup page or `hagency setup`. |
 | `<state>-agent-homes/` (sibling directory) | The agents' home directories, outside credential/SDK state (`home.root` as `hagency setup` writes it) |
 | `palpo-transport.json`, `palpo.machine_token`, `palpo-appservice.json` | Written by the Palpo import |
 | `representative.identity.json`, `matrix.representative_token`, `matrix.appservice_token`, `matrix.provisioning_key` | The fleet's representative and provisioning credentials. The fleet service creates them once. |
@@ -425,7 +432,8 @@ The Setup page and `hagency setup` write `fleet-runtime.json` and validate it wi
 - `file_limit` 4194304 (4 MiB), `operation_ms` 300000, `response_ms` 2000, `approval_owner_wait_ms` 180000, `idle_ms` 1200000;
 - `send_file` and `receive_file` `true`;
 - `home`: `root` is `<state>-agent-homes`, `task_client` is the running `hagency` binary, `projects` is `[]`;
-- `local_codex`, unless you pass `--no-local-codex`: preset `local_codex`, seat `local_codex_seat`, `home` set to your `HOME`, `codex_home` set to the Codex sign-in folder (`$CODEX_HOME`, or `~/.codex`; the Setup page always uses this default, `hagency setup --codex-home` chooses another).
+- `local_codex`, unless you pass `--no-local-codex`: preset `local_codex`, seat `local_codex_seat`, `home` set to your `HOME`, `codex_home` set to the Codex sign-in folder (`$CODEX_HOME`, or `~/.codex`; the Setup page always uses this default, `hagency setup --codex-home` chooses another);
+- `claude`, when Claude Code is found: its binary and hash, and a `local_claude` block with preset `local_claude`, seat `local_claude_seat`, `home` set to your `HOME` and `config_dir` set to the Claude folder.
 
 To change a value, edit the file (keep mode 0600) and restart the service, or run `hagency setup --state-dir <state> --force` with other options.
 
@@ -434,8 +442,9 @@ To change a value, edit the file (keep mode 0600) and restart the service, or ru
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `profile` | Yes | Must be `palpo_fleet_runtime_v1` |
-| `executable` | Yes | The Codex binary: an absolute path with no symlink in it |
-| `executable_sha256` | Yes | The binary's SHA-256, as 64 lowercase hex characters |
+| `executable` | Yes, unless the file names only Claude Code | The Codex binary: an absolute path with no symlink in it |
+| `executable_sha256` | With `executable` | The binary's SHA-256, as 64 lowercase hex characters |
+| `claude` | No | Claude Code (sub-fields below). The file must name Codex, Claude Code or both. |
 | `local_codex` | No | Binds the operator's own Codex login (sub-fields below). Without it, Codex uses `<state>/runtime-home`. |
 | `file_limit` | Yes | The file size limit for the file tools, in bytes: 1 to 4,194,304. Checked even when both file tools are off. |
 | `operation_ms` | Yes | The per-dispatch operation budget, from 100 to 1,200,000 ms. It must be at least `approval_owner_wait_ms` + 5000. |
@@ -458,6 +467,14 @@ To change a value, edit the file (keep mode 0600) and restart the service, or ru
 | `codex_home` | The directory Codex gets as `CODEX_HOME`, holding the Codex sign-in |
 
 `home` and `codex_home` must be absolute paths with no symlink in them, owned by the service user and not writable by group or others.
+
+`claude` sub-fields:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `executable` | Yes | The Claude Code binary: an absolute path with no symlink in it (the native installer's version binary) |
+| `executable_sha256` | Yes | The binary's SHA-256, as 64 lowercase hex characters |
+| `local_claude` | No | Binds your own Claude Code login: `profile` (`provider_owned_claude_v1`), `preset`, `seat`, `home` and `config_dir`, with the same rules as `local_codex`. Without it, Claude Code uses `<state>/runtime-home`. |
 
 What `hagency setup` writes, with each `/srv/hagency/...` path standing in for the paths it found:
 
@@ -501,11 +518,13 @@ What Hagency **enforces**:
 - **Loopback only.** The service refuses any listen address that is not loopback. The console checks the `Host` header, and that `Origin` is `http://<listen address>`, on login and on every write ([native/hagency/src/console.rs](native/hagency/src/console.rs)), so it cannot be put behind a reverse proxy. Open the console on the machine where Hagency runs. Reaching it from another machine is not a supported setup.
 - **Console requests.** The console requires the exact `Host` header and refuses forwarded headers. Writes need a same-origin `Origin`. The operator API requires the same exact `Host`, refuses `Forwarded`, `X-Forwarded-For`, `Origin` and `Sec-Fetch-Site`, then compares the bearer token's SHA-256 in constant time.
 - **Owner approvals.** Approvals come only from the owner's verified device. They arrive in an encrypted room whose only members are the owner and the approval bot. A third member or lost encryption disables the room. A failed delivery or an expired wait counts as a deny.
+- **Claude Code approvals.** Every Claude Code permission request becomes the same card, marked `Runtime: claude`, with the tool and its exact input. **Approve once** runs exactly that input; **Allow for this task** and **Always allow this operation** cover the same tool with the same input, and Hagency answers later identical requests itself without telling Claude. A deny, or an expired wait, tells Claude the action was not allowed and Claude continues its turn, as Codex does after a decline.
 - **One approval device per owner.** Each owner's approval-bot device trusts only that owner. Owners' approvals stay isolated from each other.
 - **Fenced runners.** Each dispatch has a capability and a fence number. A stale runner's calls are refused. A reply is published only after its process tree is proven gone.
 - **Codex sandbox.** Codex runs with `workspace-write` and `on-request` approvals, no network, and only its workspace writable. Hagency checks the settings Codex echoes back.
 - **Write-only credentials.** No route returns a stored token. The Palpo import's answer carries only public facts.
-- **No coding-agent credentials.** The Setup page runs only the Codex binary it found on `PATH`, only with `--version` and `login status`, and records it by path and SHA-256. Hagency never runs a login and never reads or stores the agent's credentials. Every setup write needs the operator's console session.
+- **Claude Code profile.** Claude Code runs with a fixed task profile: permission mode `auto` with the workspace lease (`plan` without it), every permission prompt sent to the owner, ask rules for `gh` and `git push`, no setting sources or hooks, and a strict MCP configuration holding only the scoped task helper. Provider keys such as `ANTHROPIC_API_KEY` are removed from its environment.
+- **No coding-agent credentials.** The Setup page runs only the Codex binary it found on `PATH`, only with `--version` and `login status`, and Claude Code only with `--version`, and records each by path and SHA-256. Hagency never runs a login and never reads or stores the agent's credentials. Every setup write needs the operator's console session.
 - **Sign-in link stays out of logs.** `hagency start` prints the console link only to an interactive terminal. A service start writes only the `console-access` command to its log.
 - **Hardened unit (installer only).** install-native.sh's systemd unit sets `NoNewPrivileges`, `ProtectSystem=full`, an empty capability set and a syscall filter. The per-user service from `hagency service install` has none of these settings; it runs with your user's rights.
 
@@ -517,6 +536,7 @@ What it **assumes**:
 - **Encrypted shared rooms are out of reach.** An agent cannot work in an encrypted room with people other than its owner.
 - **No federation.** All members must be on the fleet's own server.
 - **Sandbox qualification is open.** Hagency requests and checks the sandbox, but per-OS qualification of its effect is still open.
+- **Claude Code qualification.** Claude Code 2.1.292 is qualified on macOS with `claude-sonnet-5`: approve once, deny and a write outside the workspace, run live through Hagency. The evidence is [native/hagency-execution/qualification/claude-live.json](native/hagency-execution/qualification/claude-live.json); a test fails it when the Claude launch code changes without a new run.
 
 ## Development
 

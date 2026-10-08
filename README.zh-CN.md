@@ -2,9 +2,9 @@
 
 # Hagency
 
-**让本机 Codex agent 为 Palpo Matrix 项目工作，由协调者审批，按 token 预算运行。**
+**让本机 Codex 和 Claude Code agent 为 Palpo Matrix 项目工作，由协调者审批，按 token 预算运行。**
 
-Hagency 是一个 Rust 二进制 `hagency`，在你的机器上作为服务运行，并使用本机安装的 Codex。*运维者*配置资源：模型、推理档位，以及绑定到服务器关联的 token 预算。关联中指定的 Matrix *协调者*在 Rinx 的 Palpo Inbox 审批项目和 agent 申请。额度受理后，Hagency 创建 agent 的 Matrix 身份并启动运行环境。成员在项目房间 @ 提及 agent；agent 所有者可以直接私聊，并在加密的私密房间中审批受保护的操作。
+Hagency 是一个 Rust 二进制 `hagency`，在你的机器上作为服务运行，并使用本机安装的 Codex、Claude Code，或两者都用。*运维者*配置资源：模型、推理档位，以及绑定到服务器关联的 token 预算。关联中指定的 Matrix *协调者*在 Rinx 的 Palpo Inbox 审批项目和 agent 申请。额度受理后，Hagency 创建 agent 的 Matrix 身份并启动运行环境。成员在项目房间 @ 提及 agent；agent 所有者可以直接私聊，并在加密的私密房间中审批受保护的操作。
 
 本文描述当前源码版本；较早的预发布二进制可能不包含服务器关联界面。
 
@@ -20,7 +20,7 @@ Hagency 是一个 Rust 二进制 `hagency`，在你的机器上作为服务运�
 | --- | --- |
 | [功能](#功能) | 能力范围 |
 | [架构](#架构) | 一个进程、它的线程与 crate |
-| [设置 Hagency](#设置-hagency) | 登录 Codex、启动 Hagency、在控制台中完成设置 |
+| [设置 Hagency](#设置-hagency) | 登录编程代理、启动 Hagency、在控制台中完成设置 |
 | [用命令行设置](#用命令行设置) | `hagency setup`、`hagency serve`、安装脚本、协调者安装、运维 API |
 | [运维](#运维) | 健康检查、日志、备份、凭据轮换 |
 | [配置](#配置) | 状态目录、`fleet-runtime.json` 与 `agent-driver.json` |
@@ -99,7 +99,7 @@ Palpo homeserver  <── outbound HTTPS ──  hagency start (127.0.0.1:13300)
 | | |
 | --- | --- |
 | 主机 | macOS，或带 systemd 的 Linux。控制台在运行 Hagency 的这台机器上使用。 |
-| 编程代理 | 已安装、且在 `PATH` 上的 Codex CLI |
+| 编程代理 | 已安装、且在 `PATH` 上的 Codex CLI、Claude Code，或两者。Claude Code 须为原生安装（`claude install`），不能是 npm 启动脚本。 |
 | Palpo 与 Rinx | 兼容的 Palpo 服务器和 Rinx 客户端，以及该服务器上已有的资源所有者、协调者和管理员账号 |
 
 本文按“中文（English）”标注主要入口。Rinx 的 Palpo 小程序使用当前登录的 Matrix 账号。
@@ -116,7 +116,9 @@ codex login
 
 机器上没有浏览器时，加上 `--device-auth`。
 
-Hagency 从不替你登录。控制台的设置页面只询问 Codex 是否已登录、以何种方式登录（`codex login status`）；`hagency setup` 则检查登录文件是否存在（见[`hagency setup`](#用-hagency-setup-准备状态目录)）。Hagency 从不读取，也从不保存你的凭据。
+Claude Code 按平常方式登录：在这台机器的终端里运行 `claude`，按提示登录。
+
+Hagency 从不替你登录。控制台的设置页面只询问 Codex 是否已登录、以何种方式登录（`codex login status`）；`hagency setup` 则检查登录文件是否存在（见[`hagency setup`](#用-hagency-setup-准备状态目录)）。对 Claude Code，Hagency 既不询问也不检查：只运行 `claude --version`，并假定 Claude Code 已登录。Claude Code 退出登录时，它的 agent 任务会被拒绝，直到你重新登录。Hagency 从不读取，也从不保存你的凭据。
 
 ### 2. 获取 hagency 二进制
 
@@ -201,7 +203,7 @@ Hagency 从不替你登录。控制台的设置页面只询问 Codex 是否已�
 `hagency service install` 注册一个运行 `hagency start --no-open` 的用户级服务，并启动它：
 - **macOS：** 一个 LaunchAgent，即 `~/Library/LaunchAgents/io.hagency.plist`。它在登录时启动，崩溃后自动重启。日志在 `~/Library/Logs/Hagency/hagency.log`。
 - **Linux：** 一个 `systemd --user` 单元，即 `${XDG_CONFIG_HOME:-~/.config}/systemd/user/hagency.service`。不需要 `sudo`。用户级服务会在你退出登录时停止。要让它继续运行，运行一次 `loginctl enable-linger $USER`。
-- 服务以你的身份运行，因此使用你的 Codex 登录。它记录你当前的 `PATH`，因此找到的 `codex` 和你找到的是同一个。
+- 服务以你的身份运行，因此使用你的 Codex 和 Claude Code 登录。它记录你当前的 `PATH`，因此找到的 `codex` 和 `claude` 与你找到的是同一个。
 - 它接受 `--state-dir`、`--listen` 和 `--no-open`，与 `start` 相同。服务响应后，该命令输出登录链接并打开它。
 - 它记录二进制解析后的（规范）路径。再次运行它会替换服务，例如在你移动或替换了二进制之后。在两种系统上，再次运行都会重启服务：macOS 上先卸载代理（`launchctl bootout`）再重新加载；Linux 上先运行 `systemctl --user enable --now`，再运行 `restart`，从而运行新的二进制。
 - `hagency service uninstall` 停止并删除服务，保留状态目录。
@@ -223,11 +225,11 @@ hagency console-access --state-dir "${XDG_DATA_HOME:-$HOME/.local/share}/hagency
 
 ### 5. 在控制台中完成设置
 
-1. 打开 **设置 → 编程代理（Coding agents）**。Hagency 检查 Codex 和登录状态，然后写入并校验 `fleet-runtime.json`。安装或登录 Codex 后可点 **重新检查（Check again）**。如果 Codex 程序发生变化，按页面提示重启服务。
+1. 打开 **设置 → 编程代理（Coding agents）**。Hagency 检查 Codex 及其登录状态和 Claude Code，然后写入并校验 `fleet-runtime.json`，为找到的每个编程代理各写一个配置块。安装编程代理或登录 Codex 后可点 **重新检查（Check again）**。某个代理的程序发生变化（例如更新后）或找到新的代理时，按页面提示重启服务；文件中的其他设置会保留。
 2. 在 **连接 Palpo** 下点 **新建服务器关联（New server engagement）**。填写 HTTPS Matrix 服务器地址、资源所有者的完整 Matrix ID、协调者的完整 Matrix ID、关联名称和授权期限。使用该服务器上已有的账号。只有管理员提供了单独的管理地址时，才填写 **独立的 Palpo 地址**。
 3. 点击 **发起关联（Request connection）**。资源所有者在 Rinx 的 **Palpo → Inbox** 确认请求，再由服务器管理员在自己的 Inbox 审批。Hagency 自动接收已批准的配置；此流程不需要下载或导入 JSON。
 4. 资源所有者在 Rinx Inbox 打开已批准的请求，点击一次 **验证连接（Verify connection）**。验证期间按钮禁用；等待 Rinx 和 Hagency 都显示 **连接已验证（Connection verified）**。
-5. 打开 **我的资源 → 新建资源配置（New resource configuration）**。选择已验证的关联和已有的本地 **来源配置（Source configuration）**，再选择模型、推理档位、每月 token 预算和可申请项目的 Matrix 用户，最后点 **创建资源（Create resource）**。来源配置提供框架、提供方和账号，并不是 agent、项目或角色。[快速开始](docs/user-guide/README.zh-CN.md#第-5-步创建资源)解释字段含义及首次使用时的来源配置前提。
+5. 设置的 **提供资源（Offer a resource）** 一步为每个已配置的编程代理准备第一个本地来源：选择经过资格验证的模型（Claude 模型没有推理档位）和每月 token 上限。然后打开 **我的资源 → 新建资源配置（New resource configuration）**。选择已验证的关联和已有的本地 **来源配置（Source configuration）**，再选择模型、推理档位、每月 token 预算和可申请项目的 Matrix 用户，最后点 **创建资源（Create resource）**。来源配置提供框架、提供方和账号，并不是 agent、项目或角色。[快速开始](docs/user-guide/README.zh-CN.md#第-5-步创建资源)解释字段含义及首次使用时的来源配置前提。
 
 添加其他资源也使用同一入口。每个资源在该关联下只有一份预算，不需要回到连接页面再次分配。在 **编辑资源配置** 中修改已有资源。预算不能低于已消耗或已预留的 token；资源被使用时，模型变更可能被拒绝。
 
@@ -267,11 +269,16 @@ hagency setup --state-dir /abs/path/state
 - 查找 Codex 登录目录：`--codex-home DIR`，否则是 `$CODEX_HOME`，再否则是 `~/.codex`。该目录必须存在；不存在时，setup 会提示你先运行 `codex login`。传入 `--no-local-codex` 时，setup 不查找这个目录，因此不需要 `~/.codex`：agent 改为登录到 `<state>/runtime-home`，setup 报告的也是这个目录，文件中不写 `local_codex` 块。
 - 创建 `<state>-agent-homes`，并以 0600 权限写入 `fleet-runtime.json`，取值为[配置](#配置)中列出的默认值。
 - 用 `serve` 所用的同一个加载器校验该文件。校验失败的文件会被改名为 `fleet-runtime.json.rejected`，因此服务绝不会用它启动。
-- 已有 `fleet-runtime.json` 时拒绝覆盖，除非传入 `--force`。传入 `--force` 时，旧文件保留为 `fleet-runtime.json.bak-<秒数>`。运行中的服务一直使用启动时读取的配置，因此要重启服务才能使用新文件。
+- 查找 Claude Code：`--claude PATH`，否则用 `PATH` 上的 `claude`。原生安装的 `claude` 是指向某个版本二进制的链接，setup 固定的是该二进制。你指定的启动脚本会被拒绝；只是在 `PATH` 上找到、但无法使用的 Claude Code（启动脚本，或尚无 Claude 目录）会被跳过并说明原因，不会妨碍 Codex 的配置。
+- 查找 Claude Code 的目录：`--claude-config-dir DIR`，否则是 `$CLAUDE_CONFIG_DIR`，再否则是 `~/.claude`。setup 从不查看其中的登录。
+- 为找到的每个代理写入配置。`--no-codex` 或 `--no-claude` 可跳过其中一个，因此只装了 Claude Code 的机器会得到只含 Claude Code 的运行配置。
+- 已有 `fleet-runtime.json` 时拒绝覆盖，除非传入 `--force`。传入 `--force` 时，旧文件保留为 `fleet-runtime.json.bak-<秒数>`，新文件除编程代理配置块外保留旧文件的全部设置。运行中的服务一直使用启动时读取的配置，因此要重启服务才能使用新文件。
 
 它会输出所选的 Codex 二进制、写入的文件，以及 Codex 是否已登录。它只根据 Codex 登录目录中是否有 `auth.json` 判断是否已登录，不运行 `codex login status`。因此 Codex 只保存在系统钥匙串中的登录在这里显示为未登录，而控制台的设置页面会询问 Codex（`codex login status`）并报告该登录。未登录时，它会输出要运行的命令 `CODEX_HOME=<目录> codex login`。最后列出接下来要运行的命令。如果 `serve` 不使用 `127.0.0.1:13300`，请传入 `--listen`。`--console-assets` 只用于填写输出中的 `serve` 命令。
 
 有 `local_codex` 块时，Codex 运行时 `HOME` 为 `local_codex.home`，`CODEX_HOME` 为 `local_codex.codex_home`。没有该块时，两者都是 `<state>/runtime-home`。托管账户和 `hagency account login` 只用于协调者安装。
+
+有 `claude.local_claude` 块时，Claude Code 运行时 `HOME` 为 `local_claude.home`，并带上你的系统用户名（`USER`）：在 macOS 上，Claude Code 要靠它在钥匙串中找到自己的登录。只有目录不是默认的 `~/.claude` 时，Hagency 才设置 `CLAUDE_CONFIG_DIR`：显式指定默认目录会让 Claude Code 读取另一个配置文件，并报告未登录。服务启动的 Claude Code 不会自行更新（`DISABLE_AUTOUPDATER=1`）；你更新 Claude Code 后，设置页面会发现新的二进制并重写该配置块。
 
 ### 用 `hagency serve` 在前台运行
 
@@ -335,7 +342,7 @@ install/install-native.sh --mode coordinator \
 
 ### 用运维 API 创建资源
 
-资源向导目前需要已有的来源配置。在全新状态目录中，**设置** 只配置 Codex 运行环境，不会创建来源资源。运维者需先用 API 创建一次本地 Codex 来源，之后统一从 **新建资源配置** 创建关联资源。这是首次使用的前提，不是另一个需要分配 token 的关联资源池。
+资源向导需要已有的来源配置。设置的 **提供资源** 一步会为每个已配置的编程代理创建本地来源；在命令行上，可以用下面的运维 API 做同样的事，之后统一从 **新建资源配置** 创建关联资源。这是首次使用的前提，不是另一个需要分配 token 的关联资源池。
 
 替换状态目录；如果服务没有使用默认的 `127.0.0.1:13300`，也要替换地址。以下示例使用 `hagency setup` 写入的 preset 和 seat，并保持来源资源不发布：
 
@@ -386,12 +393,12 @@ curl -s -X POST http://127.0.0.1:13300/api/native/v1/resources \
 
 两个 `awaiting_*` 阶段每 5 秒重新检查一次。`identities` 阶段失败，以及服务拒绝配置（显示为 `refused_config`）时，按 1 秒到 60 秒的退避重试。
 
-**Codex 更新之后。** `fleet-runtime.json` 固定了 Codex 二进制的路径和 SHA-256。车队服务只在服务启动时读取并检查一次该文件；运行中的服务在重启之前一直使用已读取的配置。Codex 更新后：
+**编程代理更新之后。** `fleet-runtime.json` 固定了 Codex 和 Claude Code 二进制的路径和 SHA-256。车队服务只在服务启动时读取并检查一次该文件；运行中的服务在重启之前一直使用已读取的配置。Codex 或 Claude Code 更新、或安装了新的编程代理后：
 
 1. 在控制台中打开 **设置（Setup）**。它会提示编程代理已变化，重写配置，并把旧文件保留为 `fleet-runtime.json.bak-<秒数>`。
 2. 按页面提示重启服务：`launchctl kickstart -k gui/$(id -u)/io.hagency`（macOS）、`systemctl --user restart hagency`（Linux），或停止 `hagency start` 后重新运行。运行中的服务不会自行读取重写后的文件。
 
-控制台按 `hagency setup` 的默认值重写文件：`local_codex` 取自 `$CODEX_HOME` 或 `~/.codex`。如果你当初运行 `hagency setup` 时用了 `--codex-home` 或 `--no-local-codex`，请改用相同的选项再次运行 `hagency setup --state-dir <state> --force`，然后重启。不用控制台时，也用这条命令重写文件。如果重启后的服务仍然拒绝该文件，它会显示 `refused_config`，并按 1 秒到 60 秒的退避重试，因此改正后的文件无需再次重启即可被读取。
+控制台只按 `hagency setup` 的默认值重写编程代理配置块（`local_codex` 取自 `$CODEX_HOME` 或 `~/.codex`；`local_claude` 取自 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`），文件的其他设置保持不变。如果你当初运行 `hagency setup` 时用了 `--codex-home` 或 `--no-local-codex`，请改用相同的选项再次运行 `hagency setup --state-dir <state> --force`，然后重启。不用控制台时，也用这条命令重写文件。如果重启后的服务仍然拒绝该文件，它会显示 `refused_config`，并按 1 秒到 60 秒的退避重试，因此改正后的文件无需再次重启即可被读取。
 
 **所有者密钥。** Hagency 第一次需要某个所有者的交叉签名主密钥时，会从 homeserver 读取该密钥，并固定（pin）在存储中。没有开启交叉签名的所有者还没有密钥，因此该所有者的 agent 会等待。已固定的密钥不会被 homeserver 之后报告的密钥替换。控制台和 CLI 目前还不提供重新固定的操作。因此，重置了交叉签名的所有者在固定的密钥被更改之前无法得到服务。即便重新固定，也修复不了已经注册的 agent：它们冻结的密钥列表仍保留旧密钥，因此在每个 agent 重新创建之前，它们发给该所有者的消息都会失败；该所有者也会得到一个新的审批设备（ADR-187 修订；见[已知缺口](docs/architecture-walkthrough.zh-CN.md#15-已实现尚未实现与已知缺口)）。
 
@@ -406,7 +413,7 @@ curl -s -X POST http://127.0.0.1:13300/api/native/v1/resources \
 | 文件 | 用途 |
 | --- | --- |
 | `operator.token` | 运维 bearer 密钥，由 `hagency init` 生成 |
-| `fleet-runtime.json` | 导入车队的 Codex 运行时设置，见下文。由设置页面或 `hagency setup` 写入。 |
+| `fleet-runtime.json` | 导入车队的编程代理运行时设置（Codex、Claude Code 或两者），见下文。由设置页面或 `hagency setup` 写入。 |
 | `<state>-agent-homes/`（同级目录） | agent 的主目录，与凭据和 SDK 状态隔离（即 `hagency setup` 写入的 `home.root`） |
 | `palpo-transport.json`、`palpo.machine_token`、`palpo-appservice.json` | 由 Palpo 导入写入 |
 | `representative.identity.json`、`matrix.representative_token`、`matrix.appservice_token`、`matrix.provisioning_key` | 车队代表和创建 agent 所用的凭据。车队服务只创建一次。 |
@@ -427,7 +434,8 @@ curl -s -X POST http://127.0.0.1:13300/api/native/v1/resources \
 - `file_limit` 4194304（4 MiB）、`operation_ms` 300000、`response_ms` 2000、`approval_owner_wait_ms` 180000、`idle_ms` 1200000；
 - `send_file` 和 `receive_file` 为 `true`；
 - `home`：`root` 为 `<state>-agent-homes`，`task_client` 为正在运行的 `hagency` 二进制，`projects` 为 `[]`；
-- `local_codex`（除非传入 `--no-local-codex`）：preset 为 `local_codex`，席位为 `local_codex_seat`，`home` 为你的 `HOME`，`codex_home` 为 Codex 登录目录（`$CODEX_HOME`，或 `~/.codex`；设置页面总是使用这个默认值，`hagency setup --codex-home` 可以另选目录）。
+- `local_codex`（除非传入 `--no-local-codex`）：preset 为 `local_codex`，席位为 `local_codex_seat`，`home` 为你的 `HOME`，`codex_home` 为 Codex 登录目录（`$CODEX_HOME`，或 `~/.codex`；设置页面总是使用这个默认值，`hagency setup --codex-home` 可以另选目录）；
+- `claude`（找到 Claude Code 时）：它的二进制和哈希，以及一个 `local_claude` 块：preset 为 `local_claude`，席位为 `local_claude_seat`，`home` 为你的 `HOME`，`config_dir` 为 Claude 目录。
 
 要修改某个值，可以编辑该文件（保持 0600 权限）并重启服务，或换用其他选项运行 `hagency setup --state-dir <state> --force`。
 
@@ -436,9 +444,10 @@ curl -s -X POST http://127.0.0.1:13300/api/native/v1/resources \
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
 | `profile` | 是 | 必须是 `palpo_fleet_runtime_v1` |
-| `executable` | 是 | Codex 二进制：不含符号链接的绝对路径 |
+| `executable` | 是（文件只含 Claude Code 时除外） | Codex 二进制：不含符号链接的绝对路径 |
 | `executable_sha256` | 是 | 该二进制的 SHA-256，64 个小写十六进制字符 |
 | `local_codex` | 否 | 绑定运维者自己的 Codex 登录（子字段见下）。不设置时，Codex 使用 `<state>/runtime-home`。 |
+| `claude` | 否 | Claude Code（子字段见下）。文件必须包含 Codex、Claude Code 或两者。 |
 | `file_limit` | 是 | 文件工具的文件大小上限，单位字节：1 到 4,194,304。即使两个文件工具都关闭，也会检查。 |
 | `operation_ms` | 是 | 每次派发的操作预算，100 到 1,200,000 毫秒。不得小于 `approval_owner_wait_ms` + 5000。 |
 | `response_ms` | 是 | 每次派发的响应预算，10 到 2000 毫秒 |
@@ -460,6 +469,14 @@ curl -s -X POST http://127.0.0.1:13300/api/native/v1/resources \
 | `codex_home` | Codex 的 `CODEX_HOME` 目录，存放 Codex 登录 |
 
 `home` 和 `codex_home` 必须是不含符号链接的绝对路径，属于服务用户，且组和其他用户不可写。
+
+`claude` 的子字段：
+
+| 字段 | 必填 | 含义 |
+| --- | --- | --- |
+| `executable` | 是 | Claude Code 二进制：不含符号链接的绝对路径（原生安装的版本二进制） |
+| `executable_sha256` | 是 | 二进制的 SHA-256，64 个小写十六进制字符 |
+| `local_claude` | 否 | 绑定你自己的 Claude Code 登录：`profile`（`provider_owned_claude_v1`）、`preset`、`seat`、`home` 和 `config_dir`，规则与 `local_codex` 相同。不设置时，Claude Code 使用 `<state>/runtime-home`。 |
 
 `hagency setup` 写入的内容如下，其中每个 `/srv/hagency/...` 路径代表它找到的实际路径：
 
@@ -503,11 +520,13 @@ Hagency **强制执行**的：
 - **仅限回环地址。** 服务拒绝任何非回环的监听地址。控制台在登录和每次写操作时都检查 `Host` 头，并检查 `Origin` 是否为 `http://<监听地址>`（[native/hagency/src/console.rs](native/hagency/src/console.rs)），因此不能放在反向代理之后。请在运行 Hagency 的机器上打开控制台。从其他机器访问不是受支持的部署方式。
 - **控制台请求。** 控制台要求完全匹配的 `Host` 头，并拒绝转发类请求头。写操作需要同源的 `Origin`。运维 API 同样要求完全匹配的 `Host`，并拒绝 `Forwarded`、`X-Forwarded-For`、`Origin` 和 `Sec-Fetch-Site`，然后以常数时间比较 bearer 令牌的 SHA-256。
 - **所有者审批。** 审批只来自所有者已验证的设备。审批在一个加密房间中进行，房间成员只有所有者和审批机器人。出现第三个成员或失去加密时，该房间会被停用。投递失败或等待超时都按拒绝处理。
+- **Claude Code 审批。** Claude Code 的每个权限请求都会变成同样的审批卡片，标注 `Runtime: claude`，并显示工具和确切输入。**仅批准一次** 只执行这一确切输入；**本任务内允许** 和 **始终允许此操作** 覆盖同一工具、同一输入，之后相同的请求由 Hagency 自行作答，不会告知 Claude。拒绝或等待超时会告诉 Claude 该操作未获允许，Claude 继续自己的任务，与 Codex 被拒绝后一样。
 - **每个所有者一个审批设备。** 每个所有者的审批机器人设备只信任该所有者。不同所有者的审批相互隔离。
 - **受隔离的 runner。** 每次派发都有一个能力凭证和一个隔离编号（fence）。过期 runner 的调用会被拒绝。只有证明其进程树已经消失后，回复才会发布。
 - **Codex 沙箱。** Codex 以 `workspace-write` 和 `on-request` 审批运行，没有网络，只有自己的工作区可写。Hagency 会检查 Codex 回显的设置。
 - **凭据只写不读。** 没有任何路由会返回已存储的令牌。Palpo 导入的响应只包含公开信息。
-- **不接触编程代理的凭据。** 设置页面只运行它在 `PATH` 上找到的 Codex 二进制，只带 `--version` 和 `login status` 参数，并按路径和 SHA-256 记录它。Hagency 从不执行登录，也从不读取或保存代理的凭据。每次设置写入都需要运维者的控制台会话。
+- **Claude Code 运行配置。** Claude Code 以固定的任务配置运行：持有工作区租约时权限模式为 `auto`（没有租约时为 `plan`），每个权限请求都交给所有者，`gh` 和 `git push` 总要询问，不加载任何设置来源和钩子，MCP 配置严格，只含受限的任务助手。`ANTHROPIC_API_KEY` 等提供方密钥会从它的环境中移除。
+- **不接触编程代理的凭据。** 设置页面只运行它在 `PATH` 上找到的 Codex 二进制，只带 `--version` 和 `login status` 参数；对 Claude Code 只运行 `--version`；并按路径和 SHA-256 记录它们。Hagency 从不执行登录，也从不读取或保存代理的凭据。每次设置写入都需要运维者的控制台会话。
 - **登录链接不进日志。** `hagency start` 只把控制台链接输出到交互式终端。以服务方式启动时，日志中只写 `console-access` 命令。
 - **加固的单元（仅限安装脚本）。** install-native.sh 的 systemd 单元设置了 `NoNewPrivileges`、`ProtectSystem=full`、空的 capability 集合和系统调用过滤。`hagency service install` 注册的用户级服务没有这些设置，它以你的用户权限运行。
 
@@ -519,6 +538,7 @@ Hagency **假设**的：
 - **加密的多人房间无法使用。** agent 不能在有所有者以外其他人的加密房间里工作。
 - **不使用联邦。** 所有成员都必须在车队自己的服务器上。
 - **沙箱资格验证尚未完成。** Hagency 会请求并检查沙箱，但各操作系统上沙箱实际效果的资格验证仍未完成。
+- **Claude Code 资格验证。** Claude Code 2.1.292 已在 macOS 上以 `claude-sonnet-5` 通过实测资格验证：仅批准一次、拒绝、以及在工作区外写文件，都经 Hagency 实际运行。证据见 [native/hagency-execution/qualification/claude-live.json](native/hagency-execution/qualification/claude-live.json)；Claude 启动代码变更而未重新验证时，会有测试判它失败。
 
 ## 开发
 
