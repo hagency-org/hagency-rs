@@ -182,11 +182,45 @@ fn bind_helper(stdin: &mut io::StdinLock<'_>, before: &Value) -> io::Result<()> 
     )?;
     Ok(())
 }
+/// One `can_use_tool` request of the approval modes, always the same tool and
+/// input, so a task or always grant on the first one matches the next.
+fn permission(index: usize) -> io::Result<()> {
+    emit(
+        json!({"type":"control_request","request_id":format!("owned-permission-{index}"),
+        "request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":format!("owned-tool-{index}"),
+            "input":{"command":"offline literal","description":"Offline step"}}}),
+    )
+}
+/// Every answer Hagency wrote, one JSON line each, for the test to compare.
+fn record(marker: &Path, response: &Value) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker.with_extension("responses"))?;
+    serde_json::to_writer(&mut file, response)?;
+    file.write_all(b"\n")
+}
+fn error_result() -> io::Result<()> {
+    emit(json!({"type":"result","subtype":"error_during_execution",
+        "session_id":"owned-claude","is_error":true,
+        "modelUsage":{"claude-fixture":{"inputTokens":10,"outputTokens":7,"cacheReadInputTokens":20,"cacheCreationInputTokens":30}}}))
+}
 /// A Claude launched by the execution Host with the fixed task profile
 /// (ADR-158): initialize, then the scoped helper binding, then one prompt.
 /// Never starts the helper or a provider; the reply is the result text.
+/// The approval modes ask for one tool use (twice in `task-approval-twice`)
+/// and continue as the installed CLI does: an allow runs the tool and the
+/// turn succeeds; a deny interrupts it into an error result (ADR-156).
 pub(super) fn run_task(mode: &str, marker: &Path) -> io::Result<()> {
-    if !matches!(mode, "task" | "task-error" | "task-permission") {
+    if !matches!(
+        mode,
+        "task"
+            | "task-error"
+            | "task-permission"
+            | "task-approval"
+            | "task-approval-twice"
+            | "task-approval-cancel"
+    ) {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     fs::write(marker.with_extension("entered"), b"offline")?;
@@ -213,20 +247,40 @@ pub(super) fn run_task(mode: &str, marker: &Path) -> io::Result<()> {
         "message":{"id":"step-one","content":[{"type":"text","text":"working"}],
             "usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}}),
     )?;
-    match mode {
-        "task" => emit(
+    let success = || {
+        emit(
             json!({"type":"result","subtype":"success","session_id":"owned-claude",
             "is_error":false,"result":"claude fixture reply",
             "modelUsage":{"claude-fixture":{"inputTokens":10,"outputTokens":7,"cacheReadInputTokens":20,"cacheCreationInputTokens":30}}}),
-        )?,
-        "task-error" => emit(json!({"type":"result","subtype":"error_during_execution",
-            "session_id":"owned-claude","is_error":true,
-            "modelUsage":{"claude-fixture":{"inputTokens":10,"outputTokens":7,"cacheReadInputTokens":20,"cacheCreationInputTokens":30}}}))?,
-        _ => emit(
+        )
+    };
+    match mode {
+        "task" => success()?,
+        "task-error" => error_result()?,
+        "task-permission" => emit(
             json!({"type":"control_request","request_id":"owned-permission","request":{
             "subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"owned-tool",
             "input":{"command":"offline literal"}}}),
         )?,
+        "task-approval-cancel" => {
+            permission(1)?;
+            emit(json!({"type":"control_cancel_request","request_id":"owned-permission-1"}))?;
+            fs::write(marker.with_extension("cancelled"), b"offline")?;
+        }
+        _ => {
+            let count = if mode == "task-approval-twice" { 2 } else { 1 };
+            let mut allowed = true;
+            for index in 1..=count {
+                permission(index)?;
+                let response = read(&mut stdin)?;
+                record(marker, &response)?;
+                if response["response"]["response"]["behavior"] != "allow" {
+                    allowed = false;
+                    break;
+                }
+            }
+            if allowed { success()? } else { error_result()? }
+        }
     }
     // Alive after its result: only the original guardian's stop or the bounded
     // fixture fuse ends it, as for the single-prompt modes above.
