@@ -40,6 +40,23 @@ fn app_server_arguments() -> Vec<OsString> {
     vec!["app-server".into()]
 }
 
+/// Which coding agent a Host launches (ADR-192). Fixed when the host is built:
+/// a resource of the other framework is refused by name before any workspace
+/// or process work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Runner {
+    Codex,
+    Claude,
+}
+impl Runner {
+    pub fn framework(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+}
+
 /// One operation uses a 100 ms..20 min absolute monotonic execution deadline.
 /// Native RPC response/write waits are 10 ms..2 s. Acknowledged turn silence
 /// uses the same original operation budget. Cancellation is checked every
@@ -74,6 +91,7 @@ impl Limits {
 /// source custody and comparison checks do not isolate hostile namespace
 /// mutation, and this API must not enable a production runner catalog.
 pub struct Host {
+    pub(crate) runner: Runner,
     pub(crate) guardian: PathBuf,
     pub(crate) approvals: Option<crate::ApprovalHost>,
     executable: PathBuf,
@@ -158,6 +176,7 @@ impl Host {
         .validate()
         .map_err(|_| super::Failure::Admission)?;
         Ok(Self {
+            runner: Runner::Codex,
             guardian,
             approvals: None,
             executable,
@@ -189,7 +208,12 @@ impl Host {
         mut self,
         account: hagency_store::ManagedAccount,
     ) -> Result<Self, super::Failure> {
-        if self.managed_account.is_some() || self.local_codex.is_some() {
+        // Managed accounts are Codex homes; a Claude host signs in through the
+        // user's own folder only (ADR-192 decision 7).
+        if self.managed_account.is_some()
+            || self.local_codex.is_some()
+            || self.runner == Runner::Claude
+        {
             return Err(super::Failure::Admission);
         }
         self.managed_account = Some(account);
@@ -203,12 +227,33 @@ impl Host {
         mut self,
         local: Arc<crate::LocalCodex>,
     ) -> Result<Self, super::Failure> {
-        if self.managed_account.is_some() || self.local_codex.is_some() {
+        // The binding names the runner's own agent folder: select the runner
+        // first (`with_claude_runner`), then bind its folder.
+        let matching = match self.runner {
+            Runner::Codex => local.provider() == crate::LocalProvider::Codex,
+            Runner::Claude => local.provider() == crate::LocalProvider::Claude,
+        };
+        if self.managed_account.is_some() || self.local_codex.is_some() || !matching {
             return Err(super::Failure::Admission);
         }
         local.apply(&mut self.environment)?;
         self.local_codex = Some(local);
         Ok(self)
+    }
+    /// Launch Claude Code instead of Codex (ADR-192). Select it before binding
+    /// a local folder; a managed account (Codex homes only) refuses it.
+    pub fn with_claude_runner(mut self) -> Result<Self, super::Failure> {
+        if self.runner != Runner::Codex
+            || self.managed_account.is_some()
+            || self.local_codex.is_some()
+        {
+            return Err(super::Failure::Admission);
+        }
+        self.runner = Runner::Claude;
+        Ok(self)
+    }
+    pub fn runner(&self) -> Runner {
+        self.runner
     }
     /// Host-selected native executable and literal loopback endpoint only. The
     /// task/capability are supplied later from the validated owned dispatch.
@@ -363,14 +408,15 @@ impl Host {
         limits: Limits,
         task_context: Option<&Arc<hagency_store::task_context::RetainedTaskContext>>,
     ) -> Result<Prepared, super::Failure> {
-        // ADR-142: a dispatch naming a framework with no native runner is
-        // refused by name before any workspace is resolved, custody-checked
-        // or process spawned. Hoisted above the resource slice and the
-        // workspace get/check so "no process and no workspace work" is
+        // ADR-142, ADR-192: a dispatch naming the other coding agent than this
+        // host's runner is refused by name before any workspace is resolved,
+        // custody-checked or process spawned. Hoisted above the resource slice
+        // and the workspace get/check so "no process and no workspace work" is
         // literal, and distinct from the generic Admission refusal below.
-        if scope.resource().framework == "claude" {
+        let framework = scope.resource().framework.as_str();
+        if framework != self.runner.framework() && matches!(framework, "codex" | "claude") {
             return Err(super::Failure::UnsupportedRunner {
-                framework: scope.resource().framework.clone(),
+                framework: framework.to_owned(),
             });
         }
         if let Some(local) = &self.local_codex {
@@ -427,6 +473,9 @@ impl Host {
         let path = std::path::PathBuf::from(root.approval_path()?);
         if let Some(local) = &self.local_codex {
             local.separate_from(root.path())?;
+        }
+        if self.runner == Runner::Claude {
+            return self.prepare_claude(scope, capability, limits, task_context, path, root);
         }
         let resource = scope.resource();
         if resource.framework != "codex"
@@ -515,7 +564,6 @@ impl Host {
         let launch = self.launch(path.clone(), environment)?;
         Ok(Prepared {
             launch,
-            settings,
             io_limits: transport::Limits {
                 write_timeout_ms: limits.response_ms,
                 // Tool execution need not produce unsolicited events within
@@ -524,10 +572,118 @@ impl Host {
                 event_wait_ms: limits.operation_ms,
                 lifetime_ms: limits.operation_ms,
             },
-            input,
             root,
             account,
-            late_helper,
+            runner: PreparedRunner::Codex {
+                settings,
+                input,
+                late_helper,
+            },
+        })
+    }
+    /// ADR-192: the Claude half of `prepare_bound`, after the shared workspace
+    /// and custody checks. Fixed task profile (ADR-158), the local Claude
+    /// folder's environment and the same task-helper inheritance as Codex.
+    fn prepare_claude(
+        &self,
+        scope: &OwnedDispatchScope,
+        capability: &RunnerCapability,
+        limits: Limits,
+        task_context: Option<&Arc<hagency_store::task_context::RetainedTaskContext>>,
+        path: PathBuf,
+        root: Arc<Root>,
+    ) -> Result<Prepared, super::Failure> {
+        let resource = scope.resource();
+        // Claude resources carry no reasoning setting (ADR-192 decision 8), and
+        // managed accounts are Codex homes.
+        if resource.framework != "claude"
+            || resource
+                .provider
+                .as_deref()
+                .is_some_and(|v| v != "anthropic")
+            || resource.reasoning.is_some()
+            || scope.requires_managed_account()
+        {
+            return Err(super::Failure::Admission);
+        }
+        // Every byte comes from the immutable dispatch payload. This informational
+        // text grants neither task maintenance, process authority nor approval.
+        let prompt = hagency_core::canonical::encode_payload(&scope.input().payload)
+            .map_err(|_| super::Failure::Admission)?;
+        if prompt.is_empty() || prompt.len() > hagency_runtime::claude::MAX_TEXT_BYTES {
+            return Err(super::Failure::Admission);
+        }
+        let mut environment = self.environment.clone();
+        if let Some(local) = &self.local_codex {
+            local.apply(&mut environment)?;
+        }
+        let helper = match &self.task_helper {
+            Some((executable, address)) => {
+                let mut helper = hagency_runtime::claude::TaskMcp::new(
+                    executable.clone(),
+                    scope.task().id.clone(),
+                )
+                .map_err(|_| super::Failure::Admission)?;
+                environment.insert(TASK_MCP_ENV[0].into(), address.to_string().into());
+                if let Some(context) = task_context {
+                    context
+                        .separate_from(&path)
+                        .map_err(|_| super::Failure::Admission)?;
+                    context
+                        .apply_environment(&mut environment)
+                        .map_err(|_| super::Failure::Admission)?;
+                } else {
+                    let encoded =
+                        serde_json::to_string(capability).map_err(|_| super::Failure::Admission)?;
+                    if encoded.len() > 4096 {
+                        return Err(super::Failure::Admission);
+                    }
+                    environment.insert(TASK_MCP_ENV[1].into(), encoded.into());
+                    environment.insert(TASK_MCP_ENV[2].into(), scope.task().id.clone().into());
+                }
+                if self.file_tools {
+                    environment.insert(TaskMcp::FILE_TOOLS_ENV.into(), "1".into());
+                    helper = helper.with_file_tools();
+                }
+                if self.receive_tools {
+                    environment.insert(TaskMcp::RECEIVE_TOOLS_ENV.into(), "1".into());
+                    helper = helper.with_receive_tools();
+                }
+                // Coordination tools reach other sessions and have no Claude
+                // profile yet; this host does not offer them to Claude.
+                Some(helper)
+            }
+            None => None,
+        };
+        // Every owned dispatch holds its exclusive workspace lease (checked in
+        // `prepare_bound`), so the TS rule selects `auto`, never `plan`.
+        let arguments = hagency_runtime::claude::task_arguments(&resource.model, true)
+            .map_err(|_| super::Failure::Admission)?
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let launch = Launch {
+            executable: self.executable.clone(),
+            arguments,
+            directory: path,
+            environment,
+            require_crash_containment: false,
+        };
+        launch.validate().map_err(|_| super::Failure::Admission)?;
+        Ok(Prepared {
+            launch,
+            io_limits: transport::Limits {
+                write_timeout_ms: limits.response_ms,
+                event_wait_ms: limits.operation_ms,
+                lifetime_ms: limits.operation_ms,
+            },
+            root,
+            account: None,
+            runner: PreparedRunner::Claude {
+                prompt,
+                helper,
+                retained: task_context.is_some(),
+            },
         })
     }
     fn launch(
@@ -597,7 +753,9 @@ impl Host {
             return Err(super::Failure::Admission);
         }
         let resource = scope.resource();
-        if resource.framework == "claude" {
+        // A warm child is an app server; a Claude agent starts its session on
+        // demand until ADR-192's ready-ahead session lands.
+        if resource.framework == "claude" || self.runner == Runner::Claude {
             return Err(super::Failure::UnsupportedRunner {
                 framework: resource.framework.clone(),
             });
@@ -665,28 +823,43 @@ impl Host {
         }
         Ok(Prepared {
             launch: self.launch(path, environment)?,
-            settings,
             io_limits: transport::Limits {
                 write_timeout_ms: limits.response_ms,
                 event_wait_ms: limits.operation_ms,
                 lifetime_ms: limits.operation_ms,
             },
-            input: String::new(),
             root,
             account,
-            late_helper: None,
+            runner: PreparedRunner::Codex {
+                settings,
+                input: String::new(),
+                late_helper: None,
+            },
         })
     }
 }
 
 pub(crate) struct Prepared {
     pub(crate) launch: Launch,
-    pub(crate) settings: Settings,
     pub(crate) io_limits: transport::Limits,
-    pub(crate) input: String,
     pub(crate) root: Arc<Root>,
     pub(crate) account: Option<hagency_store::ManagedLaunch>,
-    pub(crate) late_helper: Option<TaskMcp>,
+    pub(crate) runner: PreparedRunner,
+}
+/// The runner-specific half of a prepared launch (ADR-192).
+pub(crate) enum PreparedRunner {
+    Codex {
+        settings: Settings,
+        input: String,
+        late_helper: Option<TaskMcp>,
+    },
+    /// The prompt is the dispatch payload. The scoped helper is bound after
+    /// initialize (ADR-158), through the retained context when there is one.
+    Claude {
+        prompt: String,
+        helper: Option<hagency_runtime::claude::TaskMcp>,
+        retained: bool,
+    },
 }
 
 #[cfg(test)]

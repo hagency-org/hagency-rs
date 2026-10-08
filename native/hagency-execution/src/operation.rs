@@ -4,8 +4,9 @@ use crate::workspace::{Binding, Handoff};
 use crate::{Host, Limits, SharedHost, StartedWorkspace};
 use hagency_core::tasks::{RunnerCapability, RunnerCommand, Task, TaskState};
 use hagency_runtime::{
+    claude::{EventKind, Message},
     codex::session::{self, Outcome, Update},
-    owned::{Cleanup, OwnedSession, StartError},
+    owned::{Cleanup, OwnedClaudeSession, OwnedSession, StartError},
 };
 use hagency_store::{DomainStore, OwnedFailure, OwnedObservation};
 use sha2::{Digest, Sha256};
@@ -41,6 +42,7 @@ pub enum AuthoritySite {
     DispatchCheck,
     AccountCheck,
     LocalCodexCheck,
+    LocalClaudeCheck,
     TaskMcpBind,
     WarmRoot,
     WarmScope,
@@ -68,6 +70,7 @@ impl AuthoritySite {
             Self::DispatchCheck => "dispatch_check",
             Self::AccountCheck => "account_check",
             Self::LocalCodexCheck => "local_codex_check",
+            Self::LocalClaudeCheck => "local_claude_check",
             Self::TaskMcpBind => "task_mcp_bind",
             Self::WarmRoot => "warm_root",
             Self::WarmScope => "warm_scope",
@@ -471,6 +474,9 @@ pub struct Report {
     runtime_stage: RuntimeStage,
     pub text: Option<String>,
     pub(crate) owner: Option<OwnedSession>,
+    /// ADR-192: this dispatch's Claude session when its host runs Claude, under
+    /// the same custody rule as `owner`: kept until a stop proves release.
+    pub(crate) claude: Option<OwnedClaudeSession>,
     pub(crate) warm: Option<crate::warm::Binding>,
     factory: Option<crate::warm::Binding>,
     /// Custody for a child whose spawn was abandoned at the deadline (ADR-053
@@ -511,6 +517,7 @@ impl Report {
             runtime_stage: RuntimeStage::Initialize,
             text: None,
             owner: None,
+            claude: None,
             warm: None,
             factory: None,
             late_child: None,
@@ -583,6 +590,7 @@ impl Report {
     /// or incomplete stop observations remain retained even without a returned owner.
     pub fn retains_process_custody(&self) -> bool {
         self.owner.is_some()
+            || self.claude.is_some()
             || match self.cleanup {
                 Cleanup::Pending => false,
                 Cleanup::Observed(_) => !stopped(self.cleanup),
@@ -593,6 +601,8 @@ impl Report {
     pub fn retry_stop(&mut self) -> Cleanup {
         if let Some(owner) = &mut self.owner {
             self.cleanup = owner.stop();
+        } else if let Some(claude) = &mut self.claude {
+            self.cleanup = claude.stop();
         } else if self.cleanup == Cleanup::Pending
             && self.late_child.is_none()
             && let Some(live) = &mut self.live
@@ -616,6 +626,7 @@ impl Report {
                 live.release();
             }
             self.owner.take();
+            self.claude.take();
         }
         self.cleanup
     }
@@ -1231,6 +1242,31 @@ async fn watched<F: Future<Output = Result<T, session::Error>>, T>(
     until: Instant,
     status: &mut Option<TaskState>,
 ) -> Result<T, Failure> {
+    let refused = |error| {
+        if error == session::Error::UnsupportedRequest {
+            Failure::UnsupportedApproval
+        } else {
+            Failure::Protocol
+        }
+    };
+    watched_with(
+        future, refused, domain, cap, expected, cancel, until, status,
+    )
+    .await
+}
+/// `watched` for any runtime: the lease is renewed every 100 ms while the
+/// runtime future runs, and its own refusal maps through `refused`.
+#[allow(clippy::too_many_arguments)]
+async fn watched_with<F: Future<Output = Result<T, E>>, T, E>(
+    future: F,
+    refused: impl Fn(E) -> Failure,
+    domain: &DomainStore,
+    cap: &RunnerCapability,
+    expected: &str,
+    cancel: &AtomicBool,
+    until: Instant,
+    status: &mut Option<TaskState>,
+) -> Result<T, Failure> {
     tokio::pin!(future); // Held across checks; a cancelled future is never repolled.
     let mut tick = interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1244,7 +1280,7 @@ async fn watched<F: Future<Output = Result<T, session::Error>>, T>(
                     .map_err(|error| Failure::lost(AuthoritySite::LeaseRenew, &error))?;
                 *status = Some(current.status);
             },
-            result = &mut future => return result.map_err(|error| if error == session::Error::UnsupportedRequest { Failure::UnsupportedApproval } else { Failure::Protocol }),
+            result = &mut future => return result.map_err(&refused),
         }
     }
 }
@@ -1387,6 +1423,276 @@ pub(crate) async fn spawn_prepared(
     Ok(())
 }
 
+/// The Claude counterpart of `spawn_prepared` (ADR-192): the guardian
+/// handshake runs on a blocking thread raced against the same deadline
+/// (ADR-053). A session that arrives after the deadline is dropped on that
+/// thread, where its Drop stops it through the guardian; the report keeps the
+/// uncertain cleanup, so the dispatch is fenced as for an abandoned Codex spawn.
+async fn spawn_claude(
+    host: &Host,
+    launch: hagency_platform::Launch,
+    limits: Limits,
+    cancel: &Arc<AtomicBool>,
+    until: Instant,
+    report: &mut Report,
+) -> Result<(), Failure> {
+    let guardian = host.guardian.clone();
+    // ADR-183 decision D, as for the Codex transport: the session's event wait
+    // and lifetime are the runtime ceiling, never the budget.
+    let session_limits = hagency_runtime::claude::session::Limits {
+        write_timeout_ms: limits.response_ms,
+        event_wait_ms: TURN_CEILING_MS,
+        lifetime_ms: TURN_CEILING_MS,
+    };
+    let spawn = tokio::task::spawn_blocking(move || {
+        OwnedClaudeSession::spawn(&guardian, &launch, session_limits)
+    });
+    match bounded(spawn, cancel, until).await {
+        Ok(Ok(Ok(session))) => {
+            report.claude = Some(session);
+            Ok(())
+        }
+        Ok(Ok(Err(error))) => {
+            report.startup_error = Some(error);
+            if let StartError::Uncertain { cleanup, .. } = error {
+                report.cleanup = cleanup;
+                if stopped(cleanup)
+                    && let Some(live) = &mut report.live
+                {
+                    live.release();
+                }
+            } else if let Some(live) = &mut report.live {
+                live.release();
+            }
+            Err(Failure::SpawnFailed)
+        }
+        Ok(Err(_)) => {
+            if let Some(live) = &mut report.live {
+                live.release();
+            }
+            Err(Failure::SpawnFailed)
+        }
+        Err(Failure::Deadline) => {
+            report.cleanup = Cleanup::Unknown {
+                kind: std::io::ErrorKind::TimedOut,
+            };
+            Err(Failure::SpawnFailed)
+        }
+        Err(failure) => Err(failure),
+    }
+}
+/// What one Claude turn borrows from `execute` (ADR-192).
+struct ClaudeTurn<'a> {
+    domain: &'a DomainStore,
+    cap: &'a RunnerCapability,
+    host: &'a Arc<Host>,
+    limits: Limits,
+    budget: &'a Budget,
+    started: &'a hagency_store::OwnedDispatchScope,
+    expected: &'a str,
+    cancel: &'a Arc<AtomicBool>,
+    until: Instant,
+    ceiling: Instant,
+}
+/// One Claude turn on a fresh guardian-owned session (ADR-192), between the
+/// shared admission in `execute` and the shared `settle`: initialize, bind the
+/// scoped helper (ADR-158), one prompt, then read to its result (ADR-155).
+/// A permission request reaches no owner card yet: like a Codex turn without
+/// approvals, it refuses the turn. The child is stopped before this returns;
+/// the returned value is the drive's outcome for `settle`.
+async fn run_claude_turn(
+    turn: ClaudeTurn<'_>,
+    launch: hagency_platform::Launch,
+    prompt: String,
+    helper: Option<hagency_runtime::claude::TaskMcp>,
+    retained: bool,
+    report: &mut Report,
+) -> Result<(), Failure> {
+    let ClaudeTurn {
+        domain,
+        cap,
+        host,
+        limits,
+        budget,
+        started,
+        expected,
+        cancel,
+        until,
+        ceiling,
+    } = turn;
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::SpawnStarted,
+        serde_json::json!({}),
+    )
+    .await;
+    spawn_claude(host, launch, limits, cancel, until, report).await?;
+    let session = report.claude.as_mut().ok_or(Failure::SpawnFailed)?;
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::SpawnDone,
+        serde_json::json!({"pid": session.id(), "warm": false}),
+    )
+    .await;
+    let refused = |_: hagency_runtime::claude::session::Error| Failure::Protocol;
+    let mut text = None;
+    let mut ended = false;
+    let mut turn_failure = String::new();
+    let local = report.local_codex.clone();
+    let status = &mut report.canonical_status;
+    let usage = report.usage.as_mut().ok_or(Failure::UsageBinding)?;
+    let drive = async {
+        watched_with(
+            session.initialize(),
+            refused,
+            domain,
+            cap,
+            expected,
+            cancel,
+            until,
+            status,
+        )
+        .await?;
+        note(
+            domain,
+            cap,
+            hagency_store::AttemptPhase::Initialized,
+            serde_json::json!({}),
+        )
+        .await;
+        if let Some(helper) = helper {
+            if retained {
+                let context = host.task_context.as_ref().ok_or(Failure::Admission)?;
+                // The retained context points the helper at this dispatch before
+                // it connects, as for a late-bound Codex helper.
+                let binding = context
+                    .bind(
+                        domain.clone(),
+                        cap.clone(),
+                        started.clone(),
+                        until.into_std(),
+                        cancel.clone(),
+                    )
+                    .await;
+                checkpoint(cancel, until)?;
+                binding.map_err(|error| match error {
+                    hagency_store::Error::RunnerAuthority | hagency_store::Error::Quarantined => {
+                        Failure::lost(AuthoritySite::TaskMcpBind, &error)
+                    }
+                    _ => Failure::Admission,
+                })?;
+            }
+            watched_with(
+                session.bind_task_mcp(helper),
+                refused,
+                domain,
+                cap,
+                expected,
+                cancel,
+                until,
+                status,
+            )
+            .await?;
+        }
+        watched_with(
+            session.prompt(&prompt),
+            refused,
+            domain,
+            cap,
+            expected,
+            cancel,
+            ceiling,
+            status,
+        )
+        .await?;
+        loop {
+            let message = watched_with(
+                session.next_message(),
+                refused,
+                domain,
+                cap,
+                expected,
+                cancel,
+                ceiling,
+                status,
+            )
+            .await?;
+            match message {
+                // The usage source exists from `system/init` on (ADR-157).
+                Message::Event { kind, payload, .. }
+                    if kind == EventKind::System && payload["subtype"] == "init" =>
+                {
+                    usage.attach(&*session);
+                    note(
+                        domain,
+                        cap,
+                        hagency_store::AttemptPhase::TurnStarted,
+                        serde_json::json!({"session_id": session.session_id()}),
+                    )
+                    .await;
+                }
+                Message::Event { kind, payload, .. } => {
+                    if let Some(observation) = session.last_observation()
+                        && usage.observe(observation)
+                    {
+                        // Storage refusal closes capture only, as for Codex.
+                        let _ = bounded(usage.record_pending(), cancel, ceiling).await?;
+                    }
+                    if kind == EventKind::Result {
+                        ended = true;
+                        if payload["subtype"] == "success" && payload["is_error"] == false {
+                            text = payload["result"].as_str().map(str::to_owned);
+                        } else {
+                            turn_failure = payload["subtype"]
+                                .as_str()
+                                .unwrap_or("error")
+                                .chars()
+                                .take(512)
+                                .collect();
+                        }
+                        return Ok(());
+                    }
+                }
+                Message::Permission { .. } => return Err(Failure::UnsupportedApproval),
+                Message::ControlCancel { .. } => {}
+                Message::ControlResponse { .. } => return Err(Failure::Protocol),
+            }
+        }
+    };
+    let drive = async move {
+        match local {
+            Some(local) => local.watch(drive).await,
+            None => drive.await,
+        }
+    };
+    // ADR-183 decision D: the budget only notifies under the turn.
+    let (drive, over_budget) = budget.watch(drive, domain, cap).await;
+    report.over_budget = over_budget;
+    report.protocol = match text {
+        Some(text) => {
+            report.text = Some(text);
+            Protocol::Completed
+        }
+        None if ended => Protocol::Failed,
+        None => Protocol::Unknown,
+    };
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::StopRequested,
+        serde_json::json!({}),
+    )
+    .await;
+    let session = report.claude.as_mut().ok_or(Failure::Worker)?;
+    report.cleanup = session.stop();
+    report.exit_identity = session.exit_identity();
+    report.stderr_tail = session.stderr_tail(512);
+    report.guardian_stderr_tail = session.guardian_stderr_tail();
+    report.turn_failure = turn_failure;
+    drive
+}
 async fn execute(
     domain: &DomainStore,
     cap: &RunnerCapability,
@@ -1419,12 +1725,10 @@ async fn execute(
     }
     let crate::host::Prepared {
         launch,
-        settings,
         io_limits,
-        input,
         root,
         account,
-        late_helper,
+        runner,
     } = if report.factory.is_some() {
         host.prepare_followup(&scope, cap, limits)?
     } else {
@@ -1519,7 +1823,11 @@ async fn execute(
         local.check()?;
     }
     checkpoint(cancel, until)?;
-    let approval_may_write = !settings.is_read_only();
+    let approval_may_write = match &runner {
+        crate::host::PreparedRunner::Codex { settings, .. } => !settings.is_read_only(),
+        // Every owned dispatch holds its exclusive workspace lease (ADR-192).
+        crate::host::PreparedRunner::Claude { .. } => true,
+    };
     if let Some(live) = &mut report.live {
         live.possible();
     }
@@ -1542,6 +1850,43 @@ async fn execute(
     let ceiling_expires_at = crate::approval::state::wall_now()?
         .checked_add(TURN_CEILING_MS)
         .ok_or(Failure::Deadline)?;
+    let (settings, input, late_helper) = match runner {
+        crate::host::PreparedRunner::Codex {
+            settings,
+            input,
+            late_helper,
+        } => (settings, input, late_helper),
+        crate::host::PreparedRunner::Claude {
+            prompt,
+            helper,
+            retained,
+        } => {
+            let drive = run_claude_turn(
+                ClaudeTurn {
+                    domain,
+                    cap,
+                    host: &host,
+                    limits,
+                    budget,
+                    started: &started,
+                    expected: &expected,
+                    cancel,
+                    until,
+                    ceiling,
+                },
+                launch,
+                prompt,
+                helper,
+                retained,
+                report,
+            )
+            .await;
+            return settle(
+                domain, cap, &host, report, drive, &scope, started, expected, cancel, ceiling,
+            )
+            .await;
+        }
+    };
     if report.owner.is_none() {
         note(
             domain,
@@ -1808,6 +2153,27 @@ async fn execute(
     // names a usage-limit refusal here; native used to drop it, so the operator
     // saw only a bare `protocol` fault.
     report.turn_failure = runner.turn_failure_tail(512);
+    settle(
+        domain, cap, &host, report, drive, &scope, started, expected, cancel, ceiling,
+    )
+    .await
+}
+/// The settlement both runners share once their child is stopped: the stop
+/// record, approval and live release, then held completion custody or the
+/// runtime's own reply (ADR-192: Codex and Claude settle alike).
+#[allow(clippy::too_many_arguments)]
+async fn settle(
+    domain: &DomainStore,
+    cap: &RunnerCapability,
+    host: &Host,
+    report: &mut Report,
+    drive: Result<(), Failure>,
+    scope: &hagency_store::OwnedDispatchScope,
+    started: hagency_store::OwnedDispatchScope,
+    expected: String,
+    cancel: &Arc<AtomicBool>,
+    ceiling: Instant,
+) -> Result<(), Failure> {
     note(
         domain,
         cap,
@@ -1837,7 +2203,7 @@ async fn execute(
         // This adds one bounded (2 s) fresh-clock writer read. Done changes the
         // epoch and still fails the exact renewal/settlement fingerprint. Never
         // use this status as execution, release, retry or reply authority.
-        report.canonical_status = observed_canonical_status(domain, cap, &scope).await;
+        report.canonical_status = observed_canonical_status(domain, cap, scope).await;
     }
     // Post-turn (ADR-183 decision D): the settlement of a turn Codex ended is
     // bounded by cancellation and the runtime's ceiling, never by the budget —
@@ -1904,6 +2270,7 @@ async fn execute(
         report.settlement = Settlement::CanonicalReplyReady;
         report.text = None; // Stored explicit content is the sole final body.
         report.owner.take();
+        report.claude.take();
         note(
             domain,
             cap,
@@ -1935,6 +2302,7 @@ async fn execute(
     report.canonical_status = Some(task.status);
     report.settlement = Settlement::Completed;
     report.owner.take();
+    report.claude.take();
     note(
         domain,
         cap,
@@ -1944,6 +2312,7 @@ async fn execute(
     .await;
     Ok(())
 }
+
 /// The fixed-label record of a stop, for the attempt's `stop_reported` event:
 /// what the guardian reported, how the leader and the guardian exited, and
 /// the guardian's own last words. Never free text beyond the bounded tail.

@@ -16,7 +16,7 @@ pub use approval::{ApprovalHost, ApprovalNotice, ApprovalRequests};
 pub use factory::{FactoryDispatch, FactoryRuntime, WarmHostPlan, WarmTaskBridge};
 pub use host::{Host, Limits, SharedHost};
 pub use inspection::StopInspectionStatus;
-pub use local_codex::LocalCodex;
+pub use local_codex::{LocalCodex, LocalProvider};
 pub use operation::{
     AuthorityCause, AuthoritySite, BudgetWatch, Failure, Operation, OverBudget, Protocol, Report,
     RuntimeObservation, RuntimeStage, RuntimeWriteObservation, Settlement, SettlementCause,

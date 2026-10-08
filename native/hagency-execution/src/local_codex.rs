@@ -1,15 +1,51 @@
 //! Explicit provider-owned local directories, not managed account readiness.
-use crate::Failure;
+use crate::{AuthoritySite, Failure};
 use cap_std::{ambient_authority, fs::Dir};
 use hagency_store::{OwnedClaimProfile, OwnedDispatchScope};
 use std::{collections::BTreeMap, ffi::OsString, fs::File, path::PathBuf};
 
+/// Which coding agent's own sign-in folder a local binding names (ADR-192).
+/// The kind selects the framework and provider it serves, the variable that
+/// points the agent at its folder and the site a failing check reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalProvider {
+    Codex,
+    Claude,
+}
+impl LocalProvider {
+    fn framework(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+    fn provider(self) -> &'static str {
+        match self {
+            Self::Codex => "openai",
+            Self::Claude => "anthropic",
+        }
+    }
+    fn folder_env(self) -> &'static str {
+        match self {
+            Self::Codex => "CODEX_HOME",
+            Self::Claude => "CLAUDE_CONFIG_DIR",
+        }
+    }
+    fn site(self) -> AuthoritySite {
+        match self {
+            Self::Codex => AuthoritySite::LocalCodexCheck,
+            Self::Claude => AuthoritySite::LocalClaudeCheck,
+        }
+    }
+}
+
 struct Directory {
     path: PathBuf,
     file: File,
+    site: AuthoritySite,
 }
 impl Directory {
-    fn open(path: PathBuf) -> Result<Self, Failure> {
+    fn open(path: PathBuf, site: AuthoritySite) -> Result<Self, Failure> {
         if !path.is_absolute()
             || path.as_os_str().as_encoded_bytes().len() > 4096
             || path.canonicalize().ok().as_ref() != Some(&path)
@@ -19,12 +55,12 @@ impl Directory {
         let file = Dir::open_ambient_dir(&path, ambient_authority())
             .map_err(|_| Failure::Admission)?
             .into_std_file();
-        let value = Self { path, file };
+        let value = Self { path, file, site };
         value.check()?;
         Ok(value)
     }
     fn check(&self) -> Result<(), Failure> {
-        let lost = || Failure::lost_io(crate::AuthoritySite::LocalCodexCheck);
+        let lost = || Failure::lost_io(self.site);
         if self.path.canonicalize().ok().as_ref() != Some(&self.path) {
             return Err(lost());
         }
@@ -54,7 +90,11 @@ impl Directory {
 /// Host-only explicit selection; never an authentication fact or a wire grant.
 /// The provider alone reads its files. Stable ancestors and a trusted same-user
 /// host remain required; these checks do not isolate a hostile OS user.
+///
+/// The same binding serves Claude Code (ADR-192): `codex` is then the user's
+/// Claude folder (`CLAUDE_CONFIG_DIR`), and only the provider kind differs.
 pub struct LocalCodex {
+    provider: LocalProvider,
     preset: String,
     seat: String,
     home: Directory,
@@ -68,18 +108,40 @@ impl LocalCodex {
         home: PathBuf,
         codex_home: PathBuf,
     ) -> Result<Self, Failure> {
+        Self::open(LocalProvider::Codex, preset, seat, home, codex_home)
+    }
+    /// The user's own Claude Code sign-in folder (ADR-192 decision 7).
+    pub fn new_claude(
+        preset: String,
+        seat: String,
+        home: PathBuf,
+        config_dir: PathBuf,
+    ) -> Result<Self, Failure> {
+        Self::open(LocalProvider::Claude, preset, seat, home, config_dir)
+    }
+    fn open(
+        provider: LocalProvider,
+        preset: String,
+        seat: String,
+        home: PathBuf,
+        folder: PathBuf,
+    ) -> Result<Self, Failure> {
         for id in [&preset, &seat] {
             hagency_core::project::identifier(id, 128).map_err(|_| Failure::Admission)?;
         }
         let value = Self {
+            provider,
             preset,
             seat,
-            home: Directory::open(home)?,
-            codex: Directory::open(codex_home)?,
+            home: Directory::open(home, provider.site())?,
+            codex: Directory::open(folder, provider.site())?,
             path: std::env::var_os("PATH"),
         };
         value.check()?;
         Ok(value)
+    }
+    pub fn provider(&self) -> LocalProvider {
+        self.provider
     }
     pub(crate) fn check(&self) -> Result<(), Failure> {
         self.home.check()?;
@@ -94,18 +156,19 @@ impl LocalCodex {
             .restrict_resource(self.preset.clone(), self.seat.clone())
             .map_err(|_| Failure::Admission)
     }
-    /// The login is the seat: any codex resource configured on this seat is
-    /// served (a console copy differs in preset, model or ceiling only).
+    /// The login is the seat: any resource of this provider's framework
+    /// configured on this seat is served (a console copy differs in preset,
+    /// model or ceiling only).
     pub(crate) fn admit(&self, scope: &OwnedDispatchScope) -> Result<(), Failure> {
         self.check()?;
         if scope.requires_managed_account()
             || scope.resource().seat_id != self.seat
-            || scope.resource().framework != "codex"
+            || scope.resource().framework != self.provider.framework()
             || scope
                 .resource()
                 .provider
                 .as_deref()
-                .is_some_and(|provider| provider != "openai")
+                .is_some_and(|provider| provider != self.provider.provider())
         {
             return Err(Failure::Admission);
         }
@@ -118,12 +181,12 @@ impl LocalCodex {
         self.check()?;
         if scope.requires_managed_account()
             || scope.resource().seat_id != self.seat
-            || scope.resource().framework != "codex"
+            || scope.resource().framework != self.provider.framework()
             || scope
                 .resource()
                 .provider
                 .as_deref()
-                .is_some_and(|provider| provider != "openai")
+                .is_some_and(|provider| provider != self.provider.provider())
         {
             return Err(Failure::Admission);
         }
@@ -148,6 +211,9 @@ impl LocalCodex {
                     | "OPENAI_BASE_URL"
                     | "AZURE_OPENAI_API_KEY"
                     | "ANTHROPIC_API_KEY"
+                    | "ANTHROPIC_AUTH_TOKEN"
+                    | "ANTHROPIC_BASE_URL"
+                    | "CLAUDE_CODE_OAUTH_TOKEN"
                     | "API_TOKEN"
                     | "MATRIX_BRIDGE_SECRET"
                     | "HAGENCY_DASHBOARD_TOKEN"
@@ -161,9 +227,14 @@ impl LocalCodex {
         }
         environment.insert("HOME".into(), self.home.path.clone().into_os_string());
         environment.insert(
-            "CODEX_HOME".into(),
+            self.provider.folder_env().into(),
             self.codex.path.clone().into_os_string(),
         );
+        if self.provider == LocalProvider::Claude {
+            // ADR-192 decision 3: the service's Claude processes never update
+            // the binary the runtime pinned; a user's update is seen by Setup.
+            environment.insert("DISABLE_AUTOUPDATER".into(), "1".into());
+        }
         // Explicit local-profile opt-in, matching TS runnerEnv's executable
         // search path. Do not inherit keys, proxies or arbitrary host variables.
         if let Some(path) = &self.path {
@@ -192,6 +263,41 @@ impl LocalCodex {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    #[test]
+    fn native_local_claude_binding() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let claude = root.join("claude");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&claude).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binding =
+            LocalCodex::new_claude("pool".into(), "seat".into(), home.clone(), claude.clone())
+                .unwrap();
+        assert_eq!(binding.provider(), LocalProvider::Claude);
+        let mut environment = BTreeMap::new();
+        binding.apply(&mut environment).unwrap();
+        assert_eq!(
+            environment.get(&OsString::from("CLAUDE_CONFIG_DIR")),
+            Some(&claude.clone().into_os_string())
+        );
+        assert_eq!(
+            environment.get(&OsString::from("DISABLE_AUTOUPDATER")),
+            Some(&OsString::from("1"))
+        );
+        assert!(!environment.contains_key(&OsString::from("CODEX_HOME")));
+        for key in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            let mut leaked = environment.clone();
+            leaked.insert(key.into(), "synthetic-forbidden".into());
+            assert!(binding.apply(&mut leaked).is_err(), "{key} refused");
+        }
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            binding.check(),
+            Err(Failure::lost_io(AuthoritySite::LocalClaudeCheck))
+        );
+    }
     #[tokio::test]
     async fn native_local_codex_binding() {
         let temporary = tempfile::tempdir().unwrap();
