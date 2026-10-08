@@ -181,17 +181,37 @@ pub fn configure(options: &Options) -> Result<Report, String> {
     let task_client = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|e| format!("running executable path: {e}"))?;
-    let mut document = serde_json::json!({
-        "profile": "palpo_fleet_runtime_v1",
-        "send_file": true,
-        "receive_file": true,
-        "file_limit": FILE_LIMIT,
-        "operation_ms": OPERATION_MS,
-        "response_ms": RESPONSE_MS,
-        "approval_owner_wait_ms": APPROVAL_OWNER_WAIT_MS,
-        "idle_ms": IDLE_MS,
-        "home": {"root": homes, "task_client": task_client, "projects": []},
-    });
+    let path = state.join(RUNTIME_FILE);
+    // A rewrite (an agent updated or newly found, ADR-192 decision 7) replaces
+    // only the coding-agent blocks: every other setting of the existing file,
+    // the operator's own included, is kept as it was.
+    let existing = options
+        .force
+        .then(|| std::fs::read(&path).ok())
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter(serde_json::Value::is_object);
+    let mut document = match existing {
+        Some(mut existing) => {
+            if let Some(settings) = existing.as_object_mut() {
+                for agent in ["executable", "executable_sha256", "local_codex", "claude"] {
+                    settings.remove(agent);
+                }
+            }
+            existing
+        }
+        None => serde_json::json!({
+            "profile": "palpo_fleet_runtime_v1",
+            "send_file": true,
+            "receive_file": true,
+            "file_limit": FILE_LIMIT,
+            "operation_ms": OPERATION_MS,
+            "response_ms": RESPONSE_MS,
+            "approval_owner_wait_ms": APPROVAL_OWNER_WAIT_MS,
+            "idle_ms": IDLE_MS,
+            "home": {"root": homes, "task_client": task_client, "projects": []},
+        }),
+    };
     if let Some(executable) = &codex {
         document["executable"] = serde_json::json!(executable);
         document["executable_sha256"] = serde_json::json!(sha256_file(executable)?);
@@ -220,7 +240,6 @@ pub fn configure(options: &Options) -> Result<Report, String> {
     }
     let bytes = serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?;
 
-    let path = state.join(RUNTIME_FILE);
     if path.exists() {
         if !options.force {
             return Err(format!(

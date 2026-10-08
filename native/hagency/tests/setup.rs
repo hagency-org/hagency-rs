@@ -375,3 +375,63 @@ fn native_setup_leaves_out_an_unusable_claude_found_on_path() {
     assert!(stdout.contains("Claude Code left out"), "{stdout}");
     assert!(written(&state).get("claude").is_none());
 }
+
+/// ADR-192 decision 7: when Setup rewrites the runtime for a changed or newly
+/// found agent, only the coding-agent blocks change. Every other setting of
+/// the existing file, the operator's own included, is kept as it was.
+#[test]
+fn native_setup_rewrite_keeps_the_operators_other_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, codex_binary) = codex(&root);
+    let state = root.join("state");
+    let first = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--codex",
+            codex_binary.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    // The operator tunes the file by hand.
+    let mut tuned = written(&state);
+    tuned["matrix_sdk_timeout_ms"] = serde_json::json!(60000);
+    tuned["operation_ms"] = serde_json::json!(420000);
+    let path = state.join("fleet-runtime.json");
+    std::fs::remove_file(&path).unwrap();
+    hagency_store::private::write_new(&path, &serde_json::to_vec_pretty(&tuned).unwrap()).unwrap();
+    // Claude Code is installed later; Setup rewrites the runtime.
+    let claude_binary = claude(&root, &home);
+    let rewrite = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--codex",
+            codex_binary.to_str().unwrap(),
+            "--claude",
+            claude_binary.to_str().unwrap(),
+            "--force",
+        ],
+    );
+    assert!(
+        rewrite.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rewrite.stderr)
+    );
+    let after = written(&state);
+    assert_eq!(after["matrix_sdk_timeout_ms"], 60000);
+    assert_eq!(after["operation_ms"], 420000);
+    assert_eq!(after["home"], tuned["home"]);
+    assert_eq!(after["executable"], codex_binary.to_str().unwrap());
+    assert_eq!(
+        after["claude"]["executable"],
+        claude_binary.to_str().unwrap()
+    );
+}
