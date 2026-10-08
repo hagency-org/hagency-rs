@@ -2,7 +2,7 @@
 kind: decision
 id: ADR-193
 title: "Octos runs as a native agent beside Codex and Claude Code, driven over its own UI Protocol (OUP)"
-status: Proposed
+status: Accepted
 satisfies: [REQ-RUST-MIGRATION-EXECUTION]
 amends: [ADR-192]
 tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
@@ -37,17 +37,19 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 
 1. **A third driver behind the same seam.** `Runner::Octos` sits beside Codex and Claude Code with framework `octos`. Everything above the process stays shared, as ADR-192 decision 1 set out.
 
-2. **One `octos serve --stdio` per dispatch: one session, one turn.**
+2. **One `octos serve --stdio` per dispatch: one session, run until Octos is idle.**
    - The guardian spawns `octos serve --stdio --cwd <workspace> --no-network --instance-data-dir <short private dir per agent>`.
    - Hagency sends `client_hello` with a fixed feature list: canonical projection v2, typed approvals and the workspace working directory. It never sends `user_question.v1`, so no question blocks a turn.
-   - Hagency sets the permission profile, opens a fresh session named for the dispatch, starts one turn with the dispatch payload and reads to that turn's `turn_terminal`.
+   - Hagency sets the permission profile, opens a fresh session named for the dispatch and starts one turn with the dispatch payload.
+   - Octos's sub-agents and background work stay available (operator decision 3). The dispatch therefore ends only when Octos reports the session idle: the dispatch's turn has reached its `turn_terminal`, and `session/orchestration` reports no running agent and no pending continuation. Continuation turns the kernel starts for that work, and their terminals, belong to the same dispatch.
    - It then closes stdin and stops the process tree.
+   - An owner stop interrupts the running turn, closes the session's agents and stops the process.
    - A process kept ready per agent is a later optimisation, as for Claude Code.
 
 3. **The launch profile.**
    - **Permission profile.** `workspace_write` with network denied and approval policy `on-request` while the dispatch holds the write lease; `read_only` without it. `danger_full_access`, `--solo` and approval policy `never` are never used.
    - **Environment.** An allowlisted environment: `HOME`, `USER`, `PATH`, `TMPDIR` and `OCTOS_NO_MODEL_DOWNLOAD=1`. Provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY` and the rest Octos knows) are removed, as for Codex and Claude Code, so Octos uses the keys in its own store.
-   - **Tools.** The session's kernel tools are narrowed to the foreground coding set: files, shell, search, planning and checks. There are no sub-agents, delegation, background work, user questions, peers, loops, monitors or cron. The dispatch therefore ends at Octos's own turn end (ADR-183).
+   - **Tools.** The session keeps Octos's coding tools, including sub-agents, delegation and background work (operator decision 3). Tools that outlive a dispatch or need a person Hagency cannot route are removed: user questions, peers, loops, monitors and cron. The dispatch ends when Octos reports itself idle, never at a bridge-side cut (ADR-183).
    - **Clean workspace.** No Octos file is written into the project: sessions stay in Octos's per-profile store, outside the workspace. The qualification checks this.
 
 4. **Approvals use the same cards.** `approval/requested` becomes an owner approval through the existing store and card pump.
@@ -60,10 +62,10 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 5. **Task tools are host tools.** Hagency registers its task tools on the session from its own stdio connection: the same seven as for Codex and Claude Code (ADR-158), plus the file tools when enabled, named `hagency.get_task` and so on. Octos sends each call as `peer/tool/call` and Hagency answers with `peer/tool/result`. The calls run through the same capability-bound task tools as for the other two agents, so the tools behave the same for all three. Nothing is written into the user's Octos profiles.
 
 6. **The reply and usage are captured like Codex's.**
-   - **Reply.** The reply is the turn's last `assistant_persisted` text after its last tool start, as in Octos's own `octos chat`.
-   - **Completed.** A `completed` terminal with a reply completes the dispatch.
+   - **Reply.** A turn's reply is its last `assistant_persisted` text after its last tool start, as in Octos's own `octos chat`. The dispatch's reply is that of the last turn to end before Octos went idle: the dispatch's own turn, or the last continuation turn the kernel started for its background work.
+   - **Completed.** When Octos goes idle with a `completed` last terminal and a reply, the dispatch completes.
    - **Failed.** `errored`, `interrupted` and `rate_limited` settle the way a failed Codex turn does, and the error code is kept with the attempt.
-   - **Usage.** The terminal's exact `token_usage` goes into the ledger with framework `octos`. An absent total is unknown, never zero.
+   - **Usage.** Each terminal's exact `token_usage` goes into the ledger with framework `octos` as it arrives. At idle, the session's totals (`session/status/read`), which cover its sub-agents too, close the record. An absent total is unknown, never zero.
 
 7. **A resource names an Octos profile.** Octos has no per-session model, so a resource runs the primary model of one of the user's Octos profiles.
    - **The block.** A `local_octos` block in `fleet-runtime.json` names the user's Octos home and the profiles Hagency may run. The block pins the `octos` binary and its SHA-256.
@@ -97,11 +99,11 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 - OUP is an alpha protocol (`v1alpha1`) and changes additively. The codec follows that rule, and the qualification is pinned to the Octos version it ran against.
 - Owners see fewer approval cards for Octos agents than for Codex agents. Containment rests on Octos's sandbox, which is why the qualification must cover the sandbox as well as approvals.
 - An Octos agent's model follows the user's Octos profile. Changing that profile is the user's way to change the model, and it is noticed at admission.
-- Octos's background agents are not available to Hagency agents in this version.
+- Octos's sub-agents and background work are available to Hagency agents. A dispatch can therefore run longer than its first turn, bounded by the runtime ceiling like every other turn; whether sub-agents' approvals and usage reach the owner and the ledger is checked by the qualification.
 
 ## Slices
 
-1. **The runner seam.** The OUP codec and session driver (string IDs, handshake, envelopes, terminal), `Runner::Octos` in Host admission, the operation and the store's claim query, and reply and usage capture. Offline tests use a fake Octos process.
+1. **The runner seam.** The OUP codec and session driver (string IDs, handshake, envelopes, terminals, the idle report), `Runner::Octos` in Host admission, the operation and the store's claim query, and reply and usage capture. Offline tests use a fake Octos process.
 2. **Approvals.** Octos approvals as owner cards: the binding, the `exact_command` scope for shell commands, withdrawals and expiry.
 3. **Task tools.** The host-tool bridge.
 4. **Setup and binding.** Detection, the `local_octos` binding and profile listing, the `fleet-runtime.json` Octos block, and Octos offer choices (EN/zh).
@@ -117,8 +119,8 @@ tags: [native, octos, oup, runtime, setup, approvals, usage, qualification]
 - **A long-lived serve per agent with a session per dispatch.** Faster turns, kept as a later optimisation once the one-shot path is qualified.
 - **OUP over WebSocket.** It needs an auth token and a port, while stdio is OUP's trusted local transport.
 
-## Questions for the operator
+## Operator decisions (2026-10-08)
 
-1. **The model.** Should a resource run one of your own Octos profiles, its primary model being the resource's model (recommended), or should Hagency keep its own Octos profile per model?
-2. **Provider keys.** Hagency removes provider keys from Octos's environment, so Octos must find its keys in its own store (`octos auth login -p <provider>`, or a profile's keychain entry). Is that right (recommended), or should Hagency forward the provider keys set in your shell?
-3. **Background agents.** This version narrows Octos's tools to the foreground set, so a dispatch ends at Octos's own turn end (recommended). The alternative keeps sub-agents and background work, and ends the dispatch only when Octos reports that all of it is idle.
+1. A resource runs one of the user's own Octos profiles, its primary model being the resource's model.
+2. Hagency removes provider keys from Octos's environment; Octos uses the keys in its own store.
+3. Octos's sub-agents and background work stay available; a dispatch ends only when Octos reports that all of it is idle.
