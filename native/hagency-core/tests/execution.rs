@@ -270,6 +270,21 @@ fn native_execution_octos_shell_scope() {
         rebound["params"][key] = json!(value);
     }
     assert_eq!(scope(&rebound).unwrap().scope.key, exact.scope.key);
+    // Octos's Codex-style aliases of its shell tool are the same family.
+    for tool in ["bash", "exec_command"] {
+        let mut alias = original.clone();
+        alias["params"]["toolName"] = json!(tool);
+        assert_eq!(scope(&alias).unwrap().scope.key, exact.scope.key, "{tool}");
+    }
+    // As Octos sends them today, an alias carries no typed command or
+    // directory, only its title and body: approve once or deny.
+    let mut untyped = original.clone();
+    untyped["params"]["toolName"] = json!("bash");
+    untyped["params"]["body"] = json!("Run command: rm -rf build");
+    for key in ["command", "cwd"] {
+        untyped["params"].as_object_mut().unwrap().remove(key);
+    }
+    assert!(scope(&untyped).is_none());
     // The command, its directory and the workspace are.
     for (pointer, value) in [
         ("/params/command", json!("rm -rf build/out")),
