@@ -478,3 +478,64 @@ pub fn serve_arguments(
     .map(str::to_owned)
     .to_vec())
 }
+
+/// The most of one Octos profile file Hagency reads (ADR-193 decision 7).
+pub const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
+/// The model one of the user's Octos profiles runs: its primary's provider
+/// family and model (`config.llm.primary`, ADR-193 decision 7). An Octos
+/// resource names the same pair as its provider and model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileModel {
+    pub family: String,
+    pub model: String,
+}
+/// Read one profile file's own ID and primary model, nothing else. The file
+/// may hold the user's provider keys: every other field is skipped unread
+/// and none of it is kept. `None` unless the file is the profile `id` with a
+/// primary of its own; a sub-account inherits its parent's model, which its
+/// file does not show, so Hagency runs no sub-account.
+pub fn profile_model(id: &str, bytes: &[u8]) -> Option<ProfileModel> {
+    #[derive(serde::Deserialize)]
+    struct Profile {
+        id: String,
+        #[serde(default)]
+        parent_id: Option<serde::de::IgnoredAny>,
+        config: Config,
+    }
+    #[derive(serde::Deserialize)]
+    struct Config {
+        #[serde(default)]
+        llm: Option<Llm>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Llm {
+        #[serde(default)]
+        primary: Option<Primary>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Primary {
+        #[serde(default)]
+        family_id: Option<String>,
+        #[serde(default)]
+        model_id: Option<String>,
+    }
+    if !profile_id(id) || bytes.len() as u64 > MAX_PROFILE_BYTES {
+        return None;
+    }
+    let profile: Profile = serde_json::from_slice(bytes).ok()?;
+    let primary = profile.config.llm?.primary?;
+    let named = |value: &str, max: usize| {
+        !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+    };
+    match (primary.family_id, primary.model_id) {
+        (Some(family), Some(model))
+            if profile.id == id
+                && profile.parent_id.is_none()
+                && named(&family, 128)
+                && named(&model, 256) =>
+        {
+            Some(ProfileModel { family, model })
+        }
+        _ => None,
+    }
+}

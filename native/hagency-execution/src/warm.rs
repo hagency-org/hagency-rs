@@ -225,7 +225,7 @@ pub(crate) struct Binding {
     root: Arc<crate::workspace::Root>,
     workspace_id: String,
     failure: Option<Failure>,
-    local_codex: Option<Arc<crate::LocalCodex>>,
+    local_codex: Option<Arc<crate::LocalBinding>>,
 }
 impl Binding {
     /// The root of a follow-up chain for an agent a restart re-attached. Every
@@ -237,7 +237,7 @@ impl Binding {
         home: Arc<ManagedAgentHome>,
         root: Arc<crate::workspace::Root>,
         workspace_id: String,
-        local_codex: Option<Arc<crate::LocalCodex>>,
+        local_codex: Option<Arc<crate::LocalBinding>>,
     ) -> Self {
         Self {
             scope,

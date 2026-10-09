@@ -636,6 +636,26 @@ fn native_owned_claim_profile_claims_an_octos_dispatch() {
     );
 }
 
+/// ADR-193 decision 7: the profile an Octos resource runs is part of its
+/// model, like its provider and model. While an agent is engaged on it, the
+/// profile cannot change; other edits stay possible.
+#[test]
+fn native_octos_resource_profile_is_fixed_under_its_agents() {
+    let mut f = Fixture::with_runtime("octos", Some("moonshot"), "");
+    let edit = |profile: &str, tokens: u64| {
+        serde_json::from_value::<hagency_core::project::Resource>(json!({
+            "presetId": "pool", "seatId": "seat", "framework": "octos",
+            "model": "kimi-k3", "provider": "moonshot", "reasoning": null,
+            "octosProfile": profile, "ceiling": {"tokens": tokens, "period": "monthly"}}))
+        .unwrap()
+    };
+    assert!(matches!(
+        f.db.put_resource(&edit("other", 1000)),
+        Err(hagency_store::Error::State)
+    ));
+    f.db.put_resource(&edit("coding", 2000)).unwrap();
+}
+
 /// ADR-192: a Claude dispatch is claimable by its agent's own runtime when
 /// its resource is claude/anthropic with no reasoning setting; with one, it
 /// stays unclaimed (above).

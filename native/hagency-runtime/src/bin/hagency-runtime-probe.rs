@@ -530,6 +530,16 @@ fn main() -> io::Result<()> {
                 "home": std::env::var_os("HOME").is_some(),
             }))?,
         )?;
+        // The names of every variable this child got (never a value), for
+        // the fleet's allowlist checks (ADR-193 decision 3).
+        let mut names: Vec<_> = std::env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        fs::write(
+            marker.with_extension("environment-names"),
+            serde_json::to_vec(&names)?,
+        )?;
         // The settings file the Host passed, exactly as this child reads it.
         if let Some(config) = args
             .iter()

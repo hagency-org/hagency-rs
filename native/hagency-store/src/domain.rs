@@ -2931,7 +2931,8 @@ fn prepare_resource_write(
             || old.framework != resource.framework
             || old.model != resource.model
             || old.provider != resource.provider
-            || old.reasoning != resource.reasoning)
+            || old.reasoning != resource.reasoning
+            || old.octos_profile != resource.octos_profile)
     {
         let count:i64=tx.query_row("SELECT COUNT(*) FROM engagements WHERE resource_id=?1 AND state IN ('reserved','active')",[resource.id()],|r|r.get(0))?;
         if count != 0 {
