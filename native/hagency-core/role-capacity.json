@@ -22,7 +22,8 @@
       "claude model ids: the Claude 5 family (opus-5, sonnet-5, haiku-4-5, fable-5)",
       "gpt-5.6-sol: observed in the codex CLI's own session banner, codex-cli 0.146.0",
       "framework ids and their model/provider flags: lib/frameworks/*.json",
-      "provider + model + reasoning are real fields: backend-v2.js:713 normalizeRuntimeProfileRole"
+      "provider + model + reasoning are real fields: backend-v2.js:713 normalizeRuntimeProfileRole",
+      "octos zai-coding / glm-5.3-flash: an Octos profile's primary family_id and model_id as Octos 2.0.3-rc.13 stores them (config.llm.primary); medium is the tier proposed for the operator's confirmation (ADR-193 slice 4)"
     ],
     "unverified": [
       "Octos and Hermes model strings below are the provider FAMILIES the operator named, not",
@@ -130,6 +131,12 @@
         "provider": "google",
         "model": "gemini",
         "family": "gemini"
+      },
+      {
+        "framework": "octos",
+        "provider": "zai-coding",
+        "model": "glm-5.3-flash",
+        "family": "glm"
       }
     ],
     "lightweight": [
