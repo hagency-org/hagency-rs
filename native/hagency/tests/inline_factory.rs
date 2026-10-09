@@ -1697,3 +1697,139 @@ async fn native_provisioning_claude_agent_first_dispatch() {
     agent.close().await.unwrap();
     f.close().await;
 }
+
+/// ADR-193: an Octos resource provisions an agent with no warm child, as a
+/// Claude Code one does. Each task launches its own `octos serve --stdio` on
+/// the agent's workspace, with the agent's private instance directory,
+/// Hagency's settings file, network denied, the allowlisted environment only
+/// and no task helper, and completes with Octos's reply. A restart re-attaches
+/// the agent the same way. A profile the user changed afterwards refuses the
+/// next task before anything is launched.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn native_provisioning_octos_agent_dispatch_and_reattach() {
+    async fn run(
+        f: &Fixture,
+        agent: &mut hagency_matrix::ProvisionedAgent,
+        n: u64,
+    ) -> hagency_execution::Report {
+        let cap = next_task(f, agent, n).await;
+        let mut operation = agent
+            .dispatch(cap.clone(), execution_limits())
+            .await
+            .unwrap();
+        let binding = acknowledge(&mut operation, &cap).await;
+        let report = operation.wait().await.unwrap();
+        drop(binding);
+        report
+    }
+    let mut f = Fixture::new_octos(false).await;
+    f.provision().await;
+    assert_eq!(f.target_state(), ("complete".into(), "active".into()));
+    assert!(
+        !f.work().join("owned-mcp.warm-entered").exists(),
+        "an Octos agent starts no warm app server"
+    );
+    let engagement = f.engagement();
+    let mut agent = f.collector.take_provisioned_agent(&engagement).unwrap();
+    let report = run(&f, &mut agent, 1).await;
+    assert_eq!(
+        report.protocol,
+        hagency_execution::Protocol::Completed,
+        "Octos factory dispatch failed: {:?}",
+        report.failure
+    );
+    assert_eq!(report.text.as_deref(), Some("octos fixture reply"));
+    drop(report);
+    let argv: Vec<String> =
+        serde_json::from_slice(&fs::read(f.work().join("owned-dispatch.argv")).unwrap()).unwrap();
+    let instances = f.base.root.path().canonicalize().unwrap().join("octos");
+    let value = |flag: &str| {
+        let at = argv.iter().position(|a| a == flag).unwrap();
+        std::path::PathBuf::from(&argv[at + 1])
+    };
+    assert_eq!(argv[..2], ["serve", "--stdio"]);
+    assert!(argv.iter().any(|a| a == "--no-network"));
+    assert_eq!(
+        value("--cwd").canonicalize().unwrap(),
+        f.work().canonicalize().unwrap()
+    );
+    let instance = value("--instance-data-dir");
+    assert_eq!(instance.parent(), Some(instances.as_path()));
+    assert_eq!(
+        value("--config"),
+        instance.join("hagency-octos-config.json")
+    );
+    // Only the allowlist reaches Octos (ADR-193 decision 3); the fixture's
+    // offline mode is the test's own. The default Octos home is not named.
+    let names: Vec<String> = serde_json::from_slice(
+        &fs::read(f.work().join("owned-dispatch.environment-names")).unwrap(),
+    )
+    .unwrap();
+    for name in &names {
+        assert!(
+            [
+                "HAGENCY_OFFLINE_MODE",
+                "HOME",
+                "OCTOS_NO_MODEL_DOWNLOAD",
+                "PATH",
+                "TMPDIR",
+                "USER"
+            ]
+            .contains(&name.as_str()),
+            "{name} reached Octos"
+        );
+    }
+    assert!(names.iter().any(|name| name == "HOME"));
+    assert!(names.iter().any(|name| name == "OCTOS_NO_MODEL_DOWNLOAD"));
+
+    // A restart re-attaches the Octos agent: no warm child, its next task a
+    // follow-up launch like the first.
+    agent.close().await.unwrap();
+    let mut f = f.restart().await;
+    {
+        let cancel = CancellationToken::new();
+        let reattach = f.collector.reattach_provisioned_agent(&engagement, &cancel);
+        tokio::pin!(reattach);
+        loop {
+            tokio::select! {
+                result = &mut reattach => { result.unwrap(); break; },
+                request = f.fake.next() => f.peer.respond(request, &f.base).await,
+            }
+        }
+    }
+    let mut agent = f.collector.take_provisioned_agent(&engagement).unwrap();
+    fs::remove_file(f.work().join("owned-dispatch.argv")).unwrap();
+    let report = run(&f, &mut agent, 2).await;
+    assert_eq!(
+        report.protocol,
+        hagency_execution::Protocol::Completed,
+        "re-attached Octos dispatch failed: {:?}",
+        report.failure
+    );
+    assert_eq!(report.text.as_deref(), Some("octos fixture reply"));
+    drop(report);
+    assert!(f.work().join("owned-dispatch.argv").exists());
+
+    // The user moved the profile to another model: the next task is refused
+    // at admission, and nothing is launched.
+    f.write_octos_profile("deepseek", "deepseek-v-flash");
+    fs::remove_file(f.work().join("owned-dispatch.argv")).unwrap();
+    let cap = next_task(&f, &agent, 3).await;
+    let mut operation = agent
+        .dispatch(cap.clone(), execution_limits())
+        .await
+        .unwrap();
+    let report = operation.wait().await.unwrap();
+    assert_eq!(
+        report.failure,
+        Some(hagency_execution::Failure::Admission),
+        "{:?}",
+        report.protocol
+    );
+    assert!(!f.work().join("owned-dispatch.argv").exists());
+    drop(report);
+    drop(operation);
+    agent.close().await.unwrap();
+    f.close().await;
+}

@@ -250,6 +250,28 @@ struct LocalClaude {
     home: PathBuf,
     config_dir: PathBuf,
 }
+/// ADR-193: the Octos runtime of an imported fleet, beside Codex and Claude
+/// Code. Its local binding is required: admission reads the profile a
+/// resource names from the user's Octos home.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OctosRuntimeConfig {
+    executable: PathBuf,
+    executable_sha256: String,
+    local_octos: LocalOctos,
+}
+/// The user's own Octos home and the profiles Hagency may run from it
+/// (ADR-193 decision 7).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalOctos {
+    profile: String,
+    preset: String,
+    seat: String,
+    home: PathBuf,
+    octos_home: PathBuf,
+    profiles: Vec<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Matrix {
@@ -1298,6 +1320,8 @@ struct FleetRuntimeConfig {
     #[serde(default)]
     claude: Option<ClaudeRuntimeConfig>,
     #[serde(default)]
+    octos: Option<OctosRuntimeConfig>,
+    #[serde(default)]
     send_file: bool,
     #[serde(default)]
     receive_file: bool,
@@ -1352,10 +1376,14 @@ pub(super) fn load_fleet_runtime(
                 .as_ref()
                 .is_some_and(|local| local.profile != "provider_owned_claude_v1")
         })
+        || config
+            .octos
+            .as_ref()
+            .is_some_and(|octos| octos.local_octos.profile != "provider_owned_octos_v1")
     {
         return Err(Failure::Config {
             field: FIELD,
-            fix: "profile palpo_fleet_runtime_v1, idle_ms 100-1200000, local_codex (if any) with profile provider_owned_codex_v1, and claude.local_claude (if any) with profile provider_owned_claude_v1",
+            fix: "profile palpo_fleet_runtime_v1, idle_ms 100-1200000, local_codex (if any) with profile provider_owned_codex_v1, claude.local_claude (if any) with profile provider_owned_claude_v1, and octos.local_octos with profile provider_owned_octos_v1",
         });
     }
     let codex = match (config.executable, config.executable_sha256) {
@@ -1363,16 +1391,24 @@ pub(super) fn load_fleet_runtime(
             verify_executable(&executable, &digest)?;
             Some(executable)
         }
-        (None, None) if config.local_codex.is_none() && config.claude.is_some() => None,
+        (None, None)
+            if config.local_codex.is_none()
+                && (config.claude.is_some() || config.octos.is_some()) =>
+        {
+            None
+        }
         _ => {
             return Err(Failure::Config {
                 field: FIELD,
-                fix: "name the Codex executable with its executable_sha256, or a claude runtime instead (a local_codex block needs the Codex executable)",
+                fix: "name the Codex executable with its executable_sha256, or a claude or octos runtime instead (a local_codex block needs the Codex executable)",
             });
         }
     };
     if let Some(claude) = &config.claude {
         verify_executable(&claude.executable, &claude.executable_sha256)?;
+    }
+    if let Some(octos) = &config.octos {
+        verify_executable(&octos.executable, &octos.executable_sha256)?;
     }
     let own = std::env::current_exe()
         .and_then(|path| path.canonicalize())
@@ -1505,7 +1541,7 @@ pub(super) fn load_fleet_runtime(
     }
     // ADR-192: Claude Code agents, with their own environment and binding.
     if let Some(claude) = config.claude {
-        let mut claude_environment = base;
+        let mut claude_environment = base.clone();
         let local = match claude.local_claude {
             Some(local) => Some(
                 hagency_execution::LocalCodex::new_claude(
@@ -1532,6 +1568,35 @@ pub(super) fn load_fleet_runtime(
             .map_err(|_| Failure::Config {
                 field: "fleet-runtime.json: claude",
                 fix: "the Claude executable and binding must join the warm plan",
+            })?;
+    }
+    // ADR-193: Octos agents. Their environment is the allowlist the binding
+    // writes (HOME, USER, PATH, TMPDIR; OCTOS_HOME for a home elsewhere than
+    // ~/.octos); each agent's Octos state lives in its own private directory
+    // under `<state>/octos`.
+    if let Some(octos) = config.octos {
+        let local = octos.local_octos;
+        let local = hagency_execution::LocalOctos::new(
+            local.preset,
+            local.seat,
+            local.home,
+            local.octos_home,
+            local.profiles,
+        )
+        .map_err(|_| Failure::Config {
+            field: "fleet-runtime.json: octos.local_octos",
+            fix: "preset, seat, home, octos_home and 1-64 distinct profile IDs must form a valid local Octos binding",
+        })?;
+        let instances = state.join("octos");
+        private::directory(&instances).map_err(|_| Failure::Config {
+            field: "state-dir octos",
+            fix: "the Octos instances directory must exist, be owner-private (0700) and writable",
+        })?;
+        warm = warm
+            .with_octos(octos.executable, base, local, instances)
+            .map_err(|_| Failure::Config {
+                field: "fleet-runtime.json: octos",
+                fix: "the Octos executable and binding must join the warm plan",
             })?;
     }
     let homes = hagency_store::agent_home::ManagedHomePlan::new(
@@ -1561,8 +1626,9 @@ pub(super) fn load_fleet_runtime(
     })
 }
 
-/// ADR-192: `fleet-runtime.json` may name a Codex runtime, a Claude Code
-/// runtime, or both; never neither, and never half of the Codex one.
+/// ADR-192, ADR-193: `fleet-runtime.json` may name a Codex runtime, a Claude
+/// Code runtime, an Octos runtime, or several; never none, and never half of
+/// the Codex one.
 #[cfg(all(test, unix))]
 mod fleet_runtime_tests {
     use super::*;
@@ -1583,7 +1649,7 @@ mod fleet_runtime_tests {
         for dir in [&state, &path.join("homes")] {
             private_dir(dir);
         }
-        for name in ["codex", "claude"] {
+        for name in ["codex", "claude", "octos"] {
             std::fs::write(path.join(name), format!("fixture {name} executable")).unwrap();
         }
         Fixture {
@@ -1674,5 +1740,63 @@ mod fleet_runtime_tests {
         profile["claude"]["local_claude"] = serde_json::json!({"profile": "provider_owned_codex_v1",
             "preset": "p", "seat": "s", "home": f.root, "config_dir": f.root});
         assert!(load(&f, &profile).is_err());
+    }
+    /// An Octos block with the user's Octos home and the profiles Hagency may
+    /// run (ADR-193 decision 7). The fixture home is a temporary folder.
+    fn octos_block(f: &Fixture) -> serde_json::Value {
+        let (octos, digest) = executable(f, "octos");
+        let home = f.root.join("user-home");
+        private_dir(&home.join(".octos").join("profiles"));
+        serde_json::json!({"executable": octos, "executable_sha256": digest,
+            "local_octos": {"profile": "provider_owned_octos_v1", "preset": "local_octos",
+                "seat": "local_octos_seat", "home": home, "octos_home": home.join(".octos"),
+                "profiles": ["dev"]}})
+    }
+    #[test]
+    fn native_fleet_runtime_may_run_octos_only() {
+        let f = fixture();
+        let mut document = document(&f);
+        document["octos"] = octos_block(&f);
+        assert!(load(&f, &document).is_ok());
+        // Each Octos agent's instance directory lives under this private root.
+        let instances = std::fs::metadata(f.state.join("octos")).unwrap();
+        assert!(instances.is_dir());
+        assert_eq!(instances.permissions().mode() & 0o777, 0o700);
+        // Beside Codex and Claude Code.
+        let (codex, codex_digest) = executable(&f, "codex");
+        let (claude, claude_digest) = executable(&f, "claude");
+        document["executable"] = serde_json::json!(codex);
+        document["executable_sha256"] = serde_json::json!(codex_digest);
+        document["claude"] =
+            serde_json::json!({"executable": claude, "executable_sha256": claude_digest});
+        assert!(load(&f, &document).is_ok());
+    }
+    #[test]
+    fn native_fleet_runtime_refuses_an_unbound_or_malformed_octos_block() {
+        let f = fixture();
+        let block = octos_block(&f);
+        let with = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut document = document(&f);
+            document["octos"] = block.clone();
+            change(&mut document["octos"]);
+            document
+        };
+        // The Octos home binding is required: admission reads its profiles.
+        let unbound = with(&|octos| {
+            octos.as_object_mut().unwrap().remove("local_octos");
+        });
+        assert!(load(&f, &unbound).is_err());
+        let refused: [&dyn Fn(&mut serde_json::Value); 7] = [
+            &|octos| octos["local_octos"]["profile"] = "provider_owned_claude_v1".into(),
+            &|octos| octos["local_octos"]["profiles"] = serde_json::json!([]),
+            &|octos| octos["local_octos"]["profiles"] = serde_json::json!(["../dev"]),
+            &|octos| octos["local_octos"]["profiles"] = serde_json::json!(["dev", "dev"]),
+            &|octos| octos["local_octos"]["octos_home"] = "/nonexistent/octos".into(),
+            &|octos| octos["executable_sha256"] = "0".repeat(64).into(),
+            &|octos| octos["local_octos"]["api_key"] = "unknown field".into(),
+        ];
+        for (index, change) in refused.into_iter().enumerate() {
+            assert!(load(&f, &with(change)).is_err(), "case {index}");
+        }
     }
 }

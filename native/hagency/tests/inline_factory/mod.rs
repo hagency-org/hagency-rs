@@ -106,30 +106,61 @@ pub struct Fixture {
     service_mode: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub address: std::net::SocketAddr,
-    /// ADR-192: the agent's resource is Claude Code, served by the plan's
-    /// Claude runtime (the offline Claude peer), not the warm Codex child.
+    /// ADR-192, ADR-193: the coding agent the target resource runs. Claude
+    /// Code and Octos are served by the plan's own runtimes (the offline
+    /// runtime peer), not the warm Codex child.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    claude: bool,
+    agent: Agent,
 }
+/// The coding agent the target agent's resource runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    Codex,
+    Claude,
+    Octos,
+}
+/// ADR-193: the fixture user's Octos profile the Octos resource runs, and
+/// its primary model. The user's home is a temporary folder, never `~`.
+pub const OCTOS_PROFILE: &str = "coding";
+pub const OCTOS_FAMILY: &str = "zai-coding";
+pub const OCTOS_MODEL: &str = "glm-5.3-flash";
 impl Fixture {
     pub async fn new(application_service: bool) -> Self {
-        Self::new_configured(application_service, false, false, false).await
+        Self::new_configured(application_service, false, false, Agent::Codex).await
     }
     pub async fn new_service(application_service: bool) -> Self {
-        Self::new_configured(application_service, false, true, false).await
+        Self::new_configured(application_service, false, true, Agent::Codex).await
     }
     pub async fn foreign_approval_writer() -> Self {
-        Self::new_configured(false, true, false, false).await
+        Self::new_configured(false, true, false, Agent::Codex).await
     }
     /// ADR-192: the target agent's resource is Claude Code.
     pub async fn new_claude(application_service: bool) -> Self {
-        Self::new_configured(application_service, false, false, true).await
+        Self::new_configured(application_service, false, false, Agent::Claude).await
+    }
+    /// ADR-193: the target agent's resource runs the fixture user's Octos
+    /// profile.
+    pub async fn new_octos(application_service: bool) -> Self {
+        Self::new_configured(application_service, false, false, Agent::Octos).await
+    }
+    /// The fixture user's home, holding their Octos home (`.octos`).
+    pub fn octos_user(&self) -> PathBuf {
+        self.base
+            .root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("octos-user")
+    }
+    /// Write the fixture user's Octos profile with this primary model.
+    pub fn write_octos_profile(&self, family: &str, model: &str) {
+        write_octos_profile(&self.octos_user(), family, model);
     }
     async fn new_configured(
         application_service: bool,
         foreign_writer: bool,
         service_mode: bool,
-        claude: bool,
+        agent: Agent,
     ) -> Self {
         // An already-managed project and unrelated external bootstrap agent.
         // ONLY that external agent uses fixture activation. The target factory
@@ -140,16 +171,27 @@ impl Fixture {
         repository.register(&reg()).unwrap();
         let pool = matrix::domain::resource("pool", "seat", 1000);
         repository.put_resource(&pool).unwrap();
-        let target = if claude {
-            let mut claude_pool = matrix::domain::resource("claude_pool", "seat", 1000);
-            claude_pool.framework = "claude".into();
-            claude_pool.provider = Some("anthropic".into());
-            claude_pool.model = "claude-opus-5".into();
-            claude_pool.reasoning = None;
-            repository.put_resource(&claude_pool).unwrap();
-            claude_pool
-        } else {
-            pool.clone()
+        let target = match agent {
+            Agent::Claude => {
+                let mut claude_pool = matrix::domain::resource("claude_pool", "seat", 1000);
+                claude_pool.framework = "claude".into();
+                claude_pool.provider = Some("anthropic".into());
+                claude_pool.model = "claude-opus-5".into();
+                claude_pool.reasoning = None;
+                repository.put_resource(&claude_pool).unwrap();
+                claude_pool
+            }
+            Agent::Octos => {
+                let mut octos_pool = matrix::domain::resource("octos_pool", "seat", 1000);
+                octos_pool.framework = "octos".into();
+                octos_pool.provider = Some(OCTOS_FAMILY.into());
+                octos_pool.model = OCTOS_MODEL.into();
+                octos_pool.reasoning = None;
+                octos_pool.octos_profile = Some(OCTOS_PROFILE.into());
+                repository.put_resource(&octos_pool).unwrap();
+                octos_pool
+            }
+            Agent::Codex => pool.clone(),
         };
         let mut request = matrix::domain::request("worker", "Worker", &pool, 100);
         request.target_project_id = "factory_project".into();
@@ -192,8 +234,15 @@ impl Fixture {
         .unwrap();
         let fake = matrix::Fake::start(true).await;
         let mut peer = Peer::new(application_service, fake.endpoint.clone()).await;
-        if claude {
+        if agent != Agent::Codex {
             peer.target_resource = target.id();
+        }
+        if agent == Agent::Octos {
+            write_octos_profile(
+                &base.root.path().canonicalize().unwrap().join("octos-user"),
+                OCTOS_FAMILY,
+                OCTOS_MODEL,
+            );
         }
         Self::assemble(
             base,
@@ -202,7 +251,7 @@ impl Fixture {
             application_service,
             foreign_writer,
             service_mode,
-            claude,
+            agent,
         )
         .await
     }
@@ -216,7 +265,7 @@ impl Fixture {
         application_service: bool,
         foreign_writer: bool,
         service_mode: bool,
-        claude: bool,
+        agent: Agent,
     ) -> Self {
         let custody = hagency_store::Store::start(
             hagency_store::Repository::open(&base.root.path().join("runtime")).unwrap(),
@@ -331,21 +380,47 @@ impl Fixture {
             warm
         };
         // ADR-192: Claude agents run the offline Claude peer in its task mode.
-        let warm = if claude {
-            let claude_peer = PathBuf::from(env!("CARGO_BIN_EXE_hagency-claude-probe"))
+        // ADR-193: Octos agents run the same runtime peer, which answers an
+        // `octos serve --stdio` launch as Octos, bound to the fixture user's
+        // Octos home.
+        let runtime_peer = || {
+            PathBuf::from(env!("CARGO_BIN_EXE_hagency-claude-probe"))
                 .canonicalize()
-                .unwrap();
-            let mut claude_environment = BTreeMap::from([
-                ("PATH".into(), "".into()),
-                ("HAGENCY_OFFLINE_MODE".into(), "task".into()),
-            ]);
-            if let Some(system) = std::env::var_os("SystemRoot") {
-                claude_environment.insert("SystemRoot".into(), system);
-            }
-            warm.with_claude(claude_peer, claude_environment, None)
                 .unwrap()
-        } else {
-            warm
+        };
+        let warm = match agent {
+            Agent::Claude => {
+                let mut claude_environment = BTreeMap::from([
+                    ("PATH".into(), "".into()),
+                    ("HAGENCY_OFFLINE_MODE".into(), "task".into()),
+                ]);
+                if let Some(system) = std::env::var_os("SystemRoot") {
+                    claude_environment.insert("SystemRoot".into(), system);
+                }
+                warm.with_claude(runtime_peer(), claude_environment, None)
+                    .unwrap()
+            }
+            Agent::Octos => {
+                let user = base.root.path().canonicalize().unwrap().join("octos-user");
+                let local = hagency_execution::LocalOctos::new(
+                    "local_octos".into(),
+                    "seat".into(),
+                    user.clone(),
+                    user.join(".octos"),
+                    vec![OCTOS_PROFILE.into()],
+                )
+                .unwrap();
+                let octos_environment =
+                    BTreeMap::from([("HAGENCY_OFFLINE_MODE".into(), "normal".into())]);
+                warm.with_octos(
+                    runtime_peer(),
+                    octos_environment,
+                    local,
+                    base.root.path().canonicalize().unwrap().join("octos"),
+                )
+                .unwrap()
+            }
+            Agent::Codex => warm,
         };
         let limits = matrix::factory_limits();
         let host = if application_service {
@@ -453,7 +528,7 @@ impl Fixture {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             address,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            claude,
+            agent,
         };
         {
             let cancel = CancellationToken::new();
@@ -512,7 +587,7 @@ impl Fixture {
             peer,
             application_service,
             service_mode,
-            claude,
+            agent,
             ..
         } = self;
         if reopen_domain {
@@ -529,7 +604,7 @@ impl Fixture {
             application_service,
             false,
             service_mode,
-            claude,
+            agent,
         )
         .await
     }
@@ -1137,4 +1212,19 @@ async fn join_owner(endpoint: String) {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+}
+
+/// The fixture user's Octos profile (ADR-193): only its ID and primary model
+/// matter to Hagency; the fake key beside them is never read.
+fn write_octos_profile(user: &std::path::Path, family: &str, model: &str) {
+    let profiles = user.join(".octos").join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    fs::write(
+        profiles.join(format!("{OCTOS_PROFILE}.json")),
+        serde_json::to_vec(&json!({"id": OCTOS_PROFILE, "name": "Coding",
+            "config": {"llm": {"primary": {"family_id": family, "model_id": model}},
+                "env_vars": {"SYNTHETIC_API_KEY": "synthetic-not-a-key"}}}))
+        .unwrap(),
+    )
+    .unwrap();
 }
