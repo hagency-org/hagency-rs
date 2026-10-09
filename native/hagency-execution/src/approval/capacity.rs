@@ -58,6 +58,13 @@ impl ApprovalHost {
             response_reserve_ms: self.inner.response_reserve_ms,
         }
     }
+    /// The same owner wait and response reserve on the Octos session.
+    pub(crate) fn octos_policy(&self) -> hagency_runtime::octos::session::ApprovalControlPolicy {
+        hagency_runtime::octos::session::ApprovalControlPolicy {
+            owner_wait_ms: self.inner.owner_wait_ms,
+            response_reserve_ms: self.inner.response_reserve_ms,
+        }
+    }
     pub(crate) fn fits(&self, limits: crate::Limits) -> bool {
         self.inner.response_reserve_ms >= limits.response_ms
             && self.inner.owner_wait_ms + self.inner.response_reserve_ms <= limits.operation_ms

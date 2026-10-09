@@ -5,6 +5,7 @@ mod control;
 #[cfg(any(test, feature = "test-diagnostics"))]
 pub mod diagnostics;
 mod observations;
+pub(crate) mod octos;
 pub(crate) mod state;
 pub use capacity::ApprovalHost;
 pub(crate) use capacity::Reservation;

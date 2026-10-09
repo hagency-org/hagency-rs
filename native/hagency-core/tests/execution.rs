@@ -235,3 +235,66 @@ fn native_execution_claude_exact_tool_call() {
     large["params"]["input"]["description"] = json!("z".repeat(8000));
     assert!(scope(&large).is_none());
 }
+
+/// An Octos approval (ADR-193 decision 4): a shell command derives the same
+/// exact-command scope a Codex command does, from its command line and
+/// working directory. The session, turn and approval IDs are binding data,
+/// never part of the key; any other kind has no reusable scope.
+#[test]
+fn native_execution_octos_shell_scope() {
+    let original = json!({"agentId":"agent-one","workspace":"/work/小白","taskId":"task-one","mayWrite":true,
+        "method":hagency_core::execution::OCTOS_APPROVAL_METHOD,
+        "params":{"threadId":"session-one","turnId":"turn-one","itemId":"approval-one",
+            "toolName":"shell","octosTurnId":"turn-one","title":"Run a command","body":"rm -rf build",
+            "command":"rm -rf build","cwd":"/work/小白"}});
+    let exact = scope(&original).unwrap();
+    assert_eq!(exact.scope.kind, ScopeKind::ExactCommand);
+    assert_eq!(
+        exact.scope.description,
+        "Exact command:\nrm -rf build\nWorking directory: /work/小白"
+    );
+    // The same command in the same place is the same scope as for Codex.
+    let codex = json!({"agentId":"agent-one","workspace":"/work/小白","taskId":"task-one","mayWrite":true,
+        "method":"item/commandExecution/requestApproval",
+        "params":{"threadId":"thread","turnId":"turn","itemId":"item","command":"rm -rf build","cwd":"/work/小白"}});
+    assert_eq!(scope(&codex).unwrap().scope.key, exact.scope.key);
+    // Binding data and wording never reach the key.
+    let mut rebound = original.clone();
+    for (key, value) in [
+        ("threadId", "session-two"),
+        ("itemId", "approval-two"),
+        ("octosTurnId", "turn-two"),
+        ("title", "Another title"),
+        ("body", "Another body"),
+    ] {
+        rebound["params"][key] = json!(value);
+    }
+    assert_eq!(scope(&rebound).unwrap().scope.key, exact.scope.key);
+    // The command, its directory and the workspace are.
+    for (pointer, value) in [
+        ("/params/command", json!("rm -rf build/out")),
+        ("/params/cwd", json!("/work/小白/build")),
+        ("/workspace", json!("/work/other")),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert_ne!(
+            scope(&changed).unwrap().scope.key,
+            exact.scope.key,
+            "{pointer}"
+        );
+    }
+    // Another tool, an unknown field, or a missing command has none.
+    for (key, value) in [
+        ("toolName", json!("browser")),
+        ("extra", json!(true)),
+        ("command", json!("")),
+    ] {
+        let mut changed = original.clone();
+        changed["params"][key] = value;
+        assert!(scope(&changed).is_none(), "{key}");
+    }
+    let mut missing = original.clone();
+    missing["params"].as_object_mut().unwrap().remove("cwd");
+    assert!(scope(&missing).is_none());
+}

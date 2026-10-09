@@ -142,8 +142,10 @@ pub(super) struct Callbacks {
     pub context: Option<HostApprovalContext>,
     pub entries: BTreeMap<RequestId, Pending>,
     /// A Claude turn's requests, by control request ID (ADR-192). A run
-    /// drives one runner, so one of the two maps stays empty.
+    /// drives one runner, so at most one of the three maps is used.
     pub claude: BTreeMap<String, super::claude::Entry>,
+    /// An Octos dispatch's approvals, by approval ID (ADR-193).
+    pub octos: BTreeMap<String, super::octos::Entry>,
     pub parked: Option<Reservation>,
     #[cfg(test)]
     pub fault: Option<super::Fault>,
@@ -172,6 +174,7 @@ impl ApprovalRun {
                 context: None,
                 entries: BTreeMap::new(),
                 claude: BTreeMap::new(),
+                octos: BTreeMap::new(),
                 parked: None,
                 #[cfg(test)]
                 fault: None,
@@ -215,6 +218,9 @@ impl ApprovalRun {
             .retain(|_, entry| !(entry.in_flight && entry.write.is_none()));
         self.callbacks
             .claude
+            .retain(|_, entry| !entry.in_flight || entry.written());
+        self.callbacks
+            .octos
             .retain(|_, entry| !entry.in_flight || entry.written());
     }
 }
