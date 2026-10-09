@@ -48,7 +48,7 @@ enum Command {
         state_dir: PathBuf,
     },
     /// Prepare a state directory for an imported Palpo fleet: initialize it
-    /// if new, find Codex and Claude Code and write a validated
+    /// if new, find Codex, Claude Code and Octos and write a validated
     /// fleet-runtime.json.
     Setup {
         #[arg(long)]
@@ -78,6 +78,17 @@ enum Command {
         /// Leave Claude Code out.
         #[arg(long)]
         no_claude: bool,
+        /// The Octos executable; the one already configured, else the one on PATH, when
+        /// omitted. Homebrew's wrapper and npm's launcher are followed to the native binary.
+        #[arg(long)]
+        octos: Option<PathBuf>,
+        /// The Octos home holding your profiles; the one already configured, else
+        /// $OCTOS_HOME or ~/.octos, when omitted.
+        #[arg(long)]
+        octos_home: Option<PathBuf>,
+        /// Leave Octos out.
+        #[arg(long)]
+        no_octos: bool,
         /// Replace an existing fleet-runtime.json (the old file is kept as a backup).
         #[arg(long)]
         force: bool,
@@ -341,6 +352,9 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             claude,
             claude_config_dir,
             no_claude,
+            octos,
+            octos_home,
+            no_octos,
             force,
             console_assets,
         } => {
@@ -354,6 +368,9 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 claude,
                 claude_config_dir,
                 no_claude,
+                octos,
+                octos_home,
+                no_octos,
                 force,
             })?;
             if report.initialized {
@@ -379,6 +396,30 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(problem) = &report.claude_problem {
                 println!("Claude Code left out: {problem}");
+            }
+            if let (Some(octos), Some(home)) = (&report.octos, &report.octos_home) {
+                // ADR-193 decision 8: Octos keeps its keys itself.
+                println!("Octos: {} (uses its own keys)", octos.display());
+                println!("Octos profiles in {}:", home.display());
+                for profile in &report.octos_profiles {
+                    let model = match (&profile.family, &profile.model) {
+                        (Some(family), Some(model)) => format!("{family} / {model}"),
+                        _ => "no primary model of its own".into(),
+                    };
+                    match profile.tier {
+                        Some(tier) => println!(
+                            "  {}: {model} ({}) - offered",
+                            profile.id,
+                            serde_json::to_value(tier)?.as_str().unwrap_or("qualified")
+                        ),
+                        None => {
+                            println!("  {}: {model} - not a model Hagency qualifies", profile.id)
+                        }
+                    }
+                }
+            }
+            if let Some(problem) = &report.octos_problem {
+                println!("Octos left out: {problem}");
             }
             println!("Wrote and validated {}", report.runtime_file.display());
             let assets = console_assets

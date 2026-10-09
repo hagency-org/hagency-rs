@@ -17,8 +17,34 @@ fn run_with_path(home: &Path, path: &Path, args: &[&str]) -> std::process::Outpu
         .env("PATH", path)
         .env_remove("CODEX_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("OCTOS_HOME")
         .output()
         .unwrap()
+}
+
+/// ADR-193: the fake user's Octos home under the fake home, with a profile
+/// whose primary model Hagency qualifies (`dev`) and one it does not
+/// (`other`), and a native-looking Octos binary. Never the user's `~/.octos`.
+fn octos(root: &Path, home: &Path) -> std::path::PathBuf {
+    octos_profile(home, "dev", "zai-coding", "glm-5.3-flash");
+    octos_profile(home, "other", "acme", "unknown-model");
+    let binary = root.join("octos-bin").join("octos");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"\xcf\xfa\xed\xfe fake native octos").unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    binary
+}
+fn octos_profile(home: &Path, id: &str, family: &str, model: &str) {
+    let profiles = home.join(".octos").join("profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(
+        profiles.join(format!("{id}.json")),
+        serde_json::to_vec(&serde_json::json!({"id": id, "name": id, "config": {
+            "llm": {"primary": {"family_id": family, "model_id": model}},
+            "env_vars": {"SYNTHETIC_API_KEY": "synthetic-never-printed"}}}))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 /// A native-looking Claude Code binary and its own folder under the fake
@@ -433,5 +459,196 @@ fn native_setup_rewrite_keeps_the_operators_other_settings() {
     assert_eq!(
         after["claude"]["executable"],
         claude_binary.to_str().unwrap()
+    );
+}
+
+/// ADR-193 decisions 7 and 8: a machine with Octos only gets an Octos block
+/// that pins the binary, names the user's Octos home and allows the profiles
+/// whose primary model Hagency qualifies; `serve`'s loader accepts it. Setup
+/// lists every profile with its model, never anything else of it.
+#[test]
+fn native_setup_writes_an_octos_runtime_serve_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, _) = codex(&root);
+    let binary = octos(&root, &home);
+    let state = root.join("state");
+    let output = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--no-codex",
+            "--octos",
+            binary.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Octos:"), "{stdout}");
+    assert!(stdout.contains("uses its own keys"), "{stdout}");
+    assert!(
+        stdout.contains("dev: zai-coding / glm-5.3-flash (medium) - offered"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("other: acme / unknown-model - not a model Hagency qualifies"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("synthetic-never-printed"), "{stdout}");
+    assert!(!stdout.contains("Codex:"), "{stdout}");
+    let written = written(&state);
+    assert!(written.get("executable").is_none());
+    assert!(written.get("claude").is_none());
+    let octos = &written["octos"];
+    assert_eq!(octos["executable"], binary.to_str().unwrap());
+    assert_eq!(octos["executable_sha256"].as_str().unwrap().len(), 64);
+    let local = &octos["local_octos"];
+    assert_eq!(local["profile"], "provider_owned_octos_v1");
+    assert_eq!(local["preset"], "local_octos");
+    assert_eq!(local["seat"], "local_octos_seat");
+    assert_eq!(local["home"], home.to_str().unwrap());
+    assert_eq!(local["octos_home"], home.join(".octos").to_str().unwrap());
+    assert_eq!(local["profiles"], serde_json::json!(["dev"]));
+}
+
+/// Homebrew's `bin/octos` is a bash wrapper: Setup pins the binary it runs.
+#[test]
+fn native_setup_follows_the_homebrew_octos_wrapper() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, _) = codex(&root);
+    octos(&root, &home);
+    let cellar = root.join("Cellar/octos/2.0.3-rc.13");
+    std::fs::create_dir_all(cellar.join("bin")).unwrap();
+    std::fs::create_dir_all(cellar.join("libexec")).unwrap();
+    let native = cellar.join("libexec/octos");
+    std::fs::write(&native, b"\xcf\xfa\xed\xfe native octos").unwrap();
+    let wrapper = cellar.join("bin/octos");
+    std::fs::write(
+        &wrapper,
+        format!("#!/bin/bash\nexec \"{}\" \"$@\"\n", native.display()),
+    )
+    .unwrap();
+    let state = root.join("state");
+    let output = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--no-codex",
+            "--octos",
+            wrapper.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        written(&state)["octos"]["executable"],
+        native.to_str().unwrap()
+    );
+}
+
+/// An Octos the operator names needs a profile Hagency qualifies; one merely
+/// found on PATH without one is left out, with the reason, and never blocks
+/// Codex.
+#[test]
+fn native_setup_needs_a_qualified_octos_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, codex_binary) = codex(&root);
+    let binary = octos(&root, &home);
+    std::fs::remove_file(home.join(".octos/profiles/dev.json")).unwrap();
+    let state = root.join("state");
+    let named = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--no-codex",
+            "--octos",
+            binary.to_str().unwrap(),
+        ],
+    );
+    assert!(!named.status.success());
+    let stderr = String::from_utf8_lossy(&named.stderr);
+    assert!(
+        stderr.contains("runs a model Hagency qualifies"),
+        "{stderr}"
+    );
+    assert!(!state.join("fleet-runtime.json").exists());
+    let output = run_with_path(
+        &home,
+        binary.parent().unwrap(),
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--codex",
+            codex_binary.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Octos left out"), "{stdout}");
+    assert!(written(&state).get("octos").is_none());
+}
+
+/// An Octos install the operator chose stays pinned when Setup rewrites the
+/// runtime, even with another `octos` first on PATH.
+#[test]
+fn native_setup_rewrite_keeps_the_chosen_octos() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let (home, _) = codex(&root);
+    let chosen = octos(&root, &home);
+    let state = root.join("state");
+    let first = run(
+        &home,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--no-codex",
+            "--octos",
+            chosen.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let path = root.join("other-path");
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("octos"), b"\xcf\xfa\xed\xfe another octos").unwrap();
+    std::fs::set_permissions(path.join("octos"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let again = run_with_path(
+        &home,
+        &path,
+        &[
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--no-codex",
+            "--force",
+        ],
+    );
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(
+        written(&state)["octos"]["executable"],
+        chosen.to_str().unwrap()
     );
 }

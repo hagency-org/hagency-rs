@@ -1216,13 +1216,15 @@ async function setupCall(path, method) {
 }
 export function fetchSetup() { return setupCall('setup', 'GET'); }
 export function checkSetup() { return setupCall('setup/check', 'POST'); }
-export async function offerResource(model, reasoning, tokens, framework = 'codex') {
+// ADR-193: an Octos source also names the profile it runs; no other source does.
+export async function offerResource(model, reasoning, tokens, framework = 'codex', profile = null) {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 20000);
+  const body = { framework, model, reasoning, tokens, ...(profile ? { profile } : {}) };
   try {
     const response = await fetch(`${ROOT}/api/setup/resource`, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: abort.signal,
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ framework, model, reasoning, tokens }),
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
     let value = null;
     try { value = await response.json(); } catch { /* not JSON: handled below */ }
