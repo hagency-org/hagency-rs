@@ -32,6 +32,8 @@ mod inspection;
 mod octos;
 #[path = "owned/octos_approvals.rs"]
 mod octos_approvals;
+#[path = "owned/octos_live.rs"]
+mod octos_live;
 #[path = "owned/receive.rs"]
 mod receive;
 #[path = "owned/registration.rs"]
