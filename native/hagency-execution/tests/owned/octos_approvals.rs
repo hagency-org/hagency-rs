@@ -229,3 +229,27 @@ async fn native_octos_approval_withdrawn_before_an_answer_cancels() {
     drop(report);
     f.domain.shutdown().await.unwrap();
 }
+
+/// ADR-193 decision 5 on the drive every live dispatch takes: with cards
+/// bound, Octos's host tool calls still reach the task helper and their
+/// results go back, and the dispatch completes.
+#[tokio::test]
+async fn native_octos_host_tools_answer_under_the_approval_drive() {
+    let f = Fixture::configured_resource(true, false, octos_pool());
+    let (mut op, _notices) = operation(&f, "host-tools", policy());
+    let report = op.wait().await.unwrap();
+    assert_eq!(report.protocol, Protocol::Completed);
+    let results: Vec<serde_json::Value> =
+        fs::read_to_string(f.work.join("owned-dispatch.requests"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|request| request["method"] == "peer/tool/result")
+            .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["params"]["ok"], true);
+    assert_eq!(results[0]["params"]["data"]["task"], "task");
+    assert_eq!(results[1]["params"]["ok"], false);
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}

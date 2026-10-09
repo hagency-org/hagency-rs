@@ -37,6 +37,9 @@ impl Fixture {
         .unwrap()
         .with_octos_runner(self.root.path().join("octos"))
         .unwrap()
+        // The same probe answers as the task helper (decision 5).
+        .with_task_helper(binary(), "127.0.0.1:13300".parse().unwrap())
+        .unwrap()
     }
     fn octos_requests(&self) -> Vec<serde_json::Value> {
         fs::read_to_string(self.work.join("owned-dispatch.requests"))
@@ -144,18 +147,55 @@ async fn native_octos_dispatch_completes_at_idle_with_its_reply() {
         requests[1]["params"]["update"],
         json!({"mode":"workspace_write","network":"deny","approval_policy":"on-request"})
     );
-    let start = &requests[3]["params"];
+    // Hagency's task tools, on the session before its turn (decision 5):
+    // the helper's own tools as `hagency.<tool>`, none outward.
+    let register = &requests[3]["params"];
+    assert_eq!(requests[3]["method"], "peer/tools/register");
+    assert_eq!(register["session_id"], session);
+    assert!(register.get("generic_tools").is_none());
+    let names: Vec<&str> = register["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        hagency_runtime::task_mcp::owned_task_tools(false, false)
+            .iter()
+            .map(|tool| format!("hagency.{tool}"))
+            .collect::<Vec<_>>()
+    );
+    for tool in register["tools"].as_array().unwrap() {
+        assert_eq!(tool["outward"], false);
+        let read = [
+            "hagency.get_task",
+            "hagency.list_tasks",
+            "hagency.read_conversation",
+        ]
+        .contains(&tool["name"].as_str().unwrap());
+        assert_eq!(tool["risk"], if read { "read" } else { "act" });
+    }
+    let start = &requests[4]["params"];
+    assert_eq!(requests[4]["method"], "turn/start");
     assert_eq!(start["session_id"], session);
     assert!(hagency_runtime::octos::uuid(
         start["turn_id"].as_str().unwrap()
     ));
-    // The one turn is the dispatch payload, byte for byte.
-    assert_eq!(
-        fs::read_to_string(f.work.join("owned-dispatch.prompt")).unwrap(),
+    // The one turn is the task-tool guidance, then the dispatch payload
+    // byte for byte, as for Claude Code.
+    let prompt = fs::read_to_string(f.work.join("owned-dispatch.prompt")).unwrap();
+    let payload =
         hagency_core::canonical::encode_payload(&json!({"instruction":"do the offline work",
-            "task_id":"impostor","cwd":"/model/override","model":"model-override","done":true}))
-        .unwrap()
-    );
+        "task_id":"impostor","cwd":"/model/override","model":"model-override","done":true}))
+        .unwrap();
+    assert!(prompt.ends_with(&format!("\n\nAssigned task input:\n{payload}")));
+    assert!(prompt.contains("hagency_complete_task_with_reply"));
+    // The capability reaches the helper only, never Octos.
+    let names: Vec<String> =
+        serde_json::from_slice(&fs::read(f.work.join("owned-dispatch.environment-names")).unwrap())
+            .unwrap();
+    assert!(!names.iter().any(|name| name.starts_with("HAGENCY_RUNNER")));
     let usage = report.usage_status();
     assert!(usage.bound && usage.attached && usage.failure.is_none());
     assert_eq!(usage.acknowledged, 2);
@@ -167,6 +207,42 @@ async fn native_octos_dispatch_completes_at_idle_with_its_reply() {
         f.latest_octos_counts(),
         json!({"input":10,"output":7,"cacheWrite":30,"cacheRead":20})
     );
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+/// ADR-193 decision 5: an Octos host tool call reaches the dispatch's task
+/// helper with the dispatch's own task and capability, and its answer, or its
+/// refusal, goes back to Octos as `peer/tool/result`. The dispatch goes on.
+#[tokio::test]
+async fn native_octos_host_tools_reach_the_task_helper() {
+    let f = Fixture::configured_resource(false, false, octos_pool());
+    let report = run(&f, "host-tools").await;
+    assert_eq!(report.protocol, Protocol::Completed);
+    let results: Vec<_> = f
+        .octos_requests()
+        .into_iter()
+        .filter(|request| request["method"] == "peer/tool/result")
+        .collect();
+    assert_eq!(results.len(), 2);
+    let ok = &results[0]["params"];
+    assert_eq!(ok["call_id"], "ptc-1");
+    assert_eq!(ok["ok"], true);
+    assert_eq!(ok["data"]["tool"], "get_task");
+    assert_eq!(ok["data"]["arguments"], json!({"task_id":"offline-task"}));
+    assert_eq!(ok["data"]["task"], "task");
+    assert_eq!(ok["data"]["capability"], true);
+    assert_eq!(ok["data"]["address"], "127.0.0.1:13300");
+    let refused = &results[1]["params"];
+    assert_eq!(refused["call_id"], "ptc-2");
+    assert_eq!(refused["ok"], false);
+    assert_eq!(
+        refused["error"],
+        json!({"kind":"tool_error","message":"offline refusal"})
+    );
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert_eq!(report.settlement, Settlement::Completed);
+    }
     drop(report);
     f.domain.shutdown().await.unwrap();
 }

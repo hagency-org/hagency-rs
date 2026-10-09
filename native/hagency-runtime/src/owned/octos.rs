@@ -1,8 +1,8 @@
 use super::{Cleanup, StartError};
 use crate::octos::session::{
-    ApprovalControlPolicy, ControlUpdate, Error, Event, Limits, Observation, ObservationSource,
-    PermissionDecision, Permissions, Phase, PreparedApproval, PreparedUpdate, SessionDriver,
-    StderrSnapshot, Termination, WriteProgress,
+    ApprovalControlPolicy, ControlUpdate, Error, Event, HostTool, HostToolCall, Limits,
+    Observation, ObservationSource, PermissionDecision, Permissions, Phase, PreparedApproval,
+    PreparedUpdate, SessionDriver, StderrSnapshot, Termination, WriteProgress,
 };
 use hagency_platform::{Launch, SupervisedProcess};
 #[cfg(windows)]
@@ -174,6 +174,27 @@ impl OwnedOctosSession {
     pub async fn start_turn(&mut self, turn_id: &str, text: &str) -> Result<(), Error> {
         let operation = Operation::new(self)?;
         let result = operation.runner.session.start_turn(turn_id, text).await;
+        operation.finish(result)
+    }
+    pub async fn register_tools(&mut self, tools: &[HostTool]) -> Result<(), Error> {
+        let operation = Operation::new(self)?;
+        let result = operation.runner.session.register_tools(tools).await;
+        operation.finish(result)
+    }
+    pub fn host_tool_call(&self, params: &serde_json::Value) -> Result<HostToolCall, Error> {
+        self.session.host_tool_call(params)
+    }
+    pub async fn host_tool_result(
+        &mut self,
+        call_id: &str,
+        result: Result<serde_json::Value, String>,
+    ) -> Result<bool, Error> {
+        let operation = Operation::new(self)?;
+        let result = operation
+            .runner
+            .session
+            .host_tool_result(call_id, result)
+            .await;
         operation.finish(result)
     }
     pub async fn next(&mut self) -> Result<Event, Error> {

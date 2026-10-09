@@ -617,6 +617,8 @@ impl WarmHostPlan {
         let environment = octos.environment.clone();
         let local = octos.local.clone();
         let instances = octos.instances.clone();
+        let helper = self.bridge.helper.clone();
+        let address = self.bridge.address;
         let approvals = self.approvals.clone();
         let files = self.files;
         let activation_ms = self.limits.initialize.response_ms;
@@ -641,10 +643,16 @@ impl WarmHostPlan {
                 BTreeMap::from([(workspace.clone(), work)]),
             )?
             .with_octos_runner(instances)?
+            .with_task_helper(helper, address)?
             .with_approvals(approvals)?;
-            // The file tools need the task helper; only the limit applies.
-            if let Some((limit, _, _)) = files {
+            if let Some((limit, send, receive)) = files {
                 host = host.with_file_limit(limit)?;
+                if send {
+                    host = host.with_file_tools()?;
+                }
+                if receive {
+                    host = host.with_receive_tools()?;
+                }
             }
             host = host.with_retained_local_codex(local.clone())?;
             let root = host.reattach_root(&scope, &home, &workspace)?;
