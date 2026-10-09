@@ -2,9 +2,13 @@
 //! (ADR-193): the handshake, the dispatch's turn and every continuation turn
 //! the kernel runs for its background work, until Octos reports the session
 //! idle. No task, approval or cleanup authority.
+mod control;
 mod io;
 mod observation;
 use super::{Frame, Notification, Outcome, Payload, Usage};
+pub use control::{
+    ApprovalControlPolicy, ControlUpdate, PermissionDecision, PreparedApproval, PreparedUpdate,
+};
 pub use io::{Limits, StderrSnapshot, Termination, WriteProgress};
 pub use observation::{
     MAX_OBSERVATIONS, Observation, ObservationKind, ObservationSource, UsageCoverage, UsageEvidence,
@@ -12,6 +16,9 @@ pub use observation::{
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -105,6 +112,8 @@ pub enum Event {
         turn_id: String,
         params: Value,
     },
+    /// Octos settled an approval this host had not answered: cancelled,
+    /// timed out or decided elsewhere.
     ApprovalSettled {
         approval_id: String,
     },
@@ -142,8 +151,12 @@ pub struct SessionDriver<R, W, E> {
     reported_idle: bool,
     /// When every known turn had ended; reset by any new turn.
     quiet_from: Option<Instant>,
-    pending: VecDeque<Notification>,
+    /// Notifications read while a request awaited its answer, with the time
+    /// each was received.
+    pending: VecDeque<(Notification, Instant)>,
     observations: observation::State,
+    control: control::State,
+    source: Arc<()>,
 }
 impl<R, W, E> SessionDriver<R, W, E> {
     pub fn new(stdout: R, stdin: W, stderr: E, limits: Limits) -> Result<Self, Error> {
@@ -161,6 +174,8 @@ impl<R, W, E> SessionDriver<R, W, E> {
             quiet_from: None,
             pending: VecDeque::new(),
             observations: observation::State::default(),
+            control: control::State::default(),
+            source: Arc::new(()),
         })
     }
     pub fn phase(&self) -> Phase {
@@ -188,6 +203,7 @@ impl<R, W, E> SessionDriver<R, W, E> {
         self.phase = Phase::Closed;
         self.observations.retire();
         self.pending.clear();
+        self.control.clear();
         self.wire.close(error);
     }
     fn ours(&self, session: &str) -> bool {
@@ -231,7 +247,11 @@ impl<R, W, E> SessionDriver<R, W, E> {
         Ok(true)
     }
     /// The state one notification changes, and the event the host must see.
-    fn apply(&mut self, notification: Notification) -> Result<Option<Event>, Error> {
+    fn apply(
+        &mut self,
+        notification: Notification,
+        received: Instant,
+    ) -> Result<Option<Event>, Error> {
         Ok(match notification {
             Notification::TurnStarted {
                 session_id,
@@ -300,15 +320,21 @@ impl<R, W, E> SessionDriver<R, W, E> {
                 approval_id,
                 turn_id,
                 params,
-            } if self.ours(&session_id) => Some(Event::Approval {
-                approval_id,
-                turn_id,
-                params,
-            }),
+            } if self.ours(&session_id) => {
+                self.control.admit(&approval_id, received, &self.wire)?;
+                Some(Event::Approval {
+                    approval_id,
+                    turn_id,
+                    params,
+                })
+            }
             Notification::ApprovalSettled {
                 session_id,
                 approval_id,
-            } if self.ours(&session_id) => Some(Event::ApprovalSettled { approval_id }),
+            } if self.ours(&session_id) => self
+                .control
+                .settled(&approval_id, self.wire.writing_prepared())
+                .then_some(Event::ApprovalSettled { approval_id }),
             Notification::ToolCall { params } => Some(Event::ToolCall { params }),
             // Another session's or a child stream's frames, and every other
             // notification: OUP's additive rule.
@@ -331,8 +357,25 @@ impl<R, W, E> SessionDriver<R, W, E> {
     }
     fn observe(&mut self, event: Event) -> Result<Event, Error> {
         let session = self.session_id.clone().ok_or(Error::State)?;
+        self.control.observed();
         self.observations.accept(&event, &session)?;
         Ok(event)
+    }
+    /// One frame read outside a request: Octos's answer to an approval this
+    /// host sent, or a notification and the event it makes, observed.
+    fn receive(&mut self, received: io::Received) -> Result<Option<Event>, Error> {
+        match received.message {
+            Frame::Response { id, .. } => {
+                if !self.control.answered(&id) {
+                    return Err(Error::Identity);
+                }
+                Ok(None)
+            }
+            Frame::Notification(notification) => match self.apply(notification, received.at)? {
+                Some(event) => self.observe(event).map(Some),
+                None => Ok(None),
+            },
+        }
     }
 }
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> SessionDriver<R, W, E> {
@@ -351,16 +394,19 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> SessionD
                     id: answered,
                     outcome,
                 } => {
-                    if answered != id {
+                    if answered == id {
+                        return outcome.map_err(|error| Error::Refused(error.code));
+                    }
+                    // Octos's answer to an approval this host sent earlier.
+                    if !self.control.answered(&answered) {
                         return Err(Error::Identity);
                     }
-                    return outcome.map_err(|error| Error::Refused(error.code));
                 }
                 Frame::Notification(notification) => {
                     if self.pending.len() >= MAX_PENDING {
                         return Err(Error::Capacity);
                     }
-                    self.pending.push_back(notification);
+                    self.pending.push_back((notification, Instant::now()));
                 }
             }
         }
@@ -478,38 +524,59 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> SessionD
     /// carries exactly one observation (`last_observation`).
     pub async fn next(&mut self) -> Result<Event, Error> {
         let operation = Operation::new(self, Phase::Running)?;
-        let result = operation.driver.next_inner().await;
+        let result = match operation
+            .driver
+            .next_inner::<std::future::Pending<()>>(None)
+            .await
+        {
+            Ok(ControlUpdate::Event(event)) => Ok(event),
+            Ok(ControlUpdate::Control(())) => Err(Error::State),
+            Err(error) => Err(error),
+        };
         operation.finish(result)
     }
-    async fn next_inner(&mut self) -> Result<Event, Error> {
+    /// The next event, or the host's own future when one is given and finishes
+    /// first. The quiet wait, the owner bounds and the wire's deadlines bound
+    /// every read.
+    async fn next_inner<F: Future + ?Sized>(
+        &mut self,
+        mut control: Option<Pin<&mut F>>,
+    ) -> Result<ControlUpdate<F::Output>, Error> {
         loop {
-            if let Some(notification) = self.pending.pop_front() {
-                if let Some(event) = self.apply(notification)? {
-                    return self.observe(event);
+            if let Some((notification, received)) = self.pending.pop_front() {
+                if let Some(event) = self.apply(notification, received)? {
+                    return self.observe(event).map(ControlUpdate::Event);
                 }
                 continue;
             }
             if self.idle_due() {
                 if let Some(event) = self.finish_idle().await? {
-                    return self.observe(event);
+                    return self.observe(event).map(ControlUpdate::Event);
                 }
                 continue;
             }
-            let wait = self.wire.event_deadline();
+            let wait = self.control.deadline(&self.wire)?;
             let quiet = self
                 .quiet_from
                 .filter(|_| self.settled())
                 .map(|at| at + Duration::from_millis(QUIET_MS));
-            match self.wire.next(quiet.map_or(wait, |at| at.min(wait))).await {
-                Ok(received) => match received.message {
-                    // Every request awaits its own answer inside `call`.
-                    Frame::Response { .. } => return Err(Error::Identity),
-                    Frame::Notification(notification) => {
-                        if let Some(event) = self.apply(notification)? {
-                            return self.observe(event);
-                        }
+            let until = quiet.map_or(wait, |at| at.min(wait));
+            let read = match control.as_mut() {
+                Some(control) => match self.wire.next_or_control(control.as_mut(), until).await {
+                    Ok(io::Controlled::Message(received)) => Ok(received),
+                    Ok(io::Controlled::Control(output)) => {
+                        return Ok(ControlUpdate::Control(output));
                     }
+                    Err(error) => Err(error),
                 },
+                None => self.wire.next(until).await,
+            };
+            match read {
+                Ok(received) => {
+                    if let Some(event) = self.receive(received)? {
+                        return Ok(ControlUpdate::Event(event));
+                    }
+                }
                 // Only the quiet wait may end there; the wire's own event and
                 // lifetime deadlines stay failures.
                 Err(Error::Timeout)
@@ -532,7 +599,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> SessionD
             Err(Error::Refused(_)) => None,
             Err(error) => return Err(error),
         };
-        if self.pending.iter().any(|n| self.restarts(n)) {
+        if self.pending.iter().any(|(n, _)| self.restarts(n)) {
             return Ok(None);
         }
         self.observations.session_totals(totals);

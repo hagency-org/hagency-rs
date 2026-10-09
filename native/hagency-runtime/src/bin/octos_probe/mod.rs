@@ -9,7 +9,7 @@ use std::{
 
 /// The kernel's continuation turn in `background` (a fixed UUID).
 const CONTINUATION: &str = "0192f0c1-0000-7000-8000-00000000c0de";
-const MODES: [&str; 11] = [
+const MODES: [&str; 14] = [
     "normal",
     "quiet",
     "duplicate",
@@ -17,6 +17,9 @@ const MODES: [&str; 11] = [
     "unknown-usage",
     "background",
     "approval",
+    "approval-answer",
+    "approval-twice",
+    "approval-cancel",
     "refuse-open",
     "malformed",
     "stall",
@@ -113,6 +116,47 @@ impl Stream {
     fn terminal(&mut self, turn: &str, data: Value) -> io::Result<u64> {
         self.envelope("main", turn, "turn_terminal", data)
     }
+}
+/// A shell approval as Octos main raises one, its typed details nested under
+/// `command`.
+fn shell_approval(stream: &Stream, id: &str, turn: &str, cwd: &Value) -> io::Result<()> {
+    notify(
+        "approval/requested",
+        json!({"session_id":stream.session,"approval_id":id,"turn_id":turn,
+            "tool_name":"shell","title":"Run a command","body":"rm -rf build",
+            "approval_kind":"command","risk":"high",
+            "typed_details":{"kind":"command",
+                "command":{"command_line":"rm -rf build","cwd":cwd,"tool_call_id":"tool-1"}}}),
+    )
+}
+/// The host's answer to one approval, recorded, then acknowledged as Octos
+/// main does: its result, and the `approval/decided` every client sees.
+fn answer_approval(
+    stdin: &mut io::StdinLock<'_>,
+    marker: &Path,
+    stream: &Stream,
+    id: &str,
+) -> io::Result<bool> {
+    let respond = expect(stdin, "approval/respond")?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker.with_extension("responses"))?;
+    serde_json::to_writer(&mut file, &respond["params"])?;
+    file.write_all(b"\n")?;
+    if respond["params"]["approval_id"] != id || respond["params"]["session_id"] != stream.session {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let decision = respond["params"]["decision"].clone();
+    answer(
+        &respond,
+        json!({"approval_id":id,"accepted":true,"status":"accepted","runtime_resumed":true}),
+    )?;
+    notify(
+        "approval/decided",
+        json!({"session_id":stream.session,"approval_id":id,"decision":decision}),
+    )?;
+    Ok(decision == "approve")
 }
 fn usage(input: u64, output: u64) -> Value {
     json!({"input_tokens":input,"output_tokens":output,"reasoning_tokens":2,
@@ -215,19 +259,37 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
     )?;
     stream.persisted(&turn, "working")?;
     let tool = stream.tool(&turn)?;
-    if mode == "approval" {
-        notify(
-            "approval/requested",
-            json!({"session_id":stream.session,"approval_id":"approval-1","turn_id":turn,
-                "tool_name":"shell","title":"Run a command","body":"rm -rf build",
-                "approval_kind":"command",
-                "typed_details":{"kind":"command","command_line":"rm -rf build","cwd":params["cwd"]}}),
-        )?;
-        drop(stdin);
-        return super::pulse(marker);
+    let mut approved = true;
+    match mode {
+        "approval" | "approval-cancel" => {
+            shell_approval(&stream, "approval-1", &turn, &params["cwd"])?;
+            if mode == "approval-cancel" {
+                notify(
+                    "approval/cancelled",
+                    json!({"session_id":stream.session,"approval_id":"approval-1"}),
+                )?;
+                fs::write(marker.with_extension("cancelled"), b"offline")?;
+            }
+            drop(stdin);
+            return super::pulse(marker);
+        }
+        // The same command twice: a task grant answers the second.
+        "approval-answer" | "approval-twice" => {
+            let count = if mode == "approval-twice" { 2 } else { 1 };
+            for index in 1..=count {
+                let id = format!("approval-{index}");
+                shell_approval(&stream, &id, &turn, &params["cwd"])?;
+                approved &= answer_approval(&mut stdin, marker, &stream, &id)?;
+            }
+        }
+        _ => {}
     }
     let reply = match mode {
         "background" => "spawned a helper",
+        "approval-answer" | "approval-twice" if !approved => {
+            "octos reply without the denied command"
+        }
+        "approval-answer" | "approval-twice" => "octos approved reply",
         _ => "octos fixture reply",
     };
     stream.persisted(&turn, reply)?;
