@@ -1675,9 +1675,11 @@ pub(crate) async fn answer_octos_tool(
     until: Instant,
     status: &mut Option<TaskState>,
 ) -> Result<(), Failure> {
-    let call = session
-        .host_tool_call(params)
-        .map_err(|_| Failure::Protocol)?;
+    let call = session.host_tool_call(params).map_err(|error| {
+        tracing::warn!(dispatch_id = %cap.dispatch_id, error = ?error,
+            "Octos host tool call refused");
+        Failure::Protocol
+    })?;
     let result = watched_with(
         async { Ok::<_, ()>(tools.call(&call.name, call.args).await) },
         |_| Failure::Protocol,
@@ -1688,10 +1690,18 @@ pub(crate) async fn answer_octos_tool(
         until,
         status,
     )
-    .await?;
+    .await
+    .inspect_err(|failure| {
+        tracing::warn!(dispatch_id = %cap.dispatch_id, failure = ?failure,
+            "Octos host tool call failed");
+    })?;
     watched_with(
         session.host_tool_result(&call.call_id, result),
-        |_| Failure::Protocol,
+        |error| {
+            tracing::warn!(dispatch_id = %cap.dispatch_id, error = ?error,
+                "Octos host tool result refused");
+            Failure::Protocol
+        },
         domain,
         cap,
         expected,
@@ -1699,7 +1709,11 @@ pub(crate) async fn answer_octos_tool(
         until,
         status,
     )
-    .await?;
+    .await
+    .inspect_err(|failure| {
+        tracing::warn!(dispatch_id = %cap.dispatch_id, failure = ?failure,
+            "Octos host tool answer failed");
+    })?;
     Ok(())
 }
 /// One Octos dispatch on a fresh guardian-owned `octos serve --stdio`
