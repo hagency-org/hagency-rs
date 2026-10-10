@@ -605,21 +605,34 @@ impl Service {
         self.reattach_known_agents(&notices, cancel).await;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // ADR-183 decision 0: only the shutdown token ends this loop. An agent
+        // that cannot be admitted is parked: `admit` shows it failed in its
+        // status, readiness reports the fleet failed, the agents already
+        // admitted keep serving, and a restart re-attaches it. A refusing
+        // factory is asked again on the next tick, its refusal logged once.
+        let mut refusing: Option<String> = None;
         loop {
             tokio::select! {biased;_ = cancel.cancelled()=>return Ok(()),_ = tick.tick()=>{}}
             self.reconcile_awaiting_owners();
-            let next = self
-                .provider
-                .take_next()
-                .map_err(|_| Failure::OutcomeUnknown);
-            match next {
+            match self.provider.take_next() {
                 Ok(Some(agent)) => {
-                    self.admit(agent, notices.clone(), false).await?;
+                    let engagement = agent.session().engagement_id.clone();
+                    if let Err(error) = self.admit(agent, notices.clone(), false).await {
+                        self.routes.failed.store(true, Ordering::Release);
+                        tracing::error!(%engagement, ?error, "a provisioned agent could not be admitted; it is parked and the fleet keeps serving");
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
                     self.routes.failed.store(true, Ordering::Release);
-                    return Err(error);
+                    let label = format!("{error:?}");
+                    if refusing.as_ref() != Some(&label) {
+                        tracing::error!(
+                            ?error,
+                            "the agent factory refused the next agent; it is asked again and the fleet keeps serving"
+                        );
+                        refusing = Some(label);
+                    }
                 }
             }
         }
@@ -772,6 +785,43 @@ mod tests {
         drop(fleet);
         collector.close().await.unwrap();
         test_common::shutdown_domain(&f.store, "factory diagnostics").await;
+    }
+    /// ADR-183 decision 0: a factory that refuses every pass (here none is
+    /// configured) is asked again on each tick and shown in readiness; only
+    /// the shutdown token ends the loop, never the refusal.
+    #[tokio::test]
+    async fn native_factory_refusal_does_not_end_the_fleet_service() {
+        let f = test_common::Fixture::new();
+        let collector =
+            Arc::new(Collector::new(f.config("https://127.0.0.1:1/"), f.store.clone()).unwrap());
+        let mut fleet = Service::new(
+            f.store.clone(),
+            collector.clone(),
+            Setup {
+                state: f.root.path().join("fleet-refusal"),
+                limit: 128,
+                send: false,
+                receive: false,
+                limits: hagency_execution::Limits {
+                    operation_ms: 5000,
+                    response_ms: 1000,
+                },
+            },
+        )
+        .unwrap();
+        let (notices, _approvals) = tokio::sync::mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            stop.cancel();
+        });
+        assert_eq!(fleet.run(notices, &cancel).await, Ok(()));
+        stopper.await.unwrap();
+        assert_eq!(fleet.routes.state(), "outcome_unknown");
+        drop(fleet);
+        collector.close().await.unwrap();
+        test_common::shutdown_domain(&f.store, "factory refusal").await;
     }
     #[tokio::test]
     async fn native_configured_fleet_shutdown_isolation() {
