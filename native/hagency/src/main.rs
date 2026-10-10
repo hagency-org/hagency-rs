@@ -48,7 +48,8 @@ enum Command {
         state_dir: PathBuf,
     },
     /// Prepare a state directory for an imported Palpo fleet: initialize it
-    /// if new, find Codex and write a validated fleet-runtime.json.
+    /// if new, find Codex and Claude Code and write a validated
+    /// fleet-runtime.json.
     Setup {
         #[arg(long)]
         state_dir: PathBuf,
@@ -65,6 +66,18 @@ enum Command {
         /// Run agents with <state>/runtime-home instead of this machine's Codex sign-in.
         #[arg(long)]
         no_local_codex: bool,
+        /// Leave Codex out.
+        #[arg(long)]
+        no_codex: bool,
+        /// The Claude Code executable; found on PATH when omitted.
+        #[arg(long)]
+        claude: Option<PathBuf>,
+        /// Claude Code's own folder; $CLAUDE_CONFIG_DIR or ~/.claude when omitted.
+        #[arg(long)]
+        claude_config_dir: Option<PathBuf>,
+        /// Leave Claude Code out.
+        #[arg(long)]
+        no_claude: bool,
         /// Replace an existing fleet-runtime.json (the old file is kept as a backup).
         #[arg(long)]
         force: bool,
@@ -324,6 +337,10 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             codex,
             codex_home,
             no_local_codex,
+            no_codex,
+            claude,
+            claude_config_dir,
+            no_claude,
             force,
             console_assets,
         } => {
@@ -333,6 +350,10 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 codex,
                 codex_home,
                 no_local_codex,
+                no_codex,
+                claude,
+                claude_config_dir,
+                no_claude,
                 force,
             })?;
             if report.initialized {
@@ -341,16 +362,25 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                     state_dir.display()
                 );
             }
-            println!("Codex: {}", report.executable.display());
-            println!("Wrote and validated {}", report.runtime_file.display());
-            if !report.signed_in {
-                println!(
-                    "Codex is not signed in yet. Run:\n  CODEX_HOME={} codex login",
-                    report.codex_home.display()
-                );
-            } else {
-                println!("Codex sign-in: {}", report.codex_home.display());
+            if let (Some(executable), Some(home)) = (&report.executable, &report.codex_home) {
+                println!("Codex: {}", executable.display());
+                if !report.signed_in {
+                    println!(
+                        "Codex is not signed in yet. Run:\n  CODEX_HOME={} codex login",
+                        home.display()
+                    );
+                } else {
+                    println!("Codex sign-in: {}", home.display());
+                }
             }
+            if let Some(claude) = &report.claude {
+                // ADR-192 decision 6: Claude Code's sign-in is its own.
+                println!("Claude Code: {} (uses its own sign-in)", claude.display());
+            }
+            if let Some(problem) = &report.claude_problem {
+                println!("Claude Code left out: {problem}");
+            }
+            println!("Wrote and validated {}", report.runtime_file.display());
             let assets = console_assets
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "<console-build>".into());

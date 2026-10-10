@@ -100,6 +100,10 @@ pub struct LocalCodex {
     home: Directory,
     codex: Directory,
     path: Option<OsString>,
+    /// The service's OS user name, for Claude only: the installed CLI finds
+    /// the user's existing claude.ai sign-in only with it (ADR-156's operator
+    /// diagnostic). An identity, never a credential.
+    user: Option<OsString>,
 }
 impl LocalCodex {
     pub fn new(
@@ -136,6 +140,10 @@ impl LocalCodex {
             home: Directory::open(home, provider.site())?,
             codex: Directory::open(folder, provider.site())?,
             path: std::env::var_os("PATH"),
+            user: match provider {
+                LocalProvider::Claude => std::env::var_os("USER"),
+                LocalProvider::Codex => None,
+            },
         };
         value.check()?;
         Ok(value)
@@ -226,10 +234,22 @@ impl LocalCodex {
             return Err(Failure::Admission);
         }
         environment.insert("HOME".into(), self.home.path.clone().into_os_string());
-        environment.insert(
-            self.provider.folder_env().into(),
-            self.codex.path.clone().into_os_string(),
-        );
+        // Claude Code's default folder is `.claude` under HOME, and naming it
+        // is not the same as the default: the installed CLI then reads
+        // `<folder>/.claude.json` instead of `~/.claude.json` and reports the
+        // user signed out (measured with CLI 2.1.292 on 2026-10-07). So the
+        // folder is named only when it is not the default one.
+        let default_claude = self.provider == LocalProvider::Claude
+            && self.home.path.join(".claude").canonicalize().ok().as_ref()
+                == Some(&self.codex.path);
+        if default_claude {
+            environment.remove(&OsString::from(self.provider.folder_env()));
+        } else {
+            environment.insert(
+                self.provider.folder_env().into(),
+                self.codex.path.clone().into_os_string(),
+            );
+        }
         if self.provider == LocalProvider::Claude {
             // ADR-192 decision 3: the service's Claude processes never update
             // the binary the runtime pinned; a user's update is seen by Setup.
@@ -239,6 +259,9 @@ impl LocalCodex {
         // search path. Do not inherit keys, proxies or arbitrary host variables.
         if let Some(path) = &self.path {
             environment.insert("PATH".into(), path.clone());
+        }
+        if let Some(user) = &self.user {
+            environment.insert("USER".into(), user.clone());
         }
         Ok(())
     }
@@ -287,6 +310,34 @@ mod tests {
             Some(&OsString::from("1"))
         );
         assert!(!environment.contains_key(&OsString::from("CODEX_HOME")));
+        // The default folder is never named: the CLI would then read another
+        // config file and report the user signed out. An inherited value is
+        // removed too.
+        let default_folder = home.join(".claude");
+        std::fs::create_dir(&default_folder).unwrap();
+        std::fs::set_permissions(&default_folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let default = LocalCodex::new_claude(
+            "pool".into(),
+            "seat".into(),
+            home.clone(),
+            default_folder.clone(),
+        )
+        .unwrap();
+        let mut inherited = BTreeMap::from([(
+            OsString::from("CLAUDE_CONFIG_DIR"),
+            OsString::from("/elsewhere"),
+        )]);
+        default.apply(&mut inherited).unwrap();
+        assert!(!inherited.contains_key(&OsString::from("CLAUDE_CONFIG_DIR")));
+        assert_eq!(
+            inherited.get(&OsString::from("HOME")),
+            Some(&home.clone().into_os_string())
+        );
+        // The OS user name the installed CLI needs to find its own sign-in.
+        assert_eq!(
+            environment.get(&OsString::from("USER")),
+            std::env::var_os("USER").as_ref()
+        );
         for key in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
             let mut leaked = environment.clone();
             leaked.insert(key.into(), "synthetic-forbidden".into());
@@ -324,6 +375,8 @@ mod tests {
             environment.get(&OsString::from("CODEX_HOME")),
             Some(&codex.clone().into_os_string())
         );
+        // Codex is never handed the OS user name.
+        assert!(!environment.contains_key(&OsString::from("USER")));
         assert!(
             environment
                 .keys()

@@ -108,7 +108,7 @@ ADR-189 says Claude Code is added through its own ADR. This is that ADR.
 
 4. **Approvals use the same cards.** A `can_use_tool` request becomes an owner approval through the existing store and card pump.
 
-   - The store's request binding gains a Claude form: session ID, control request ID, tool name and a digest of the input, in place of Codex's thread, turn and item IDs.
+   - The store's request binding takes a Claude form on the same fields: the session ID is the thread, the dispatch's one prompt is the turn, and the control request ID is the item. The tool name and its exact input travel in the request, which its digest covers.
    - The card names the agent's framework instead of a fixed "codex".
    - **Approve once** answers allow with the exact original input (ADR-156).
    - **Deny** answers deny without `interrupt`, so Claude continues its turn and can say what it could not do, as Codex does after a decline. This amends ADR-156.
@@ -131,6 +131,7 @@ ADR-189 says Claude Code is added through its own ADR. This is that ADR.
    - **Checks.** The folder gets the same private-mode checks and the same periodic re-check. A failing check refuses that dispatch or parks that agent, never the service (ADR-183; PR #34 does the same for Codex admission).
    - **Setup writes.** The file may hold a Codex block, a Claude block or both. Setup writes the block for each coding agent it finds: Codex when signed in (ADR-189), Claude Code when installed.
    - **Updates.** A changed binary makes its block stale; Setup rewrites it and asks for a restart, as for Codex.
+   - The binding passes the service's OS user name, which Claude Code needs on macOS to find its own login in the Keychain. It names the Claude folder only when it is not the default `~/.claude`: naming the default makes Claude Code read a different config file and report the user signed out.
 
 8. **Resources come from qualification.** Claude resources are `claude`/`anthropic` with a model from `role-capacity.json`, which already lists Claude models. They carry no reasoning setting, because print mode has no documented effort flag.
 
