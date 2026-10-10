@@ -94,7 +94,7 @@ impl Run {
             .collect()
     }
     async fn approval(&mut self) -> String {
-        match self.runner.next().await.unwrap() {
+        match next_event(&mut self.runner).await {
             Event::Approval {
                 approval_id,
                 turn_id,
@@ -129,7 +129,7 @@ impl Run {
     /// consumed, never events.
     async fn reply(&mut self) -> Option<String> {
         loop {
-            match self.runner.next().await.unwrap() {
+            match next_event(&mut self.runner).await {
                 Event::Idle(idle) => return idle.reply,
                 Event::TurnEnded { .. } => {}
                 _ => panic!("nothing between the answer and the reply"),
@@ -175,7 +175,7 @@ async fn native_octos_control_deny_lets_octos_continue() {
 async fn native_octos_control_withdrawal_is_a_settlement() {
     let mut run = start("approval-cancel", 8_000).await;
     let id = run.approval().await;
-    match run.runner.next().await.unwrap() {
+    match next_event(&mut run.runner).await {
         Event::ApprovalSettled { approval_id } => assert_eq!(approval_id, id),
         _ => panic!("the withdrawal"),
     }
@@ -212,4 +212,15 @@ async fn native_octos_control_owner_bound_leaves_only_the_deny() {
     );
     assert_eq!(run.responses()[0]["decision"], "deny");
     stopped(run.runner.stop());
+}
+
+/// The next event, past the tool start and end events every run carries for
+/// the activity notice (they are counted, not acted on).
+async fn next_event(runner: &mut OwnedOctosSession) -> Event {
+    loop {
+        let event = runner.next().await.unwrap();
+        if !matches!(event, Event::Tool { .. }) {
+            return event;
+        }
+    }
 }

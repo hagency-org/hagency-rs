@@ -102,7 +102,7 @@ impl Run {
         let mut events = Vec::new();
         let mut kinds = Vec::new();
         loop {
-            let event = self.runner.next().await.unwrap();
+            let event = next_event(&mut self.runner).await;
             kinds.push(self.kind());
             match event {
                 Event::Idle(idle) => return (events, kinds, idle),
@@ -213,7 +213,8 @@ async fn native_octos_owned_session_reports_usage_per_turn_and_at_idle() {
     assert_eq!(counts(idle), [Some(10), Some(7), None, Some(20), Some(30)]);
     let last = run.runner.last_observation().unwrap();
     assert!(last.source() == &source);
-    assert_eq!(last.sequence(), 2);
+    // The turn's tool start, its terminal's usage, then the idle usage.
+    assert_eq!(last.sequence(), 3);
     assert!(run.runner.matches_observation_source(&source));
     assert!(matches!(run.runner.observation_source(), Err(Error::State)));
     cleanup(run.runner.stop());
@@ -337,7 +338,7 @@ async fn native_octos_owned_approval_reaches_the_host() {
         approval_id,
         turn_id,
         params,
-    } = run.runner.next().await.unwrap()
+    } = next_event(&mut run.runner).await
     else {
         panic!("the approval request");
     };
@@ -396,4 +397,15 @@ async fn native_octos_owned_refusals_and_bad_peers_close_the_session() {
     ));
     assert_eq!(run.requests().len(), 1);
     cleanup(run.runner.cleanup());
+}
+
+/// The next event, past the tool start and end events every run carries for
+/// the activity notice (they are counted, not acted on).
+async fn next_event(runner: &mut OwnedOctosSession) -> Event {
+    loop {
+        let event = runner.next().await.unwrap();
+        if !matches!(event, Event::Tool { .. }) {
+            return event;
+        }
+    }
 }

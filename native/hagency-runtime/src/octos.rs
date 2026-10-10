@@ -151,7 +151,15 @@ pub enum Payload {
     AssistantPersisted {
         text: String,
     },
-    ToolStart,
+    /// A tool started: its call ID and name when Octos gives them.
+    ToolStart {
+        tool_call_id: Option<String>,
+        name: Option<String>,
+    },
+    /// That tool ended.
+    ToolEnd {
+        tool_call_id: Option<String>,
+    },
     Terminal {
         outcome: Outcome,
         error_code: Option<String>,
@@ -205,6 +213,13 @@ pub enum Frame {
         outcome: Result<Value, RpcError>,
     },
     Notification(Notification),
+}
+/// An optional bounded text field of a projection payload.
+fn text_field(data: &Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .map(str::to_owned)
 }
 /// The session key a projection names: `session_id`, with its `topic`
 /// suffix rebuilt when the envelope splits it out.
@@ -293,7 +308,13 @@ impl Notification {
                             .ok_or(Error::Envelope)?
                             .to_owned(),
                     },
-                    Some("tool_start") => Payload::ToolStart,
+                    Some("tool_start") => Payload::ToolStart {
+                        tool_call_id: text_field(data, "tool_call_id"),
+                        name: text_field(data, "name"),
+                    },
+                    Some("tool_end") => Payload::ToolEnd {
+                        tool_call_id: text_field(data, "tool_call_id"),
+                    },
                     Some("turn_terminal") => Payload::Terminal {
                         outcome: match data.get("outcome").and_then(Value::as_str) {
                             Some("completed") => Outcome::Completed,

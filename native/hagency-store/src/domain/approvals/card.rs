@@ -104,17 +104,32 @@ impl DomainRepository {
         let preview = if claude {
             serde_json::to_string(&request.params["input"])?
         } else if octos {
-            let shown: serde_json::Map<String, Value> = ["title", "body", "command", "cwd"]
+            // What Octos says the request does, as lines a person reads: its
+            // title, its body, then the typed command and directory if any.
+            let text = |key: &str| {
+                request.params[key]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            };
+            let mut lines: Vec<String> = ["title", "body"]
                 .into_iter()
-                .filter_map(|key| {
-                    request
-                        .params
-                        .get(key)
-                        .filter(|value| !value.is_null())
-                        .map(|value| (key.to_owned(), value.clone()))
-                })
+                .filter_map(|key| text(key).map(str::to_owned))
                 .collect();
-            serde_json::to_string(&shown)?
+            if let Some(command) = text("command") {
+                lines.push(format!("Command: {command}"));
+            }
+            if let Some(cwd) = text("cwd") {
+                lines.push(format!("Working directory: {cwd}"));
+            }
+            // A request with no reusable scope has no stored description:
+            // Octos's own title names it.
+            if description.is_empty()
+                && let Some(title) = text("title")
+            {
+                description = title.to_owned();
+            }
+            lines.join("\n")
         } else {
             serde_json::to_string(&request.params)?
         };

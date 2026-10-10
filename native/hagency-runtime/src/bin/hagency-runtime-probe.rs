@@ -548,7 +548,16 @@ fn main() -> io::Result<()> {
         {
             fs::write(marker.with_extension("config"), fs::read(config)?)?;
         }
-        let mode = std::env::var("HAGENCY_OFFLINE_MODE").map_err(io::Error::other)?;
+        // A test may give the next serve alone another mode: one launch reads
+        // and removes `owned-dispatch.next-mode`.
+        let next = marker.with_extension("next-mode");
+        let mode = match fs::read_to_string(&next) {
+            Ok(mode) => {
+                fs::remove_file(&next)?;
+                mode.trim().to_owned()
+            }
+            Err(_) => std::env::var("HAGENCY_OFFLINE_MODE").map_err(io::Error::other)?,
+        };
         return octos_probe::run(&mode, &marker);
     }
     match args.as_slice() {
