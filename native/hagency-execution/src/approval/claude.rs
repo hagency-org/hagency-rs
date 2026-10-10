@@ -354,7 +354,15 @@ impl ClaudeDrive<'_> {
                     .resolution_arrives(),
             ),
             Message::ControlResponse { .. } => return Err(Failure::Protocol),
-            Message::Event { .. } => (None, Ok(false)),
+            Message::Event { .. } => {
+                crate::operation::record_activity(
+                    self.domain,
+                    self.cap,
+                    crate::operation::claude_activity(&message),
+                )
+                .await;
+                (None, Ok(false))
+            }
         };
         if self
             .outcome

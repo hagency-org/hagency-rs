@@ -700,21 +700,17 @@ impl Continuation {
     pub(crate) fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
     }
+    /// The follow-up root the agent's next dispatch launches from. A failed
+    /// attempt ends its dispatch, not the agent (ADR-182 decision 1): once its
+    /// whole tree is proven stopped and this host retains no process of it,
+    /// the root passes on, as a restart's re-attach would rebuild it. An
+    /// unproven stop keeps the runtime spent: the store's agent fence holds
+    /// that agent (decision 3), and only a restart's re-attach, which reads
+    /// the fence, rebuilds its root.
     fn record(&self, report: &Report) {
-        let usage = report.usage_status();
-        if report.failure.is_none()
-            && stopped(report.cleanup)
-            && matches!(
-                report.settlement,
-                Settlement::Completed | Settlement::CanonicalReplyReady
-            )
+        if stopped(report.cleanup)
             && report.owner.is_none()
             && report.late_child.is_none()
-            && usage.bound
-            && usage.closed
-            && !usage.pending
-            && !usage.rejected
-            && usage.failure.is_none()
             && let Ok(mut binding) = self.binding.lock()
         {
             *binding = report.factory.as_ref().or(report.warm.as_ref()).cloned();
@@ -1169,6 +1165,99 @@ pub(crate) fn runner_activity(update: &Update) -> Option<hagency_store::Activity
             event_id,
         },
     })
+}
+/// The activity kind of a tool Claude Code or Octos names, in the same
+/// vocabulary as Codex's item types.
+fn tool_kind(name: &str) -> &'static str {
+    match name {
+        "Bash" | "shell" | "bash" | "exec_command" => "command",
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "Read" | "write_file" | "edit_file"
+        | "read_file" | "apply_patch" => "files",
+        "WebSearch" | "WebFetch" | "Grep" | "Glob" | "web_search" | "web_fetch" | "grep"
+        | "glob" => "search",
+        "Task" | "Agent" | "spawn_agent" | "delegate" => "delegate",
+        _ => "tool",
+    }
+}
+fn activity_id(id: &str) -> String {
+    format!("{:x}", Sha256::digest(id.as_bytes()))
+}
+/// Claude Code's own tool blocks in the activity vocabulary (ADR-192): a
+/// `tool_use` block of an assistant message starts a tool, the `tool_result`
+/// naming it in a user message ends it. The dedupe id is the block's own
+/// tool-use id, hashed, so a block seen twice counts once.
+pub(crate) fn claude_activity(
+    message: &hagency_runtime::claude::Message,
+) -> Vec<hagency_store::ActivityEvent> {
+    use hagency_runtime::claude::{EventKind, Message};
+    let Message::Event { kind, payload, .. } = message else {
+        return Vec::new();
+    };
+    let blocks = payload["message"]["content"].as_array();
+    let mut events = Vec::new();
+    for block in blocks.into_iter().flatten() {
+        match (kind, block["type"].as_str()) {
+            (EventKind::Assistant, Some("tool_use")) => {
+                if let Some(id) = block["id"].as_str() {
+                    events.push(hagency_store::ActivityEvent::ToolStart {
+                        kind: tool_kind(block["name"].as_str().unwrap_or_default()).into(),
+                        event_id: activity_id(id),
+                    });
+                }
+            }
+            (EventKind::User, Some("tool_result")) => {
+                if let Some(id) = block["tool_use_id"].as_str() {
+                    events.push(hagency_store::ActivityEvent::ToolEnd {
+                        kind: "tool".into(),
+                        event_id: activity_id(id),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    events
+}
+/// One Octos tool event in the activity vocabulary (ADR-193).
+pub(crate) fn octos_activity(
+    event: &hagency_runtime::octos::session::Event,
+) -> Option<hagency_store::ActivityEvent> {
+    let hagency_runtime::octos::session::Event::Tool {
+        tool_call_id,
+        name,
+        ended,
+    } = event
+    else {
+        return None;
+    };
+    let event_id = activity_id(tool_call_id);
+    Some(if *ended {
+        hagency_store::ActivityEvent::ToolEnd {
+            kind: "tool".into(),
+            event_id,
+        }
+    } else {
+        hagency_store::ActivityEvent::ToolStart {
+            kind: tool_kind(name.as_deref().unwrap_or_default()).into(),
+            event_id,
+        }
+    })
+}
+/// Record activity events, as `record_runner_activity` records Codex's.
+pub(crate) async fn record_activity(
+    domain: &DomainStore,
+    cap: &RunnerCapability,
+    events: impl IntoIterator<Item = hagency_store::ActivityEvent>,
+) {
+    for event in events {
+        if let Err(error) = domain
+            .record_activity_event(cap.dispatch_id.clone(), event, now_ms())
+            .await
+        {
+            tracing::warn!(dispatch_id = %cap.dispatch_id, error = ?error,
+                "runner activity not recorded");
+        }
+    }
 }
 /// Record one drained update's runner activity. **Both** update-draining paths
 /// call this: the plain loop below, and the approval drive that production
@@ -1808,6 +1897,7 @@ async fn run_octos_turn(
                 status,
             )
             .await?;
+            record_activity(domain, cap, octos_activity(&event)).await;
             // Usage first: each terminal's, then the session's at idle.
             let idle = outcome
                 .observe(session, usage, &event, cancel, ceiling)
@@ -2088,6 +2178,7 @@ async fn run_claude_turn(
                         .await;
                 }
                 Message::Event { .. } => {
+                    record_activity(domain, cap, claude_activity(&message)).await;
                     if outcome
                         .observe(session, usage, &message, cancel, ceiling)
                         .await?
@@ -2858,7 +2949,8 @@ fn stop_detail(
 #[cfg(test)]
 mod tests {
     use super::{
-        Failure, Report, SettlementCause, observes_completion, runner_activity, settlement_failure,
+        Failure, Report, SettlementCause, activity_id, claude_activity, observes_completion,
+        octos_activity, runner_activity, settlement_failure,
     };
     use hagency_store::Error;
 
@@ -2867,6 +2959,72 @@ mod tests {
     /// and nothing else counts. Without this the notice's
     /// `工具调用 N 次，已返回 M 次` counters stay at zero forever (board #91
     /// addendum).
+    /// Claude Code's and Octos's own tool events count on the activity
+    /// notice as Codex's items do: a start per tool, an end per result.
+    #[test]
+    fn native_claude_and_octos_tool_activity() {
+        use hagency_runtime::claude::{EventKind, Message};
+        use hagency_store::ActivityEvent;
+        let assistant = Message::Event {
+            session_id: "s".into(),
+            kind: EventKind::Assistant,
+            payload: serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"text","text":"running"},
+                {"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}},
+                {"type":"tool_use","id":"toolu_2","name":"mcp__hagency_task_writer__get_task","input":{}}]}}),
+        };
+        let events = claude_activity(&assistant);
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], ActivityEvent::ToolStart { kind, event_id }
+            if kind == "command" && *event_id == activity_id("toolu_1"))
+        );
+        assert!(matches!(&events[1], ActivityEvent::ToolStart { kind, .. } if kind == "tool"));
+        let user = Message::Event {
+            session_id: "s".into(),
+            kind: EventKind::User,
+            payload: serde_json::json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}),
+        };
+        let events = claude_activity(&user);
+        assert!(
+            matches!(events.as_slice(), [ActivityEvent::ToolEnd { event_id, .. }]
+            if *event_id == activity_id("toolu_1"))
+        );
+        // A tool_use block in a user message is not a tool start.
+        let echoed = Message::Event {
+            session_id: "s".into(),
+            kind: EventKind::User,
+            payload: serde_json::json!({"message":{"content":[{"type":"tool_use","id":"x"}]}}),
+        };
+        assert!(claude_activity(&echoed).is_empty());
+
+        use hagency_runtime::octos::session::Event;
+        let start = Event::Tool {
+            tool_call_id: "call-1".into(),
+            name: Some("bash".into()),
+            ended: false,
+        };
+        assert!(
+            matches!(octos_activity(&start), Some(ActivityEvent::ToolStart { kind, event_id })
+            if kind == "command" && event_id == activity_id("call-1"))
+        );
+        let end = Event::Tool {
+            tool_call_id: "call-1".into(),
+            name: None,
+            ended: true,
+        };
+        assert!(
+            matches!(octos_activity(&end), Some(ActivityEvent::ToolEnd { event_id, .. })
+            if event_id == activity_id("call-1"))
+        );
+        assert!(
+            octos_activity(&Event::TurnStarted {
+                turn_id: "t".into()
+            })
+            .is_none()
+        );
+    }
     #[test]
     fn native_runner_activity_projects_item_events() {
         use hagency_runtime::codex::session::{ItemPhase, Update};

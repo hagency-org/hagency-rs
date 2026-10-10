@@ -120,6 +120,12 @@ pub enum Event {
     ToolCall {
         params: Value,
     },
+    /// One of the turn's tools started or ended, for the activity notice.
+    Tool {
+        tool_call_id: String,
+        name: Option<String>,
+        ended: bool,
+    },
     /// One turn ended: the dispatch's own or a continuation.
     TurnEnded {
         turn_id: String,
@@ -326,9 +332,20 @@ impl<R, W, E> SessionDriver<R, W, E> {
                         turn.reply = Some(text);
                         None
                     }
-                    Payload::ToolStart => {
+                    Payload::ToolStart { tool_call_id, name } => {
                         turn.reply = None;
-                        None
+                        tool_call_id.map(|tool_call_id| Event::Tool {
+                            tool_call_id,
+                            name,
+                            ended: false,
+                        })
+                    }
+                    Payload::ToolEnd { tool_call_id } => {
+                        tool_call_id.map(|tool_call_id| Event::Tool {
+                            tool_call_id,
+                            name: None,
+                            ended: true,
+                        })
                     }
                     Payload::Terminal {
                         outcome,

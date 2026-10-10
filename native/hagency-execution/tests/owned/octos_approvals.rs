@@ -67,11 +67,10 @@ async fn native_octos_approval_once_approves_that_request() {
     let detail = &card.content()["com.agentchat.approval"];
     assert_eq!(detail["runtime"], "octos");
     assert_eq!(detail["tool_name"], "shell");
+    // What Octos says, as lines a person reads, never raw JSON.
     assert_eq!(
         detail["input_preview"],
-        serde_json::to_string(&json!({"title":"Run a command","body":"rm -rf build",
-            "command":"rm -rf build","cwd":work}))
-        .unwrap()
+        format!("Run a command\nrm -rf build\nCommand: rm -rf build\nWorking directory: {work}")
     );
     assert_eq!(detail["reusable_scope"]["kind"], "exact_command");
     let body = card.content()["body"].as_str().unwrap();

@@ -378,6 +378,15 @@ impl OctosDrive<'_> {
                 .await?;
                 (None, Ok(false))
             }
+            Event::Tool { .. } => {
+                crate::operation::record_activity(
+                    self.domain,
+                    self.cap,
+                    crate::operation::octos_activity(&event),
+                )
+                .await;
+                (None, Ok(false))
+            }
             Event::TurnStarted { .. } | Event::TurnEnded { .. } | Event::Idle(_) => {
                 (None, Ok(false))
             }

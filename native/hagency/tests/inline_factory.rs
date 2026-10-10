@@ -950,9 +950,15 @@ async fn native_provisioning_factory_report_is_not_authority() {
         observation.scope.signals_accepted = true;
         report.cleanup = hagency_runtime::owned::Cleanup::Observed(observation);
     }
+    // The worker's own report decides, never this edited copy. Its stop was
+    // proven, so the agent takes its next dispatch (ADR-182 decision 1), and
+    // a forged capability on it still gets no work done.
     let mut other = cap;
     other.dispatch_id = "forged_second_dispatch".into();
-    assert!(agent.dispatch(other, execution_limits()).await.is_err());
+    let mut second = agent.dispatch(other, execution_limits()).await.unwrap();
+    let second = second.wait().await.unwrap();
+    assert!(second.failure.is_some(), "{:?}", second.protocol);
+    drop(second);
     assert_eq!(
         f.requests()
             .iter()
@@ -1706,6 +1712,70 @@ async fn native_provisioning_claude_agent_first_dispatch() {
 /// by the task helper outside Octos, and it completes with Octos's reply. A restart re-attaches
 /// the agent the same way. A profile the user changed afterwards refuses the
 /// next task before anything is launched.
+/// ADR-182 decision 1 for a factory agent: a failed attempt whose tree is
+/// proven stopped ends its dispatch, not the agent. Once the operator has
+/// settled it, the agent's next task launches from the same follow-up root,
+/// with no restart; before, every later dispatch failed admission until one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn native_provisioning_octos_agent_recovers_after_a_failed_attempt() {
+    async fn run(
+        f: &Fixture,
+        agent: &mut hagency_matrix::ProvisionedAgent,
+        n: u64,
+    ) -> hagency_execution::Report {
+        let cap = next_task(f, agent, n).await;
+        let mut operation = agent
+            .dispatch(cap.clone(), execution_limits())
+            .await
+            .unwrap();
+        let binding = acknowledge(&mut operation, &cap).await;
+        let report = operation.wait().await.unwrap();
+        drop(binding);
+        report
+    }
+    let mut f = Fixture::new_octos(false).await;
+    f.provision().await;
+    let engagement = f.engagement();
+    let mut agent = f.collector.take_provisioned_agent(&engagement).unwrap();
+    // Octos errors on this task.
+    fs::write(f.work().join("owned-dispatch.next-mode"), "error").unwrap();
+    let failed = run(&f, &mut agent, 10).await.protocol;
+    assert_eq!(failed, hagency_execution::Protocol::Failed);
+    let inspection = f
+        .base
+        .store
+        .begin_outcome_inspection(engagement.clone(), "factory_dispatch_10".into(), 60_000)
+        .await
+        .unwrap();
+    f.base
+        .store
+        .resolve_stopped_dispatch(
+            engagement.clone(),
+            hagency_store::OutcomeResolution {
+                original: "factory_dispatch_10".into(),
+                request_id: "reviewed_failure".into(),
+                inspection_id: inspection["inspectionId"].as_str().unwrap().into(),
+                inspection_token: inspection["inspectionToken"].as_str().unwrap().into(),
+                action: hagency_store::OutcomeAction::KeepBlocked,
+                operator_note: "Reviewed the failed attempt".into(),
+                replacement: None,
+            },
+        )
+        .await
+        .unwrap();
+    let report = run(&f, &mut agent, 11).await;
+    let (protocol, failure) = (report.protocol, report.failure.clone());
+    assert_eq!(
+        protocol,
+        hagency_execution::Protocol::Completed,
+        "the task after a failed one: {failure:?}"
+    );
+
+    drop(report);
+    agent.close().await.unwrap();
+    f.close().await;
+}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn native_provisioning_octos_agent_dispatch_and_reattach() {
