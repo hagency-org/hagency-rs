@@ -389,13 +389,18 @@ impl WarmRuntime {
                 });
                 report.account = prepared.account;
                 report.live = live;
+                let runner = prepared.runner;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // `prepare_warm` prepares app servers only (ADR-192).
+                    let crate::host::PreparedRunner::Codex { settings, .. } = runner else {
+                        return Err(Failure::Admission);
+                    };
                     runtime.block_on(retain(
                         &source,
                         &fixed,
                         NativeStartup {
                             launch: prepared.launch,
-                            settings: prepared.settings,
+                            settings,
                             io_limits: prepared.io_limits,
                         },
                         limits,

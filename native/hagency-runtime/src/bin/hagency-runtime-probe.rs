@@ -480,6 +480,24 @@ fn main() -> io::Result<()> {
     if args.first().is_some_and(|v| v == "guardian") {
         return hagency_platform::run_guardian();
     }
+    // A Claude launch from the execution Host carries the fixed task profile's
+    // flags (ADR-158), never probe words. The test host names the offline mode
+    // in its environment, as it does for the app-server fixture below, and the
+    // argv the Host actually spawned is recorded for launch-surface checks.
+    if args.first().is_some_and(|v| v == "--print") {
+        let marker = std::env::current_dir()?.join("owned-dispatch");
+        fs::write(
+            marker.with_extension("argv"),
+            serde_json::to_vec(
+                &args
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+            )?,
+        )?;
+        let mode = std::env::var("HAGENCY_OFFLINE_MODE").map_err(io::Error::other)?;
+        return claude_probe::run_task(&mode, &marker);
+    }
     match args.as_slice() {
         [command] if command == "app-server" => {
             // Fixed host installation entrypoint for offline dispatch fixtures.

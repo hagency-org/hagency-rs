@@ -127,3 +127,109 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
     drop(stdin);
     super::pulse(marker)
 }
+
+fn read(stdin: &mut io::StdinLock<'_>) -> io::Result<Value> {
+    let mut line = String::new();
+    stdin.read_line(&mut line)?;
+    Ok(serde_json::from_str(&line)?)
+}
+fn control(stdin: &mut io::StdinLock<'_>, subtype: &str) -> io::Result<Value> {
+    let request = read(stdin)?;
+    if request["type"] != "control_request" || request["request"]["subtype"] != subtype {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(request)
+}
+fn respond(request: &Value, body: Value) -> io::Result<()> {
+    emit(json!({"type":"control_response","response":{
+        "subtype":"success","request_id":request["request_id"],"response":body}}))
+}
+/// The scoped helper binding of ADR-158: status, set, status. The tool list
+/// follows the helper's own file flags; the helper itself is never started.
+fn bind_helper(stdin: &mut io::StdinLock<'_>, before: &Value) -> io::Result<()> {
+    respond(before, json!({"mcpServers":[]}))?;
+    let set = control(stdin, "mcp_set_servers")?;
+    let server = &set["request"]["servers"]["hagency_task_writer"];
+    if server["command"].as_str().is_none()
+        || server["args"] != json!(["mcp", "--owned-task-profile"])
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut tools = vec![
+        "get_task",
+        "list_tasks",
+        "update_task_execution",
+        "transition_task",
+        "complete_task_with_reply",
+        "read_conversation",
+        "schedule_reminder",
+    ];
+    if server["env"]["HAGENCY_FILE_TOOLS"] == "1" {
+        tools.extend(["send_file", "get_file_delivery"]);
+    }
+    if server["env"]["HAGENCY_RECEIVE_FILE_TOOLS"] == "1" {
+        tools.extend(["list_received_files", "receive_file"]);
+    }
+    respond(
+        &set,
+        json!({"added":["hagency_task_writer"],"removed":[],"errors":{}}),
+    )?;
+    let after = control(stdin, "mcp_status")?;
+    respond(
+        &after,
+        json!({"mcpServers":[{"name":"hagency_task_writer","status":"connected",
+            "tools":tools.iter().map(|name| json!({"name":name})).collect::<Vec<_>>()}]}),
+    )?;
+    Ok(())
+}
+/// A Claude launched by the execution Host with the fixed task profile
+/// (ADR-158): initialize, then the scoped helper binding, then one prompt.
+/// Never starts the helper or a provider; the reply is the result text.
+pub(super) fn run_task(mode: &str, marker: &Path) -> io::Result<()> {
+    if !matches!(mode, "task" | "task-error" | "task-permission") {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    fs::write(marker.with_extension("entered"), b"offline")?;
+    let mut stdin = io::stdin().lock();
+    let initialize = control(&mut stdin, "initialize")?;
+    respond(&initialize, json!({}))?;
+    // The helper binding comes only from a host with a task helper.
+    let mut next = read(&mut stdin)?;
+    if next["type"] == "control_request" && next["request"]["subtype"] == "mcp_status" {
+        bind_helper(&mut stdin, &next)?;
+        next = read(&mut stdin)?;
+    }
+    let prompt = next;
+    if prompt["type"] != "user" || prompt["message"]["role"] != "user" {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    fs::write(
+        marker.with_extension("prompt"),
+        serde_json::to_vec(&prompt)?,
+    )?;
+    emit(json!({"type":"system","subtype":"init","session_id":"owned-claude"}))?;
+    emit(
+        json!({"type":"assistant","session_id":"owned-claude","uuid":"one","parent_tool_use_id":null,
+        "message":{"id":"step-one","content":[{"type":"text","text":"working"}],
+            "usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}}),
+    )?;
+    match mode {
+        "task" => emit(
+            json!({"type":"result","subtype":"success","session_id":"owned-claude",
+            "is_error":false,"result":"claude fixture reply",
+            "modelUsage":{"claude-fixture":{"inputTokens":10,"outputTokens":7,"cacheReadInputTokens":20,"cacheCreationInputTokens":30}}}),
+        )?,
+        "task-error" => emit(json!({"type":"result","subtype":"error_during_execution",
+            "session_id":"owned-claude","is_error":true,
+            "modelUsage":{"claude-fixture":{"inputTokens":10,"outputTokens":7,"cacheReadInputTokens":20,"cacheCreationInputTokens":30}}}))?,
+        _ => emit(
+            json!({"type":"control_request","request_id":"owned-permission","request":{
+            "subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"owned-tool",
+            "input":{"command":"offline literal"}}}),
+        )?,
+    }
+    // Alive after its result: only the original guardian's stop or the bounded
+    // fixture fuse ends it, as for the single-prompt modes above.
+    drop(stdin);
+    super::pulse(marker)
+}

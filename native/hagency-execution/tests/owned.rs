@@ -236,6 +236,11 @@ impl Fixture {
         )
         .unwrap()
     }
+    /// ADR-192: the same probe, launched as Claude Code by a Claude host. The
+    /// offline mode travels in the host environment, as for the app server.
+    fn claude_host(&self, mode: &str) -> Host {
+        self.host(mode, "work", false).with_claude_runner().unwrap()
+    }
     fn operation(&self, mode: &str) -> Operation {
         Operation::start(
             self.domain.clone(),
@@ -646,6 +651,134 @@ async fn native_claude_dispatch_refuses_without_runner() {
         refusal["host_owned_failure"]["unsupported_runner"]["framework"],
         "claude"
     );
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+fn claude_pool() -> Resource {
+    serde_json::from_value(json!({
+        "presetId":"pool","seatId":"seat","framework":"claude",
+        "model":"claude-opus-5","provider":"anthropic",
+        "ceiling":{"tokens":1000,"period":"monthly"}
+    }))
+    .unwrap()
+}
+
+/// ADR-192: a Claude host runs a Claude dispatch on a fresh guardian-owned
+/// session. The argv is exactly the fixed task profile (ADR-158), the one
+/// prompt is the dispatch payload, the result text is the reply, and the
+/// usage source attaches at `system/init`, so the dispatch settles Completed.
+#[tokio::test]
+async fn native_claude_dispatch_completes_with_its_result() {
+    let f = Fixture::configured_resource(false, false, claude_pool());
+    let mut operation = Operation::start(
+        f.domain.clone(),
+        f.cap.clone(),
+        f.claude_host("task"),
+        limits(),
+    )
+    .unwrap();
+    let report = operation.wait().await.unwrap();
+    assert_eq!(report.protocol, Protocol::Completed);
+    assert_eq!(report.text.as_deref(), Some("claude fixture reply"));
+    let Cleanup::Observed(cleanup) = report.cleanup else {
+        panic!("cleanup observation missing");
+    };
+    assert!(cleanup.scope.leader_exited);
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert!(cleanup.scope.whole_tree_stopped);
+        assert!(!report.retains_process_custody());
+        assert_eq!(report.failure, None);
+        assert_eq!(report.settlement, Settlement::Completed);
+        assert_eq!(f.state(), "completed");
+        assert_eq!(f.count("SELECT COUNT(*) FROM resource_leases"), 0);
+    }
+    let argv: Vec<String> =
+        serde_json::from_slice(&fs::read(f.work.join("owned-dispatch.argv")).unwrap()).unwrap();
+    assert_eq!(
+        argv,
+        hagency_runtime::claude::task_arguments("claude-opus-5", true).unwrap()
+    );
+    let prompt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.work.join("owned-dispatch.prompt")).unwrap()).unwrap();
+    assert_eq!(prompt["type"], "user");
+    let usage = report.usage_status();
+    assert!(usage.bound && usage.attached && usage.failure.is_none());
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM usage_sources WHERE framework='claude'"),
+        1
+    );
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+/// ADR-192: an error result is the turn's own outcome — a protocol failure
+/// with the provider's word kept for the attempt — never a reply.
+#[tokio::test]
+async fn native_claude_error_result_settles_as_a_protocol_failure() {
+    let f = Fixture::configured_resource(false, false, claude_pool());
+    let mut operation = Operation::start(
+        f.domain.clone(),
+        f.cap.clone(),
+        f.claude_host("task-error"),
+        limits(),
+    )
+    .unwrap();
+    let report = operation.wait().await.unwrap();
+    assert_eq!(report.protocol, Protocol::Failed);
+    assert_eq!(report.text, None);
+    assert_eq!(report.turn_failure, "error_during_execution");
+    assert_eq!(report.failure, Some(Failure::Protocol));
+    f.quarantined();
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+/// ADR-192, slice 1: a Claude permission request reaches no owner card yet.
+/// Like a Codex turn without approvals, it refuses the turn and the child is
+/// stopped, never left waiting for an answer nobody gives.
+#[tokio::test]
+async fn native_claude_permission_without_approvals_refuses_the_turn() {
+    let f = Fixture::configured_resource(false, false, claude_pool());
+    let mut operation = Operation::start(
+        f.domain.clone(),
+        f.cap.clone(),
+        f.claude_host("task-permission"),
+        limits(),
+    )
+    .unwrap();
+    let report = operation.wait().await.unwrap();
+    assert_eq!(report.failure, Some(Failure::UnsupportedApproval));
+    assert!(matches!(report.cleanup, Cleanup::Observed(_)));
+    f.quarantined();
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+/// ADR-192: a Claude host refuses a Codex dispatch by name, before any
+/// workspace or process work — the mirror of the Codex host's refusal above.
+#[tokio::test]
+async fn native_claude_host_refuses_a_codex_dispatch() {
+    let f = Fixture::new();
+    let mut operation = Operation::start(
+        f.domain.clone(),
+        f.cap.clone(),
+        f.claude_host("task"),
+        limits(),
+    )
+    .unwrap();
+    let report = operation.wait().await.unwrap();
+    assert_eq!(
+        report.failure,
+        Some(Failure::UnsupportedRunner {
+            framework: "codex".into()
+        })
+    );
+    assert_eq!(
+        report.settlement,
+        Settlement::Negative(OwnedObservation::Unstarted)
+    );
+    assert!(!f.marker().exists());
     drop(report);
     f.domain.shutdown().await.unwrap();
 }
