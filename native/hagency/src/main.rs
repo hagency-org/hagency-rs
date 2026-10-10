@@ -30,6 +30,9 @@ enum Command {
         #[arg(long)]
         owned_task_profile: bool,
     },
+    /// Claude Code's PreToolUse hook: ask the owner before a file tool
+    /// writes outside this workspace (hook input on stdin).
+    ClaudeWriteGuard { workspace: PathBuf },
     /// Maintain the canonical task from the host-provisioned runner environment.
     Task {
         /// Stable identifier for a mutation; reuse only with identical content.
@@ -286,6 +289,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hagency_platform::run_guardian()?;
         return Ok(());
     }
+    if let Command::ClaudeWriteGuard { workspace } = &command {
+        hagency_runtime::claude::write_guard::run(workspace)?;
+        return Ok(());
+    }
     if let Command::Mcp { owned_task_profile } = command {
         // The helper's exit code names its own refusal class, so a spawning
         // test can attribute a hosted load failure from the status alone,
@@ -323,6 +330,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Mcp { .. } => unreachable!("MCP runs on the dedicated main thread"),
+        Command::ClaudeWriteGuard { .. } => unreachable!("the guard runs before the runtime"),
         Command::Task { call_id, command } => {
             let context = hagency::task_client::Context::from_env()?;
             let output = hagency::task_client::run(

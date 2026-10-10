@@ -27,6 +27,10 @@ pub fn current() -> BTreeMap<String, String> {
             include_bytes!("../../hagency-runtime/src/claude/task_mcp.rs"),
         ),
         (
+            "runtime/claude/write_guard.rs",
+            include_bytes!("../../hagency-runtime/src/claude/write_guard.rs"),
+        ),
+        (
             "runtime/owned/claude.rs",
             include_bytes!("../../hagency-runtime/src/owned/claude.rs"),
         ),

@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 pub mod session;
 mod task_mcp;
+pub mod write_guard;
 pub use task_mcp::{TaskMcp, task_arguments};
 
 pub const MAX_FRAME_BYTES: usize = 1_048_576;

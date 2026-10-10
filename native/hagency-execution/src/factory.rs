@@ -551,6 +551,7 @@ impl WarmHostPlan {
                 BTreeMap::from([(workspace.clone(), work)]),
             )?
             .with_claude_runner()?
+            .with_claude_write_guard(helper.clone())?
             .with_task_helper(helper, address)?
             .with_approvals(approvals)?;
             if let Some((limit, send, receive)) = files {
