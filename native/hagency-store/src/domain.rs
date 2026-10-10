@@ -134,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 68;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 69;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -1149,6 +1149,9 @@ impl DomainRepository {
                         68,
                         include_str!("migrations/068-coordinator-legacy-adoption.sql"),
                     ),
+                    // ADR-193: no board number; the file carries its list
+                    // version.
+                    (69, include_str!("migrations/069-octos-usage-sources.sql")),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[

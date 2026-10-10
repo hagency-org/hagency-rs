@@ -19,6 +19,7 @@ fn framework(value: &str) -> Result<Framework, Error> {
     match value {
         "claude" => Ok(Framework::Claude),
         "codex" => Ok(Framework::Codex),
+        "octos" => Ok(Framework::Octos),
         _ => Err(Error::Schema),
     }
 }

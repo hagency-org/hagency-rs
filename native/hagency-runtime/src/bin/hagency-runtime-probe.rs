@@ -2,6 +2,7 @@
 #[path = "approval_probe/mod.rs"]
 mod approval_probe;
 mod claude_probe;
+mod octos_probe;
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
@@ -498,6 +499,48 @@ fn main() -> io::Result<()> {
         let mode = std::env::var("HAGENCY_OFFLINE_MODE").map_err(io::Error::other)?;
         return claude_probe::run_task(&mode, &marker);
     }
+    // An Octos launch from the execution Host is `octos serve --stdio` with
+    // the dispatch's workspace and private instance directory (ADR-193). The
+    // test host names the offline mode in its environment; the argv and the
+    // environment facts the Host must hold are recorded for its checks.
+    if args.first().is_some_and(|v| v == "serve") {
+        let marker = std::env::current_dir()?.join("owned-dispatch");
+        fs::write(
+            marker.with_extension("argv"),
+            serde_json::to_vec(
+                &args
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+            )?,
+        )?;
+        let keys = [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "GEMINI_API_KEY",
+            "MOONSHOT_API_KEY",
+            "OCTOS_HOME",
+        ];
+        fs::write(
+            marker.with_extension("environment"),
+            serde_json::to_vec(&json!({
+                "no_model_download": std::env::var("OCTOS_NO_MODEL_DOWNLOAD").ok(),
+                "provider_keys": keys.iter().filter(|key| std::env::var_os(key).is_some()).collect::<Vec<_>>(),
+                "home": std::env::var_os("HOME").is_some(),
+            }))?,
+        )?;
+        // The settings file the Host passed, exactly as this child reads it.
+        if let Some(config) = args
+            .iter()
+            .position(|value| value == "--config")
+            .and_then(|index| args.get(index + 1))
+        {
+            fs::write(marker.with_extension("config"), fs::read(config)?)?;
+        }
+        let mode = std::env::var("HAGENCY_OFFLINE_MODE").map_err(io::Error::other)?;
+        return octos_probe::run(&mode, &marker);
+    }
     match args.as_slice() {
         [command] if command == "app-server" => {
             // Fixed host installation entrypoint for offline dispatch fixtures.
@@ -571,6 +614,10 @@ fn main() -> io::Result<()> {
             Path::new(marker),
         ),
         [command, mode, marker] if command == "fake-claude" => claude_probe::run(
+            mode.to_str().ok_or(io::ErrorKind::InvalidInput)?,
+            Path::new(marker),
+        ),
+        [command, mode, marker] if command == "fake-octos" => octos_probe::run(
             mode.to_str().ok_or(io::ErrorKind::InvalidInput)?,
             Path::new(marker),
         ),

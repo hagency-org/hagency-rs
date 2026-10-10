@@ -6,7 +6,7 @@ use hagency_core::tasks::{RunnerCapability, RunnerCommand, Task, TaskState};
 use hagency_runtime::{
     claude::{EventKind, Message},
     codex::session::{self, Outcome, Update},
-    owned::{Cleanup, OwnedClaudeSession, OwnedSession, StartError},
+    owned::{Cleanup, OwnedClaudeSession, OwnedOctosSession, OwnedSession, StartError},
 };
 use hagency_store::{DomainStore, OwnedFailure, OwnedObservation};
 use sha2::{Digest, Sha256};
@@ -477,6 +477,10 @@ pub struct Report {
     /// ADR-192: this dispatch's Claude session when its host runs Claude, under
     /// the same custody rule as `owner`: kept until a stop proves release.
     pub(crate) claude: Option<OwnedClaudeSession>,
+    /// ADR-193: this dispatch's `octos serve --stdio` when its host runs Octos,
+    /// under the same custody rule. Boxed: a report crosses nested host futures
+    /// by value, and an inline session adds its 34 KB to every dispatch's.
+    pub(crate) octos: Option<Box<OwnedOctosSession>>,
     pub(crate) warm: Option<crate::warm::Binding>,
     factory: Option<crate::warm::Binding>,
     /// Custody for a child whose spawn was abandoned at the deadline (ADR-053
@@ -518,6 +522,7 @@ impl Report {
             text: None,
             owner: None,
             claude: None,
+            octos: None,
             warm: None,
             factory: None,
             late_child: None,
@@ -591,6 +596,7 @@ impl Report {
     pub fn retains_process_custody(&self) -> bool {
         self.owner.is_some()
             || self.claude.is_some()
+            || self.octos.is_some()
             || match self.cleanup {
                 Cleanup::Pending => false,
                 Cleanup::Observed(_) => !stopped(self.cleanup),
@@ -603,6 +609,8 @@ impl Report {
             self.cleanup = owner.stop();
         } else if let Some(claude) = &mut self.claude {
             self.cleanup = claude.stop();
+        } else if let Some(octos) = &mut self.octos {
+            self.cleanup = octos.stop();
         } else if self.cleanup == Cleanup::Pending
             && self.late_child.is_none()
             && let Some(live) = &mut self.live
@@ -627,6 +635,7 @@ impl Report {
             }
             self.owner.take();
             self.claude.take();
+            self.octos.take();
         }
         self.cleanup
     }
@@ -1481,6 +1490,256 @@ async fn spawn_claude(
         Err(failure) => Err(failure),
     }
 }
+/// The Octos counterpart of `spawn_claude` (ADR-193), under the same
+/// deadline and abandoned-spawn rules.
+async fn spawn_octos(
+    host: &Host,
+    launch: hagency_platform::Launch,
+    limits: Limits,
+    cancel: &Arc<AtomicBool>,
+    until: Instant,
+    report: &mut Report,
+) -> Result<(), Failure> {
+    let guardian = host.guardian.clone();
+    // ADR-183 decision D: the session's event wait and lifetime are the
+    // runtime ceiling, never the budget.
+    let session_limits = hagency_runtime::octos::session::Limits {
+        write_timeout_ms: limits.response_ms,
+        event_wait_ms: TURN_CEILING_MS,
+        lifetime_ms: TURN_CEILING_MS,
+    };
+    let spawn = tokio::task::spawn_blocking(move || {
+        OwnedOctosSession::spawn(&guardian, &launch, session_limits)
+    });
+    match bounded(spawn, cancel, until).await {
+        Ok(Ok(Ok(session))) => {
+            report.octos = Some(Box::new(session));
+            Ok(())
+        }
+        Ok(Ok(Err(error))) => {
+            report.startup_error = Some(error);
+            if let StartError::Uncertain { cleanup, .. } = error {
+                report.cleanup = cleanup;
+                if stopped(cleanup)
+                    && let Some(live) = &mut report.live
+                {
+                    live.release();
+                }
+            } else if let Some(live) = &mut report.live {
+                live.release();
+            }
+            Err(Failure::SpawnFailed)
+        }
+        Ok(Err(_)) => {
+            if let Some(live) = &mut report.live {
+                live.release();
+            }
+            Err(Failure::SpawnFailed)
+        }
+        Err(Failure::Deadline) => {
+            report.cleanup = Cleanup::Unknown {
+                kind: std::io::ErrorKind::TimedOut,
+            };
+            Err(Failure::SpawnFailed)
+        }
+        Err(failure) => Err(failure),
+    }
+}
+/// What one Octos dispatch borrows from `execute` (ADR-193).
+struct OctosTurn<'a> {
+    domain: &'a DomainStore,
+    cap: &'a RunnerCapability,
+    host: &'a Arc<Host>,
+    limits: Limits,
+    budget: &'a Budget,
+    expected: &'a str,
+    cancel: &'a Arc<AtomicBool>,
+    until: Instant,
+    ceiling: Instant,
+}
+/// The prepared session of one Octos dispatch (ADR-193).
+struct OctosSession {
+    prompt: String,
+    profile: String,
+    session: String,
+    turn: String,
+    workspace: String,
+}
+/// One Octos dispatch on a fresh guardian-owned `octos serve --stdio`
+/// (ADR-193), between the shared admission in `execute` and the shared
+/// `settle`: hello, the fixed permission profile, a fresh session on the
+/// workspace and one turn, then every event until Octos reports the session
+/// idle, its sub-agents' work and continuation turns included. The reply is
+/// the last turn's. An approval request refuses the dispatch until Octos
+/// approvals become owner cards. The child is stopped before this returns.
+async fn run_octos_turn(
+    turn: OctosTurn<'_>,
+    launch: hagency_platform::Launch,
+    prepared: OctosSession,
+    report: &mut Report,
+) -> Result<(), Failure> {
+    use hagency_runtime::octos::{
+        Outcome as OctosOutcome,
+        session::{Event, Permissions},
+    };
+    let OctosTurn {
+        domain,
+        cap,
+        host,
+        limits,
+        budget,
+        expected,
+        cancel,
+        until,
+        ceiling,
+    } = turn;
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::SpawnStarted,
+        serde_json::json!({}),
+    )
+    .await;
+    spawn_octos(host, launch, limits, cancel, until, report).await?;
+    let session = report.octos.as_mut().ok_or(Failure::SpawnFailed)?;
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::SpawnDone,
+        serde_json::json!({"pid": session.id(), "warm": false}),
+    )
+    .await;
+    let refused = |_: hagency_runtime::octos::session::Error| Failure::Protocol;
+    let mut text = None;
+    let mut ended = false;
+    let mut failure = String::new();
+    let status = &mut report.canonical_status;
+    let usage = report.usage.as_mut().ok_or(Failure::UsageBinding)?;
+    let drive = async {
+        watched_with(
+            session.hello(),
+            refused,
+            domain,
+            cap,
+            expected,
+            cancel,
+            until,
+            status,
+        )
+        .await?;
+        note(
+            domain,
+            cap,
+            hagency_store::AttemptPhase::Initialized,
+            serde_json::json!({}),
+        )
+        .await;
+        // Every owned dispatch holds its exclusive workspace lease.
+        watched_with(
+            session.open(
+                &prepared.session,
+                &prepared.profile,
+                &prepared.workspace,
+                Permissions::WorkspaceWrite,
+            ),
+            refused,
+            domain,
+            cap,
+            expected,
+            cancel,
+            until,
+            status,
+        )
+        .await?;
+        watched_with(
+            session.start_turn(&prepared.turn, &prepared.prompt),
+            refused,
+            domain,
+            cap,
+            expected,
+            cancel,
+            ceiling,
+            status,
+        )
+        .await?;
+        // The usage source exists once the dispatch's turn is accepted.
+        usage.attach(&**session);
+        note(
+            domain,
+            cap,
+            hagency_store::AttemptPhase::TurnStarted,
+            serde_json::json!({"session_id": session.session_id(), "turn_id": session.dispatch_turn()}),
+        )
+        .await;
+        loop {
+            let event = watched_with(
+                session.next(),
+                refused,
+                domain,
+                cap,
+                expected,
+                cancel,
+                ceiling,
+                status,
+            )
+            .await?;
+            // Usage first: each terminal's, then the session's at idle.
+            if let Some(observation) = session.last_observation()
+                && usage.observe(observation)
+            {
+                // Storage refusal closes capture only, as for Codex.
+                let _ = bounded(usage.record_pending(), cancel, ceiling).await?;
+            }
+            match event {
+                Event::Idle(idle) => {
+                    ended = true;
+                    match (idle.outcome, idle.reply) {
+                        (OctosOutcome::Completed, Some(reply)) => text = Some(reply),
+                        (outcome, _) => {
+                            let code = idle.error_code.unwrap_or_default();
+                            failure = format!("{outcome:?}: {code}").chars().take(512).collect();
+                        }
+                    }
+                    return Ok(());
+                }
+                Event::Approval { .. } => return Err(Failure::UnsupportedApproval),
+                // No host tool is registered on the session yet.
+                Event::ToolCall { .. } => return Err(Failure::Protocol),
+                Event::TurnStarted { .. }
+                | Event::TurnEnded { .. }
+                | Event::ApprovalSettled { .. } => {}
+            }
+        }
+    };
+    // ADR-183 decision D: the budget only notifies under the turn.
+    let (drive, over_budget) = budget.watch(drive, domain, cap).await;
+    report.over_budget = over_budget;
+    report.protocol = match text {
+        Some(text) => {
+            report.text = Some(text);
+            Protocol::Completed
+        }
+        None if ended => Protocol::Failed,
+        None => Protocol::Unknown,
+    };
+    if matches!(drive, Err(Failure::SettlementUnknown)) && report.protocol == Protocol::Completed {
+        report.protocol = Protocol::Unknown;
+    }
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::StopRequested,
+        serde_json::json!({}),
+    )
+    .await;
+    let session = report.octos.as_mut().ok_or(Failure::Worker)?;
+    report.cleanup = session.stop();
+    report.exit_identity = session.exit_identity();
+    report.stderr_tail = session.stderr_tail(512);
+    report.guardian_stderr_tail = session.guardian_stderr_tail();
+    report.turn_failure = failure;
+    drive
+}
 /// What one Claude turn borrows from `execute` (ADR-192).
 struct ClaudeTurn<'a> {
     domain: &'a DomainStore,
@@ -1883,7 +2142,9 @@ async fn execute(
     let approval_may_write = match &runner {
         crate::host::PreparedRunner::Codex { settings, .. } => !settings.is_read_only(),
         // Every owned dispatch holds its exclusive workspace lease (ADR-192).
-        crate::host::PreparedRunner::Claude { .. } => true,
+        crate::host::PreparedRunner::Claude { .. } | crate::host::PreparedRunner::Octos { .. } => {
+            true
+        }
     };
     if let Some(live) = &mut report.live {
         live.possible();
@@ -1950,6 +2211,41 @@ async fn execute(
                 prompt,
                 helper,
                 retained,
+                report,
+            )
+            .await;
+            return settle(
+                domain, cap, &host, report, drive, &scope, started, expected, cancel, ceiling,
+            )
+            .await;
+        }
+        crate::host::PreparedRunner::Octos {
+            prompt,
+            profile,
+            session,
+            turn,
+            workspace,
+        } => {
+            let drive = run_octos_turn(
+                OctosTurn {
+                    domain,
+                    cap,
+                    host: &host,
+                    limits,
+                    budget,
+                    expected: &expected,
+                    cancel,
+                    until,
+                    ceiling,
+                },
+                launch,
+                OctosSession {
+                    prompt,
+                    profile,
+                    session,
+                    turn,
+                    workspace,
+                },
                 report,
             )
             .await;
@@ -2343,6 +2639,7 @@ async fn settle(
         report.text = None; // Stored explicit content is the sole final body.
         report.owner.take();
         report.claude.take();
+        report.octos.take();
         note(
             domain,
             cap,
@@ -2375,6 +2672,7 @@ async fn settle(
     report.settlement = Settlement::Completed;
     report.owner.take();
     report.claude.take();
+    report.octos.take();
     note(
         domain,
         cap,

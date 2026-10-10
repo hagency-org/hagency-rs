@@ -28,6 +28,8 @@ mod claude_live;
 mod idle;
 #[path = "owned/inspection.rs"]
 mod inspection;
+#[path = "owned/octos.rs"]
+mod octos;
 #[path = "owned/receive.rs"]
 mod receive;
 #[path = "owned/registration.rs"]

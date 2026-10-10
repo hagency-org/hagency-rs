@@ -31,6 +31,10 @@ impl Fixture {
         if framework == "claude" {
             pool.model = "claude-opus-5".into();
         }
+        if framework == "octos" {
+            pool.model = "kimi-k3".into();
+            pool.octos_profile = Some("coding".into());
+        }
         pool.provider = provider.map(str::to_owned);
         // An empty word is no reasoning setting, as Claude resources carry.
         pool.reasoning = (!reasoning.is_empty()).then(|| reasoning.into());
@@ -604,6 +608,31 @@ fn native_owned_claim_profile_unsupported_and_shared_lease() {
             .unwrap()
             .dispatch_id,
         "exclusive"
+    );
+}
+
+/// ADR-193: an Octos dispatch is claimable by its agent's own runtime when its
+/// resource names the profile it runs and carries no reasoning setting; with
+/// one, it stays unclaimed.
+#[test]
+fn native_owned_claim_profile_claims_an_octos_dispatch() {
+    let mut f = Fixture::with_runtime("octos", Some("moonshot"), "");
+    f.queue("octos", "work");
+    let profile = f.profile("DEVICE_1", RoomPrivacy::Group {});
+    assert_eq!(
+        f.db.claim_owned_dispatch_for_host(&profile, "host", 2000, 60_000, 60_000, 1)
+            .unwrap()
+            .unwrap()
+            .dispatch_id,
+        "octos"
+    );
+    let mut f = Fixture::with_runtime("octos", Some("moonshot"), "medium");
+    f.queue("reasoning", "work");
+    let profile = f.profile("DEVICE_1", RoomPrivacy::Group {});
+    assert!(
+        f.db.claim_owned_dispatch_for_host(&profile, "host", 2000, 60_000, 60_000, 1)
+            .unwrap()
+            .is_none()
     );
 }
 

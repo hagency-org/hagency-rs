@@ -40,21 +40,65 @@ fn app_server_arguments() -> Vec<OsString> {
     vec!["app-server".into()]
 }
 
-/// Which coding agent a Host launches (ADR-192). Fixed when the host is built:
-/// a resource of the other framework is refused by name before any workspace
-/// or process work.
+/// Which coding agent a Host launches (ADR-192, ADR-193). Fixed when the host
+/// is built: a resource of another framework is refused by name before any
+/// workspace or process work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Runner {
     Codex,
     Claude,
+    Octos,
 }
 impl Runner {
     pub fn framework(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Octos => "octos",
         }
     }
+}
+/// The frameworks a Host can run, each refused by name on another runner.
+fn native_framework(framework: &str) -> bool {
+    matches!(framework, "codex" | "claude" | "octos")
+}
+/// A provider key never reaches Octos: it uses the keys in its own store
+/// (ADR-193 decision 3, operator decision 2).
+fn provider_key(key: &std::ffi::OsStr) -> bool {
+    let key = key.to_string_lossy().to_ascii_uppercase();
+    ["_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN"]
+        .iter()
+        .any(|suffix| key.ends_with(suffix))
+}
+/// The dispatch attempt's session key and turn ID (ADR-193): fresh per
+/// attempt, and traceable to it. The turn ID is a canonical lowercase UUID
+/// (version 8, whose bits carry the attempt's digest).
+fn octos_names(
+    profile: &str,
+    capability: &RunnerCapability,
+) -> Result<(String, String), super::Failure> {
+    let digest = hagency_core::canonical::digest(&serde_json::json!([
+        "octos_attempt",
+        capability.dispatch_id,
+        capability.fence
+    ]))
+    .map_err(|_| super::Failure::Admission)?;
+    let hex = digest.get(..32).ok_or(super::Failure::Admission)?;
+    let variant = match hex.as_bytes()[16] {
+        b'0'..=b'3' => '8',
+        b'4'..=b'7' => '9',
+        b'8'..=b'b' => 'a',
+        _ => 'b',
+    };
+    let turn = format!(
+        "{}-{}-8{}-{variant}{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    );
+    Ok((format!("{profile}:local:hagency-{hex}"), turn))
 }
 
 /// One operation uses a 100 ms..20 min absolute monotonic execution deadline.
@@ -99,6 +143,8 @@ pub struct Host {
     workspaces: Workspaces,
     managed_account: Option<hagency_store::ManagedAccount>,
     pub(crate) local_codex: Option<Arc<crate::LocalCodex>>,
+    /// ADR-193: the private root of the Octos agents' instance directories.
+    octos_instances: Option<PathBuf>,
     task_helper: Option<(PathBuf, SocketAddr)>,
     pub(crate) task_context: Option<Arc<hagency_store::task_context::RetainedTaskContext>>,
     file_tools: bool,
@@ -184,6 +230,7 @@ impl Host {
             workspaces,
             managed_account: None,
             local_codex: None,
+            octos_instances: None,
             task_helper: None,
             task_context: None,
             file_tools: false,
@@ -209,10 +256,11 @@ impl Host {
         account: hagency_store::ManagedAccount,
     ) -> Result<Self, super::Failure> {
         // Managed accounts are Codex homes; a Claude host signs in through the
-        // user's own folder only (ADR-192 decision 7).
+        // user's own folder only (ADR-192 decision 7), and Octos uses the keys
+        // in its own store (ADR-193).
         if self.managed_account.is_some()
             || self.local_codex.is_some()
-            || self.runner == Runner::Claude
+            || self.runner != Runner::Codex
         {
             return Err(super::Failure::Admission);
         }
@@ -232,6 +280,7 @@ impl Host {
         let matching = match self.runner {
             Runner::Codex => local.provider() == crate::LocalProvider::Codex,
             Runner::Claude => local.provider() == crate::LocalProvider::Claude,
+            Runner::Octos => false,
         };
         if self.managed_account.is_some() || self.local_codex.is_some() || !matching {
             return Err(super::Failure::Admission);
@@ -250,6 +299,24 @@ impl Host {
             return Err(super::Failure::Admission);
         }
         self.runner = Runner::Claude;
+        Ok(self)
+    }
+    /// Launch Octos instead of Codex (ADR-193): one `octos serve --stdio` per
+    /// dispatch. `instances` is the private root, created when absent, that
+    /// holds each Octos agent's own instance directory (its serve lock and
+    /// stores). A managed account or a local folder binding refuses it.
+    pub fn with_octos_runner(mut self, instances: PathBuf) -> Result<Self, super::Failure> {
+        if self.runner != Runner::Codex
+            || self.managed_account.is_some()
+            || self.local_codex.is_some()
+            || !instances.is_absolute()
+            || instances.as_os_str().len() > 512
+        {
+            return Err(super::Failure::Admission);
+        }
+        hagency_store::private::directory(&instances).map_err(|_| super::Failure::Admission)?;
+        self.runner = Runner::Octos;
+        self.octos_instances = Some(instances);
         Ok(self)
     }
     pub fn runner(&self) -> Runner {
@@ -414,7 +481,7 @@ impl Host {
         // and the workspace get/check so "no process and no workspace work" is
         // literal, and distinct from the generic Admission refusal below.
         let framework = scope.resource().framework.as_str();
-        if framework != self.runner.framework() && matches!(framework, "codex" | "claude") {
+        if framework != self.runner.framework() && native_framework(framework) {
             return Err(super::Failure::UnsupportedRunner {
                 framework: framework.to_owned(),
             });
@@ -476,6 +543,9 @@ impl Host {
         }
         if self.runner == Runner::Claude {
             return self.prepare_claude(scope, capability, limits, task_context, path, root);
+        }
+        if self.runner == Runner::Octos {
+            return self.prepare_octos(scope, capability, limits, path, root);
         }
         let resource = scope.resource();
         if resource.framework != "codex"
@@ -686,6 +756,96 @@ impl Host {
             },
         })
     }
+    /// ADR-193: the Octos half of `prepare_bound`, after the shared workspace
+    /// and custody checks. One `octos serve --stdio` on the dispatch's
+    /// workspace with the agent's own instance directory, network denied. The
+    /// resource names the profile it runs; no provider key reaches Octos.
+    fn prepare_octos(
+        &self,
+        scope: &OwnedDispatchScope,
+        capability: &RunnerCapability,
+        limits: Limits,
+        path: PathBuf,
+        root: Arc<Root>,
+    ) -> Result<Prepared, super::Failure> {
+        let resource = scope.resource();
+        let profile = resource
+            .octos_profile
+            .clone()
+            .ok_or(super::Failure::Admission)?;
+        if resource.framework != "octos"
+            || resource.reasoning.is_some()
+            || scope.requires_managed_account()
+            || !hagency_runtime::octos::profile_id(&profile)
+        {
+            return Err(super::Failure::Admission);
+        }
+        // Every byte comes from the immutable dispatch payload. This informational
+        // text grants neither task maintenance, process authority nor approval.
+        let prompt = hagency_core::canonical::encode_payload(&scope.input().payload)
+            .map_err(|_| super::Failure::Admission)?;
+        if prompt.is_empty() || prompt.len() > hagency_runtime::octos::MAX_TEXT_BYTES {
+            return Err(super::Failure::Admission);
+        }
+        let instances = self
+            .octos_instances
+            .as_ref()
+            .ok_or(super::Failure::Admission)?;
+        // One short private directory per agent: one serve at a time holds it.
+        let agent = hagency_core::canonical::digest(&serde_json::json!([
+            "octos_instance",
+            scope.engagement_id()
+        ]))
+        .map_err(|_| super::Failure::Admission)?;
+        let instance = instances.join(agent.get(..16).ok_or(super::Failure::Admission)?);
+        hagency_store::private::directory(&instance).map_err(|_| super::Failure::Admission)?;
+        // Hagency's own settings (decision 3): Octos reads neither a project's
+        // `.octos/config.json` nor the user's config.
+        let config = instance.join("hagency-octos-config.json");
+        hagency_store::private::replace(&config, hagency_runtime::octos::CONFIG)
+            .map_err(|_| super::Failure::Admission)?;
+        // The one file Octos writes into a writable workspace stays out of Git.
+        root.exclude_from_git(&format!("/{}", hagency_runtime::octos::WORKSPACE_POLICY))?;
+        let arguments = hagency_runtime::octos::serve_arguments(
+            path.to_str().ok_or(super::Failure::Admission)?,
+            instance.to_str().ok_or(super::Failure::Admission)?,
+            config.to_str().ok_or(super::Failure::Admission)?,
+        )
+        .map_err(|_| super::Failure::Admission)?
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let mut environment = self.environment.clone();
+        environment.retain(|key, _| !provider_key(key));
+        // First use would otherwise download a 334 MB embedding model.
+        environment.insert("OCTOS_NO_MODEL_DOWNLOAD".into(), "1".into());
+        let launch = Launch {
+            executable: self.executable.clone(),
+            arguments,
+            directory: path.clone(),
+            environment,
+            require_crash_containment: false,
+        };
+        launch.validate().map_err(|_| super::Failure::Admission)?;
+        let (session, turn) = octos_names(&profile, capability)?;
+        Ok(Prepared {
+            launch,
+            io_limits: transport::Limits {
+                write_timeout_ms: limits.response_ms,
+                event_wait_ms: limits.operation_ms,
+                lifetime_ms: limits.operation_ms,
+            },
+            root,
+            account: None,
+            runner: PreparedRunner::Octos {
+                prompt,
+                profile,
+                session,
+                turn,
+                workspace: path.to_str().ok_or(super::Failure::Admission)?.to_owned(),
+            },
+        })
+    }
     fn launch(
         &self,
         path: std::path::PathBuf,
@@ -715,20 +875,22 @@ impl Host {
         }
         let resource = scope.resource();
         // ADR-192: the agent's own runner, by name; then its provider.
-        if resource.framework != self.runner.framework()
-            && matches!(resource.framework.as_str(), "codex" | "claude")
-        {
+        if resource.framework != self.runner.framework() && native_framework(&resource.framework) {
             return Err(super::Failure::UnsupportedRunner {
                 framework: resource.framework.clone(),
             });
         }
+        // An Octos profile names its own provider (ADR-193 decision 7).
         let provider = match self.runner {
-            Runner::Codex => "openai",
-            Runner::Claude => "anthropic",
+            Runner::Codex => Some("openai"),
+            Runner::Claude => Some("anthropic"),
+            Runner::Octos => None,
         };
         if resource.framework != self.runner.framework()
-            || resource.provider.as_deref().is_some_and(|v| v != provider)
-            || (self.runner == Runner::Claude && resource.reasoning.is_some())
+            || provider
+                .is_some_and(|provider| resource.provider.as_deref().is_some_and(|v| v != provider))
+            || (self.runner != Runner::Codex && resource.reasoning.is_some())
+            || (self.runner == Runner::Octos && resource.octos_profile.is_none())
         {
             return Err(super::Failure::Admission);
         }
@@ -761,9 +923,10 @@ impl Host {
             return Err(super::Failure::Admission);
         }
         let resource = scope.resource();
-        // A warm child is an app server; a Claude agent starts its session on
-        // demand until ADR-192's ready-ahead session lands.
-        if resource.framework == "claude" || self.runner == Runner::Claude {
+        // A warm child is an app server; Claude and Octos agents start their
+        // session on demand until a ready-ahead session lands (ADR-192, ADR-193).
+        if matches!(resource.framework.as_str(), "claude" | "octos") || self.runner != Runner::Codex
+        {
             return Err(super::Failure::UnsupportedRunner {
                 framework: resource.framework.clone(),
             });
@@ -867,6 +1030,15 @@ pub(crate) enum PreparedRunner {
         prompt: String,
         helper: Option<hagency_runtime::claude::TaskMcp>,
         retained: bool,
+    },
+    /// ADR-193: the profile the resource names, this attempt's fresh session
+    /// key and turn ID, and the workspace Octos must bind.
+    Octos {
+        prompt: String,
+        profile: String,
+        session: String,
+        turn: String,
+        workspace: String,
     },
 }
 
