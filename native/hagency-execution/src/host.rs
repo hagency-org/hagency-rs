@@ -119,8 +119,11 @@ impl Limits {
             && (10..=2_000).contains(&self.response_ms)
             && self.response_ms <= self.operation_ms
     }
-    /// Host claim lifetime only. The short renewable lease remains independent;
-    /// this never extends an existing capability or operation deadline.
+    /// The shortest claim window this budget needs, checked when the
+    /// configuration loads. The fleet driver claims the runtime ceiling
+    /// (`MAX_OWNED_CAPABILITY_MS`, ADR-183 decision D) so a turn is not cut at
+    /// its budget. The short renewable lease remains independent; this never
+    /// extends an existing capability or operation deadline.
     pub fn capability_ms(self) -> Result<u64, super::Failure> {
         if !self.validate() {
             return Err(super::Failure::Admission);

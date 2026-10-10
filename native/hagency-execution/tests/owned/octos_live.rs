@@ -59,6 +59,9 @@ async fn run(octos: &Path, profile: &str, scenario: &Scenario) -> Value {
     .unwrap()
     .with_octos_runner(f.root.path().join("octos"))
     .unwrap()
+    // Its task tools are served by the offline helper (ADR-193 decision 5).
+    .with_task_helper(binary(), "127.0.0.1:13300".parse().unwrap())
+    .unwrap()
     .with_approvals(ApprovalHost::new(4, 2, 120_000, 10_000).unwrap())
     .unwrap();
     let limits = Limits {
