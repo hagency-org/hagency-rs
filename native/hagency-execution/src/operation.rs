@@ -1179,7 +1179,7 @@ fn tool_kind(name: &str) -> &'static str {
         _ => "tool",
     }
 }
-fn activity_id(id: &str) -> String {
+pub(crate) fn activity_id(id: &str) -> String {
     format!("{:x}", Sha256::digest(id.as_bytes()))
 }
 /// Claude Code's own tool blocks in the activity vocabulary (ADR-192): a

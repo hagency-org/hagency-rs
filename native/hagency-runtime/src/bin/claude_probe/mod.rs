@@ -275,7 +275,16 @@ pub(super) fn run_task(mode: &str, marker: &Path) -> io::Result<()> {
                 permission(index)?;
                 let response = read(&mut stdin)?;
                 record(marker, &response)?;
-                if response["response"]["response"]["behavior"] != "allow" {
+                let allow = response["response"]["response"]["behavior"] == "allow";
+                // The tool's own result, allowed or refused, as Claude Code
+                // reports it once the tool returns.
+                emit(
+                    json!({"type":"user","session_id":"owned-claude","uuid":format!("result-{index}"),
+                    "parent_tool_use_id":null,"message":{"role":"user","content":[
+                        {"type":"tool_result","tool_use_id":format!("owned-tool-{index}"),
+                         "content":if allow { "ok" } else { "denied" },"is_error":!allow}]}}),
+                )?;
+                if !allow {
                     allowed = false;
                     break;
                 }

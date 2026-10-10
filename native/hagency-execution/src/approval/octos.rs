@@ -53,6 +53,12 @@ pub(crate) struct Entry {
     /// Octos settled the approval itself: cancelled, timed out or decided
     /// elsewhere.
     resolved: bool,
+    /// The tool call a typed command approval is for, whose end ends it.
+    tool_call: Option<String>,
+    /// That end was seen (`applied` recorded).
+    applied: bool,
+    /// The store's application of this request's answer, once authorized.
+    application: Option<hagency_core::approvals::ApprovalApplication>,
 }
 impl Entry {
     pub(super) fn written(&self) -> bool {
@@ -249,6 +255,10 @@ impl Callbacks {
         let expires_at = millis(response_deadline)?;
         let context = self.context.as_ref().ok_or(Failure::Admission)?;
         let item = opaque(approval_id);
+        let tool_call = params["typed_details"]["command"]["tool_call_id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .map(str::to_owned);
         let request = HostApprovalRequest {
             context_id: context.id.clone(),
             upstream_id: ApprovalRpcId::String(approval_id.to_owned()),
@@ -278,6 +288,9 @@ impl Callbacks {
                 expired: false,
                 recorded: false,
                 resolved: false,
+                tool_call,
+                applied: false,
+                application: None,
             },
         );
         // The reservation and callback are retained before the request.
@@ -376,6 +389,30 @@ impl OctosDrive<'_> {
                     self.status,
                 )
                 .await?;
+                (None, Ok(false))
+            }
+            Event::Tool {
+                tool_call_id,
+                ended: true,
+                ..
+            } => {
+                // The answered call ending is its decision taking effect.
+                for entry in callbacks.octos.values_mut() {
+                    if let (false, Some(application), Some(call)) =
+                        (entry.applied, &entry.application, &entry.tool_call)
+                        && (entry.write.is_some() || entry.in_flight)
+                        && call == tool_call_id
+                    {
+                        entry.applied = true;
+                        super::observe_applied(self.domain, application, "octos tool ended").await;
+                    }
+                }
+                crate::operation::record_activity(
+                    self.domain,
+                    self.cap,
+                    crate::operation::octos_activity(&event),
+                )
+                .await;
                 (None, Ok(false))
             }
             Event::Tool { .. } => {
@@ -615,11 +652,11 @@ impl ApprovalRun {
                 let context = self.callbacks.context.as_ref().ok_or(Failure::Admission)?;
                 let entry = self.callbacks.octos.get(key).ok_or(Failure::Protocol)?;
                 matches(&grant, key, entry, context)?;
-                self.callbacks
-                    .octos
-                    .get_mut(key)
-                    .ok_or(Failure::Protocol)?
-                    .grant = Some(grant);
+                let entry = self.callbacks.octos.get_mut(key).ok_or(Failure::Protocol)?;
+                // Kept for the application observation: the grant itself
+                // travels with the frame while it is in flight.
+                entry.application = Some(grant.application().clone());
+                entry.grant = Some(grant);
                 if authorized.terminal? {
                     return Ok(());
                 }

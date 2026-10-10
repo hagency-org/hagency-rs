@@ -289,11 +289,13 @@ pub(super) fn responses(f: &Fixture) -> Vec<serde_json::Value> {
 /// outcome, not a lost receipt — and the trace names that ordering, so the
 /// assertion is keyed off the trace, not the wire count.
 pub(super) fn unconfirmed(f: &Fixture) {
-    assert_eq!(
-        f.count("SELECT COUNT(*) FROM owner_approvals WHERE state='applied'"),
-        0
-    );
     let recorded = f.count("SELECT COUNT(*) FROM approval_responses WHERE write_accepted=1");
+    // An approval is applied only once its answer was written and the
+    // answered item was seen completing: never more often than that.
+    assert!(
+        f.count("SELECT COUNT(*) FROM owner_approvals WHERE state='applied'") <= recorded,
+        "an approval applied without its written answer"
+    );
     let expected = responses(f).len() as u64;
     let trace = hagency_execution::diagnostics::dispatch_trace(&f.cap.dispatch_id);
     let quietly_resolved =

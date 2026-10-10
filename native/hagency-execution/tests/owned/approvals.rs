@@ -94,6 +94,12 @@ async fn native_owned_mcp_approval_once() {
             json!({"action":if choice==ApprovalChoice::Once {"accept"} else {"decline"},"content":null,"_meta":null})
         );
         unconfirmed(&f);
+        // The answered item completed: accepted or declined, the decision
+        // took effect.
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM owner_approvals WHERE state='applied'"),
+            1
+        );
     }
 }
 
@@ -491,10 +497,9 @@ async fn native_owned_approval_owner_wait_expiry_declines_and_continues() {
         .await
         .unwrap();
     assert_eq!(summary.choice, Some(ApprovalChoice::Deny));
-    assert_eq!(
-        summary.state, "applying",
-        "consumed once, never re-consumable"
-    );
+    // Consumed once, never re-consumable; the declined item's completion is
+    // the decision taking effect.
+    assert_eq!(summary.state, "applied");
     assert_eq!(
         expiry_reason(&f, &request.request_id).as_deref(),
         Some("owner wait expired without an answer")
