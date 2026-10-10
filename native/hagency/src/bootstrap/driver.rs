@@ -833,10 +833,16 @@ async fn run(input: Attempt<'_>) -> Result<Option<Completed>, Failure> {
         None
     };
     status.phase("claiming");
-    let capability_ms = limits.capability_ms().map_err(|_| Failure::Config {
+    limits.capability_ms().map_err(|_| Failure::Config {
         field: "matrix limits capability budget",
         fix: "request pacing must admit one bounded capability window inside the operation budget",
     })?;
+    // The claim lasts as long as a turn may run: the runtime ceiling bounds a
+    // turn and the budget only notifies (ADR-183 decision D), so a run still
+    // working, or waiting on its owner's card, is not cut at its budget. The
+    // ceiling is the hard bound; the 5 s renewable lease still frees the
+    // claim of a host that died.
+    let capability_ms = hagency_core::tasks::MAX_OWNED_CAPABILITY_MS;
     let capability = domain
         .claim_owned_dispatch_for_host(profile, runner.into(), 60_000, capability_ms, max_live)
         .await

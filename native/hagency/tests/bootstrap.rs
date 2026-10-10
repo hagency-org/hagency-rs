@@ -939,6 +939,20 @@ async fn native_continuous_driver_operator_resolution() {
             Some("claimed"),
             "{phases:?}"
         );
+        // The claim lasts the runtime ceiling, not the budget (ADR-183 D):
+        // both the recorded window and the store's own expiry say so.
+        let claimed: String = sql
+            .query_row(
+                "SELECT detail FROM runner_attempt_events WHERE dispatch_id='dispatch' AND fence=1 AND phase='claimed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let claimed: serde_json::Value = serde_json::from_str(&claimed).unwrap();
+        assert_eq!(
+            claimed["capability_ms"],
+            hagency_core::tasks::MAX_OWNED_CAPABILITY_MS
+        );
         assert_eq!(
             phases.last().map(String::as_str),
             Some("failed"),
