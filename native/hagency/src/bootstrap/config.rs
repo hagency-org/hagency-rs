@@ -231,6 +231,25 @@ struct LocalCodex {
     home: PathBuf,
     codex_home: PathBuf,
 }
+/// ADR-192: the Claude Code runtime of an imported fleet, beside the Codex one.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaudeRuntimeConfig {
+    executable: PathBuf,
+    executable_sha256: String,
+    #[serde(default)]
+    local_claude: Option<LocalClaude>,
+}
+/// The user's own Claude Code sign-in folder (ADR-192 decision 7).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalClaude {
+    profile: String,
+    preset: String,
+    seat: String,
+    home: PathBuf,
+    config_dir: PathBuf,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Matrix {
@@ -1268,10 +1287,16 @@ fn workspace_map<'de, D: serde::Deserializer<'de>>(
 #[serde(deny_unknown_fields)]
 struct FleetRuntimeConfig {
     profile: String,
-    executable: PathBuf,
-    executable_sha256: String,
+    /// The Codex executable and its digest, together or not at all: a machine
+    /// may run Claude Code only (ADR-192).
+    #[serde(default)]
+    executable: Option<PathBuf>,
+    #[serde(default)]
+    executable_sha256: Option<String>,
     #[serde(default)]
     local_codex: Option<LocalCodex>,
+    #[serde(default)]
+    claude: Option<ClaudeRuntimeConfig>,
     #[serde(default)]
     send_file: bool,
     #[serde(default)]
@@ -1321,31 +1346,57 @@ pub(super) fn load_fleet_runtime(
             .local_codex
             .as_ref()
             .is_some_and(|local| local.profile != "provider_owned_codex_v1")
+        || config.claude.as_ref().is_some_and(|claude| {
+            claude
+                .local_claude
+                .as_ref()
+                .is_some_and(|local| local.profile != "provider_owned_claude_v1")
+        })
     {
         return Err(Failure::Config {
             field: FIELD,
-            fix: "profile palpo_fleet_runtime_v1, idle_ms 100-1200000, and local_codex (if any) with profile provider_owned_codex_v1",
+            fix: "profile palpo_fleet_runtime_v1, idle_ms 100-1200000, local_codex (if any) with profile provider_owned_codex_v1, and claude.local_claude (if any) with profile provider_owned_claude_v1",
         });
     }
-    verify_executable(&config.executable, &config.executable_sha256)?;
+    let codex = match (config.executable, config.executable_sha256) {
+        (Some(executable), Some(digest)) => {
+            verify_executable(&executable, &digest)?;
+            Some(executable)
+        }
+        (None, None) if config.local_codex.is_none() && config.claude.is_some() => None,
+        _ => {
+            return Err(Failure::Config {
+                field: FIELD,
+                fix: "name the Codex executable with its executable_sha256, or a claude runtime instead (a local_codex block needs the Codex executable)",
+            });
+        }
+    };
+    if let Some(claude) = &config.claude {
+        verify_executable(&claude.executable, &claude.executable_sha256)?;
+    }
     let own = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|_| Failure::Config {
             field: "running executable path",
             fix: "the process executable path must be resolvable",
         })?;
-    let mut environment = BTreeMap::new();
-    if config.local_codex.is_none() {
+    let mut base = BTreeMap::new();
+    if let Some(system) = std::env::var_os("SystemRoot") {
+        base.insert("SystemRoot".into(), system);
+    }
+    let runtime_home = || {
         let runtime_home = state.join("runtime-home");
         private::directory(&runtime_home).map_err(|_| Failure::Config {
             field: "state-dir runtime-home",
             fix: "the runtime home must exist, be owner-private (0700) and writable",
         })?;
+        Ok::<_, Failure>(runtime_home)
+    };
+    let mut environment = base.clone();
+    if codex.is_some() && config.local_codex.is_none() {
+        let runtime_home = runtime_home()?;
         environment.insert("HOME".into(), runtime_home.clone().into_os_string());
         environment.insert("CODEX_HOME".into(), runtime_home.into_os_string());
-    }
-    if let Some(system) = std::env::var_os("SystemRoot") {
-        environment.insert("SystemRoot".into(), system);
     }
     let limits = Limits {
         operation_ms: config.operation_ms,
@@ -1359,33 +1410,40 @@ pub(super) fn load_fleet_runtime(
         field: "state-dir fleet-workspace",
         fix: "the directory must exist, be owner-private (0700) and writable",
     })?;
-    let mut host = Host::new(
-        own.clone(),
-        config.executable.clone(),
-        environment.clone(),
-        BTreeMap::from([("fleet_workspace".to_owned(), workspace)]),
-    )
-    .map_err(|_| Failure::Config {
-        field: FIELD,
-        fix: "the executable and workspace must form an execution host",
-    })?;
-    let uses_local_codex = config.local_codex.is_some();
-    if let Some(local) = config.local_codex {
-        let local = hagency_execution::LocalCodex::new(
-            local.preset,
-            local.seat,
-            local.home,
-            local.codex_home,
-        )
-        .map_err(|_| Failure::Config {
-            field: "fleet-runtime.json: local_codex",
-            fix: "preset, seat, home and codex_home must form a valid local codex binding",
-        })?;
-        host = host.with_local_codex(local).map_err(|_| Failure::Config {
-            field: "fleet-runtime.json: local_codex",
-            fix: "the execution host must accept the local codex binding",
-        })?;
-    }
+    let codex_host = match &codex {
+        Some(executable) => {
+            let mut host = Host::new(
+                own.clone(),
+                executable.clone(),
+                environment.clone(),
+                BTreeMap::from([("fleet_workspace".to_owned(), workspace)]),
+            )
+            .map_err(|_| Failure::Config {
+                field: FIELD,
+                fix: "the executable and workspace must form an execution host",
+            })?;
+            if let Some(local) = config.local_codex {
+                let local = hagency_execution::LocalCodex::new(
+                    local.preset,
+                    local.seat,
+                    local.home,
+                    local.codex_home,
+                )
+                .map_err(|_| Failure::Config {
+                    field: "fleet-runtime.json: local_codex",
+                    fix: "preset, seat, home and codex_home must form a valid local codex binding",
+                })?;
+                host = host.with_local_codex(local).map_err(|_| Failure::Config {
+                    field: "fleet-runtime.json: local_codex",
+                    fix: "the execution host must accept the local codex binding",
+                })?;
+                Some(host)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
     let contexts = state.join("factory-task-contexts");
     private::directory(&contexts).map_err(|_| Failure::Config {
         field: "state-dir factory-task-contexts",
@@ -1397,40 +1455,83 @@ pub(super) fn load_fleet_runtime(
             fix: "the warm task bridge must construct from the executable, listen address and contexts directory",
         }
     })?;
-    let mut warm = hagency_execution::WarmHostPlan::new(
-        own,
-        config.executable,
-        environment,
-        bridge,
-        approval_host(config.approval_owner_wait_ms, limits)?,
-        hagency_execution::WarmLimits {
-            initialize: Limits {
-                operation_ms: limits.operation_ms.min(30_000),
-                response_ms: limits.response_ms,
-            },
-            idle_ms: config.idle_ms,
+    let warm_limits = hagency_execution::WarmLimits {
+        initialize: Limits {
+            operation_ms: limits.operation_ms.min(30_000),
+            response_ms: limits.response_ms,
         },
-    )
-    .and_then(|plan| {
-        plan.with_file_access(config.file_limit, config.send_file, config.receive_file)
-    })
-    .map(|plan| {
-        if config.coordination_tools {
-            plan.with_coordination_tools()
-        } else {
-            plan
-        }
-    })
-    .map_err(|_| Failure::Config {
-        field: "fleet-runtime.json: plan",
-        fix: "the warm plan must apply the file, coordination and receive capabilities",
-    })?;
-    if uses_local_codex {
+        idle_ms: config.idle_ms,
+    };
+    let approvals = approval_host(config.approval_owner_wait_ms, limits)?;
+    let plan = match codex {
+        Some(executable) => hagency_execution::WarmHostPlan::new(
+            own,
+            executable,
+            environment,
+            bridge,
+            approvals,
+            warm_limits,
+        ),
+        None => hagency_execution::WarmHostPlan::without_codex(
+            own,
+            environment,
+            bridge,
+            approvals,
+            warm_limits,
+        ),
+    };
+    let mut warm = plan
+        .and_then(|plan| {
+            plan.with_file_access(config.file_limit, config.send_file, config.receive_file)
+        })
+        .map(|plan| {
+            if config.coordination_tools {
+                plan.with_coordination_tools()
+            } else {
+                plan
+            }
+        })
+        .map_err(|_| Failure::Config {
+            field: "fleet-runtime.json: plan",
+            fix: "the warm plan must apply the file, coordination and receive capabilities",
+        })?;
+    if let Some(host) = &codex_host {
         warm = warm
-            .with_local_codex_from_host(&host)
+            .with_local_codex_from_host(host)
             .map_err(|_| Failure::Config {
                 field: "fleet-runtime.json: local_codex",
                 fix: "the warm bridge must accept the host's local codex binding",
+            })?;
+    }
+    // ADR-192: Claude Code agents, with their own environment and binding.
+    if let Some(claude) = config.claude {
+        let mut claude_environment = base;
+        let local = match claude.local_claude {
+            Some(local) => Some(
+                hagency_execution::LocalCodex::new_claude(
+                    local.preset,
+                    local.seat,
+                    local.home,
+                    local.config_dir,
+                )
+                .map_err(|_| Failure::Config {
+                    field: "fleet-runtime.json: claude.local_claude",
+                    fix: "preset, seat, home and config_dir must form a valid local Claude binding",
+                })?,
+            ),
+            None => {
+                let runtime_home = runtime_home()?;
+                claude_environment.insert("HOME".into(), runtime_home.clone().into_os_string());
+                claude_environment
+                    .insert("CLAUDE_CONFIG_DIR".into(), runtime_home.into_os_string());
+                None
+            }
+        };
+        warm = warm
+            .with_claude(claude.executable, claude_environment, local)
+            .map_err(|_| Failure::Config {
+                field: "fleet-runtime.json: claude",
+                fix: "the Claude executable and binding must join the warm plan",
             })?;
     }
     let homes = hagency_store::agent_home::ManagedHomePlan::new(
@@ -1458,4 +1559,120 @@ pub(super) fn load_fleet_runtime(
             config.matrix_sdk_timeout_ms,
         )?,
     })
+}
+
+/// ADR-192: `fleet-runtime.json` may name a Codex runtime, a Claude Code
+/// runtime, or both; never neither, and never half of the Codex one.
+#[cfg(all(test, unix))]
+mod fleet_runtime_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    struct Fixture {
+        _root: tempfile::TempDir,
+        root: PathBuf,
+        state: PathBuf,
+    }
+    fn private_dir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fn fixture() -> Fixture {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let state = path.join("state");
+        for dir in [&state, &path.join("homes")] {
+            private_dir(dir);
+        }
+        for name in ["codex", "claude"] {
+            std::fs::write(path.join(name), format!("fixture {name} executable")).unwrap();
+        }
+        Fixture {
+            _root: root,
+            root: path,
+            state,
+        }
+    }
+    fn executable(f: &Fixture, name: &str) -> (PathBuf, String) {
+        let path = f.root.join(name);
+        let digest = Sha256::digest(std::fs::read(&path).unwrap())
+            .iter()
+            .map(|v| format!("{v:02x}"))
+            .collect();
+        (path, digest)
+    }
+    fn document(f: &Fixture) -> serde_json::Value {
+        serde_json::json!({
+            "profile": "palpo_fleet_runtime_v1",
+            "file_limit": 4194304, "operation_ms": 300000, "response_ms": 2000,
+            "idle_ms": 1200000,
+            "home": {"root": f.root.join("homes"),
+                "task_client": std::env::current_exe().unwrap(), "projects": []},
+        })
+    }
+    fn load(f: &Fixture, document: &serde_json::Value) -> Result<FleetRuntime, Failure> {
+        private::replace(
+            &f.state.join("fleet-runtime.json"),
+            &serde_json::to_vec(document).unwrap(),
+        )
+        .unwrap();
+        load_fleet_runtime(
+            &f.state,
+            "127.0.0.1:13300".parse().unwrap(),
+            "https://matrix.example.test",
+        )
+    }
+    #[test]
+    fn native_fleet_runtime_may_run_claude_only() {
+        let f = fixture();
+        let (claude, digest) = executable(&f, "claude");
+        let mut document = document(&f);
+        document["claude"] = serde_json::json!({"executable": claude, "executable_sha256": digest});
+        assert!(load(&f, &document).is_ok());
+    }
+    #[test]
+    fn native_fleet_runtime_may_run_codex_and_claude() {
+        let f = fixture();
+        let (codex, codex_digest) = executable(&f, "codex");
+        let (claude, claude_digest) = executable(&f, "claude");
+        let (home, config) = (f.root.join("user-home"), f.root.join("user-claude"));
+        private_dir(&home);
+        private_dir(&config);
+        let mut document = document(&f);
+        document["executable"] = serde_json::json!(codex);
+        document["executable_sha256"] = serde_json::json!(codex_digest);
+        document["claude"] = serde_json::json!({"executable": claude,
+            "executable_sha256": claude_digest,
+            "local_claude": {"profile": "provider_owned_claude_v1", "preset": "local_claude",
+                "seat": "local_claude_seat", "home": home, "config_dir": config}});
+        assert!(load(&f, &document).is_ok());
+    }
+    #[test]
+    fn native_fleet_runtime_refuses_no_runtime_or_half_of_codex() {
+        let f = fixture();
+        let (codex, codex_digest) = executable(&f, "codex");
+        let (claude, claude_digest) = executable(&f, "claude");
+        let claude_block =
+            serde_json::json!({"executable": claude, "executable_sha256": claude_digest});
+        // Neither runtime.
+        assert!(load(&f, &document(&f)).is_err());
+        // A Codex executable without its digest, beside a valid Claude runtime.
+        let mut half = document(&f);
+        half["executable"] = serde_json::json!(codex);
+        half["claude"] = claude_block.clone();
+        assert!(load(&f, &half).is_err());
+        // A Codex sign-in folder with no Codex executable.
+        let mut orphan = document(&f);
+        orphan["claude"] = claude_block.clone();
+        orphan["local_codex"] = serde_json::json!({"profile": "provider_owned_codex_v1",
+            "preset": "p", "seat": "s", "home": f.root, "codex_home": f.root});
+        assert!(load(&f, &orphan).is_err());
+        // A Claude folder block under the wrong profile.
+        let mut profile = document(&f);
+        profile["executable"] = serde_json::json!(codex);
+        profile["executable_sha256"] = serde_json::json!(codex_digest);
+        profile["claude"] = claude_block;
+        profile["claude"]["local_claude"] = serde_json::json!({"profile": "provider_owned_codex_v1",
+            "preset": "p", "seat": "s", "home": f.root, "config_dir": f.root});
+        assert!(load(&f, &profile).is_err());
+    }
 }

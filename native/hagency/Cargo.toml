@@ -76,5 +76,10 @@ path = "tests/fixtures/approval_mcp_peer.rs"
 name = "hagency-login-probe"
 path = "tests/fixtures/login_probe.rs"
 
+# ADR-192: the offline Claude Code peer for fleet tests (never a provider).
+[[bin]]
+name = "hagency-claude-probe"
+path = "../hagency-runtime/src/bin/hagency-runtime-probe.rs"
+
 [lints]
 workspace = true

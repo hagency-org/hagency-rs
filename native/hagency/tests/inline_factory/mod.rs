@@ -106,21 +106,30 @@ pub struct Fixture {
     service_mode: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub address: std::net::SocketAddr,
+    /// ADR-192: the agent's resource is Claude Code, served by the plan's
+    /// Claude runtime (the offline Claude peer), not the warm Codex child.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    claude: bool,
 }
 impl Fixture {
     pub async fn new(application_service: bool) -> Self {
-        Self::new_configured(application_service, false, false).await
+        Self::new_configured(application_service, false, false, false).await
     }
     pub async fn new_service(application_service: bool) -> Self {
-        Self::new_configured(application_service, false, true).await
+        Self::new_configured(application_service, false, true, false).await
     }
     pub async fn foreign_approval_writer() -> Self {
-        Self::new_configured(false, true, false).await
+        Self::new_configured(false, true, false, false).await
+    }
+    /// ADR-192: the target agent's resource is Claude Code.
+    pub async fn new_claude(application_service: bool) -> Self {
+        Self::new_configured(application_service, false, false, true).await
     }
     async fn new_configured(
         application_service: bool,
         foreign_writer: bool,
         service_mode: bool,
+        claude: bool,
     ) -> Self {
         // An already-managed project and unrelated external bootstrap agent.
         // ONLY that external agent uses fixture activation. The target factory
@@ -131,6 +140,17 @@ impl Fixture {
         repository.register(&reg()).unwrap();
         let pool = matrix::domain::resource("pool", "seat", 1000);
         repository.put_resource(&pool).unwrap();
+        let target = if claude {
+            let mut claude_pool = matrix::domain::resource("claude_pool", "seat", 1000);
+            claude_pool.framework = "claude".into();
+            claude_pool.provider = Some("anthropic".into());
+            claude_pool.model = "claude-opus-5".into();
+            claude_pool.reasoning = None;
+            repository.put_resource(&claude_pool).unwrap();
+            claude_pool
+        } else {
+            pool.clone()
+        };
         let mut request = matrix::domain::request("worker", "Worker", &pool, 100);
         request.target_project_id = "factory_project".into();
         request.target_room_id = PROJECT.into();
@@ -171,7 +191,10 @@ impl Fixture {
         )
         .unwrap();
         let fake = matrix::Fake::start(true).await;
-        let peer = Peer::new(application_service, fake.endpoint.clone()).await;
+        let mut peer = Peer::new(application_service, fake.endpoint.clone()).await;
+        if claude {
+            peer.target_resource = target.id();
+        }
         Self::assemble(
             base,
             fake,
@@ -179,6 +202,7 @@ impl Fixture {
             application_service,
             foreign_writer,
             service_mode,
+            claude,
         )
         .await
     }
@@ -192,6 +216,7 @@ impl Fixture {
         application_service: bool,
         foreign_writer: bool,
         service_mode: bool,
+        claude: bool,
     ) -> Self {
         let custody = hagency_store::Store::start(
             hagency_store::Repository::open(&base.root.path().join("runtime")).unwrap(),
@@ -305,6 +330,23 @@ impl Fixture {
         } else {
             warm
         };
+        // ADR-192: Claude agents run the offline Claude peer in its task mode.
+        let warm = if claude {
+            let claude_peer = PathBuf::from(env!("CARGO_BIN_EXE_hagency-claude-probe"))
+                .canonicalize()
+                .unwrap();
+            let mut claude_environment = BTreeMap::from([
+                ("PATH".into(), "".into()),
+                ("HAGENCY_OFFLINE_MODE".into(), "task".into()),
+            ]);
+            if let Some(system) = std::env::var_os("SystemRoot") {
+                claude_environment.insert("SystemRoot".into(), system);
+            }
+            warm.with_claude(claude_peer, claude_environment, None)
+                .unwrap()
+        } else {
+            warm
+        };
         let limits = matrix::factory_limits();
         let host = if application_service {
             TokenProvisioningHost::application_service(
@@ -410,6 +452,8 @@ impl Fixture {
             service_mode,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             address,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            claude,
         };
         {
             let cancel = CancellationToken::new();
@@ -468,6 +512,7 @@ impl Fixture {
             peer,
             application_service,
             service_mode,
+            claude,
             ..
         } = self;
         if reopen_domain {
@@ -477,7 +522,16 @@ impl Fixture {
             )
             .unwrap();
         }
-        Self::assemble(base, fake, peer, application_service, false, service_mode).await
+        Self::assemble(
+            base,
+            fake,
+            peer,
+            application_service,
+            false,
+            service_mode,
+            claude,
+        )
+        .await
     }
     pub async fn provision(&mut self) {
         let plan = HostIntakePlan::new(vec!["root".into()]).unwrap();
@@ -735,6 +789,8 @@ pub struct Peer {
     pub owner_join_delay: Option<Duration>,
     /// The reconciled profile name (board #11): GET → PUT → readback.
     displayname: Option<String>,
+    /// The resource the target agent's request names (ADR-192: a Claude one).
+    pub target_resource: String,
 }
 impl Peer {
     async fn new(application_service: bool, endpoint: String) -> Self {
@@ -765,6 +821,7 @@ impl Peer {
             owner_job: None,
             owner_join_delay: None,
             displayname: None,
+            target_resource: "resource_27cac5503836765cd10751d2".into(),
         }
     }
     fn project(&self) -> Value {
@@ -856,7 +913,7 @@ impl Peer {
                     vec![
                         json!({"event_id":"$factory_request","sender":OWNER,"type":"m.room.message","origin_server_ts":now(),"content":{"msgtype":"com.hagency.engagement.request.v1","body":json!({
                         "requestId":"factory_target","requester":OWNER,"project":"factory_project","projectRoomId":PROJECT,"role":"coding","requestedTokens":250,
-                        "ratePerDay":null,"agent":"FactoryAgent","context":{"agentDefinition":{"resourceId":"resource_27cac5503836765cd10751d2"}}}).to_string()}}),
+                        "ratePerDay":null,"agent":"FactoryAgent","context":{"agentDefinition":{"resourceId":self.target_resource}}}).to_string()}}),
                         json!({"event_id":"$factory_approve","sender":reg().representative_mxid,"type":"m.room.message","origin_server_ts":now(),"content":{"msgtype":"com.hagency.engagement.approval.v1","body":json!({"requestId":"factory_target","decision":"approve"}).to_string()}}),
                     ]
                 };

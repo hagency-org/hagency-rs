@@ -22,7 +22,8 @@ use tokio::time::Instant;
 /// serialization, cloning, private-account getter or caller-supplied readiness.
 pub struct WarmHostPlan {
     guardian: PathBuf,
-    executable: PathBuf,
+    /// The Codex executable; `None` on a machine that runs Claude Code only.
+    executable: Option<PathBuf>,
     environment: BTreeMap<OsString, OsString>,
     bridge: WarmTaskBridge,
     approvals: ApprovalHost,
@@ -30,6 +31,13 @@ pub struct WarmHostPlan {
     files: Option<(usize, bool, bool)>,
     coordination: bool,
     local_codex: Option<Arc<crate::LocalCodex>>,
+    claude: Option<ClaudePlan>,
+}
+/// ADR-192: what a Claude agent's Host is built from, beside the Codex plan.
+struct ClaudePlan {
+    executable: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+    local: Option<Arc<crate::LocalCodex>>,
 }
 /// The fixed native task helper, loopback origin and retained private context
 /// root form one Host capability. No getters, cloning or serialization.
@@ -45,6 +53,9 @@ pub struct FactoryRuntime {
     host: crate::SharedHost,
     domain: DomainStore,
     warm: Option<WarmRuntime>,
+    /// The bound of the store's provision completion for an agent with no
+    /// warm child (ADR-192); a warm child bounds its own.
+    activation_ms: u64,
     phase: Phase,
     last: Option<String>,
     cancelled: AtomicBool,
@@ -105,7 +116,7 @@ impl WarmHostPlan {
         }
         Ok(Self {
             guardian,
-            executable,
+            executable: Some(executable),
             environment,
             bridge,
             approvals,
@@ -113,7 +124,60 @@ impl WarmHostPlan {
             files: None,
             coordination: false,
             local_codex: None,
+            claude: None,
         })
+    }
+    /// ADR-192: a plan for a machine that runs Claude Code only. Add the Claude
+    /// runtime with `with_claude`; a Codex scope is refused by name.
+    pub fn without_codex(
+        guardian: PathBuf,
+        environment: BTreeMap<OsString, OsString>,
+        bridge: WarmTaskBridge,
+        approvals: ApprovalHost,
+        limits: WarmLimits,
+    ) -> Result<Self, Failure> {
+        if !limits.validate() || !guardian.is_absolute() || !guardian.is_file() {
+            return Err(Failure::Admission);
+        }
+        Ok(Self {
+            guardian,
+            executable: None,
+            environment,
+            bridge,
+            approvals,
+            limits,
+            files: None,
+            coordination: false,
+            local_codex: None,
+            claude: None,
+        })
+    }
+    /// ADR-192: also run Claude Code agents, from this executable and, when the
+    /// user's folder is bound, their local Claude binding. The environment is
+    /// the Claude agents' own; the Codex one is untouched.
+    pub fn with_claude(
+        mut self,
+        executable: PathBuf,
+        environment: BTreeMap<OsString, OsString>,
+        local: Option<crate::LocalCodex>,
+    ) -> Result<Self, Failure> {
+        if self.claude.is_some() || !executable.is_absolute() || !executable.is_file() {
+            return Err(Failure::Admission);
+        }
+        let local = local.map(Arc::new);
+        let mut environment = environment;
+        if let Some(local) = &local {
+            if local.provider() != crate::LocalProvider::Claude {
+                return Err(Failure::Admission);
+            }
+            local.apply(&mut environment)?;
+        }
+        self.claude = Some(ClaudePlan {
+            executable,
+            environment,
+            local,
+        });
+        Ok(self)
     }
     /// Pass the original Host's provider-owned binding without reopening it or
     /// exporting a credential/path capability. Per-agent task roots stay local.
@@ -162,6 +226,10 @@ impl WarmHostPlan {
         scope: OwnedProvisionScope,
         home: Arc<ManagedAgentHome>,
     ) -> Result<FactoryRuntime, Failure> {
+        if scope.resource().framework == "claude" {
+            return self.claude_runtime(domain, scope, home, false).await;
+        }
+        let executable = self.codex_executable()?;
         let until = Instant::now() + Duration::from_millis(self.limits.initialize.operation_ms);
         let account =
             tokio::time::timeout_at(until, domain.reattach_runtime_account(scope.clone()))
@@ -169,7 +237,6 @@ impl WarmHostPlan {
                 .map_err(|_| Failure::Deadline)?
                 .map_err(|error| Failure::lost(crate::AuthoritySite::FactoryAccount, &error))?;
         let guardian = self.guardian.clone();
-        let executable = self.executable.clone();
         let environment = self.environment.clone();
         let helper = self.bridge.helper.clone();
         let address = self.bridge.address;
@@ -177,6 +244,7 @@ impl WarmHostPlan {
         let files = self.files;
         let coordination = self.coordination;
         let local_codex = self.local_codex.clone();
+        let activation_ms = self.limits.initialize.response_ms;
         tokio::task::spawn_blocking(move || {
             if Instant::now() >= until {
                 return Err(Failure::Deadline);
@@ -237,6 +305,7 @@ impl WarmHostPlan {
                 host: host.into_shared(),
                 domain,
                 warm: None,
+                activation_ms,
                 phase: Phase::Reattached(Box::new(binding)),
                 last: None,
                 cancelled: AtomicBool::new(false),
@@ -251,6 +320,10 @@ impl WarmHostPlan {
         scope: OwnedProvisionScope,
         home: Arc<ManagedAgentHome>,
     ) -> Result<FactoryRuntime, Failure> {
+        if scope.resource().framework == "claude" {
+            return self.claude_runtime(domain, scope, home, true).await;
+        }
+        let executable = self.codex_executable()?;
         // The original deadline includes the original writer and blocking Host
         // preparation. start_at never grants a fresh initialization interval.
         let until = Instant::now() + Duration::from_millis(self.limits.initialize.operation_ms);
@@ -266,7 +339,6 @@ impl WarmHostPlan {
             .map_err(|_| Failure::Admission)?
             .into_std_file();
         let guardian = self.guardian.clone();
-        let executable = self.executable.clone();
         let environment = self.environment.clone();
         let helper = self.bridge.helper.clone();
         let address = self.bridge.address;
@@ -352,7 +424,113 @@ impl WarmHostPlan {
                 host,
                 domain,
                 warm: Some(warm),
+                activation_ms: limits.initialize.response_ms,
                 phase: Phase::Initial,
+                last: None,
+                cancelled: AtomicBool::new(false),
+            })
+        })
+        .await
+        .map_err(|_| Failure::Worker)?
+    }
+}
+impl WarmHostPlan {
+    fn codex_executable(&self) -> Result<PathBuf, Failure> {
+        self.executable
+            .clone()
+            .ok_or_else(|| Failure::UnsupportedRunner {
+                framework: "codex".into(),
+            })
+    }
+    /// ADR-192: a Claude agent's runtime. It has no warm child before its first
+    /// task: provisioning and a restart both attach it the way a restart
+    /// re-attaches a Codex agent, and every dispatch starts a fresh session.
+    /// `original` is provisioning: it takes the provision's original claim, as
+    /// a warm start does, so the activation may complete it.
+    async fn claude_runtime(
+        &self,
+        domain: DomainStore,
+        scope: OwnedProvisionScope,
+        home: Arc<ManagedAgentHome>,
+        original: bool,
+    ) -> Result<FactoryRuntime, Failure> {
+        let claude = self
+            .claude
+            .as_ref()
+            .ok_or_else(|| Failure::UnsupportedRunner {
+                framework: "claude".into(),
+            })?;
+        // Managed accounts are Codex homes; a Claude agent signs in through the
+        // user's own folder (ADR-192 decision 7).
+        if scope.requires_managed_account() {
+            return Err(Failure::Admission);
+        }
+        let until = Instant::now() + Duration::from_millis(self.limits.initialize.operation_ms);
+        let guardian = self.guardian.clone();
+        let executable = claude.executable.clone();
+        let environment = claude.environment.clone();
+        let local = claude.local.clone();
+        let helper = self.bridge.helper.clone();
+        let address = self.bridge.address;
+        let approvals = self.approvals.clone();
+        let files = self.files;
+        let activation_ms = self.limits.initialize.response_ms;
+        tokio::task::spawn_blocking(move || {
+            if Instant::now() >= until {
+                return Err(Failure::Deadline);
+            }
+            if original {
+                scope.claim_warm().map_err(|_| Failure::Admission)?;
+            }
+            let runtime_lease = scope.claim_runtime().map_err(|_| Failure::Admission)?;
+            let workspace = format!("work_{}", scope.engagement_id());
+            let work = home.workdir_path().map_err(|_| Failure::Admission)?;
+            let mut environment = environment;
+            if let Some(local) = &local {
+                local.admit_provision(&scope)?;
+                local.separate_from(&work)?;
+                local.apply(&mut environment)?;
+            } else {
+                let agent_home = home.home_path().map_err(|_| Failure::Admission)?;
+                environment.insert("HOME".into(), agent_home.clone().into_os_string());
+                environment.insert("CLAUDE_CONFIG_DIR".into(), agent_home.into_os_string());
+            }
+            let mut host = Host::new(
+                guardian,
+                executable,
+                environment,
+                BTreeMap::from([(workspace.clone(), work)]),
+            )?
+            .with_claude_runner()?
+            .with_task_helper(helper, address)?
+            .with_approvals(approvals)?;
+            if let Some((limit, send, receive)) = files {
+                host = host.with_file_limit(limit)?;
+                if send {
+                    host = host.with_file_tools()?;
+                }
+                if receive {
+                    host = host.with_receive_tools()?;
+                }
+            }
+            if let Some(local) = local.clone() {
+                host = host.with_retained_local_codex(local)?;
+            }
+            let root = host.reattach_root(&scope, &home, &workspace)?;
+            let binding = crate::warm::Binding::reattached(
+                scope,
+                runtime_lease,
+                home,
+                root,
+                workspace,
+                local,
+            );
+            Ok(FactoryRuntime {
+                host: host.into_shared(),
+                domain,
+                warm: None,
+                activation_ms,
+                phase: Phase::Reattached(Box::new(binding)),
                 last: None,
                 cancelled: AtomicBool::new(false),
             })
@@ -363,7 +541,22 @@ impl WarmHostPlan {
 }
 impl FactoryRuntime {
     pub async fn ready(&mut self) -> Result<(), Failure> {
-        self.warm.as_mut().ok_or(Failure::Admission)?.ready().await
+        match self.warm.as_mut() {
+            Some(warm) => warm.ready().await,
+            // ADR-192: a Claude agent has no warm child before its first task;
+            // it is ready while its own root and sign-in folder check.
+            None => self.attached_claude()?.check_attached(),
+        }
+    }
+    /// The binding of a Claude agent attached without a warm child, before its
+    /// first dispatch. Anything else has no attached-only readiness.
+    fn attached_claude(&self) -> Result<&crate::warm::Binding, Failure> {
+        match &self.phase {
+            Phase::Reattached(binding) if self.host.0.runner == crate::host::Runner::Claude => {
+                Ok(binding)
+            }
+            _ => Err(Failure::Admission),
+        }
     }
     /// What the warm child's idle re-qualification recorded (ADR-183
     /// decision D, warm rule); `None` once the child was handed off. For the
@@ -381,11 +574,22 @@ impl FactoryRuntime {
         }
     }
     pub async fn activate(&mut self) -> Result<hagency_core::project::Engagement, Failure> {
-        self.warm
-            .as_mut()
-            .ok_or(Failure::Admission)?
-            .activate()
-            .await
+        if let Some(warm) = self.warm.as_mut() {
+            return warm.activate().await;
+        }
+        // ADR-192: the store's provision completion, bracketed by the attached
+        // agent's own checks as a warm child brackets it with its process's.
+        let binding = self.attached_claude()?;
+        binding.check_attached()?;
+        let scope = binding.scope().clone();
+        let until = Instant::now() + Duration::from_millis(self.activation_ms);
+        let engagement =
+            tokio::time::timeout_at(until, self.domain.complete_original_provision(scope))
+                .await
+                .map_err(|_| Failure::Deadline)?
+                .map_err(|error| Failure::lost(crate::AuthoritySite::WarmProvision, &error))?;
+        self.attached_claude()?.check_attached()?;
+        Ok(engagement)
     }
     pub fn bind_claim_profile(
         &self,

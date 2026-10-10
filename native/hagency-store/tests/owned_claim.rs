@@ -32,7 +32,8 @@ impl Fixture {
             pool.model = "claude-opus-5".into();
         }
         pool.provider = provider.map(str::to_owned);
-        pool.reasoning = Some(reasoning.into());
+        // An empty word is no reasoning setting, as Claude resources carry.
+        pool.reasoning = (!reasoning.is_empty()).then(|| reasoning.into());
         db.put_resource(&pool).unwrap();
         let proof = proof(&request("claim", "Worker", &pool, 100));
         let e = db.admit(&proof, 1000).unwrap();
@@ -603,6 +604,23 @@ fn native_owned_claim_profile_unsupported_and_shared_lease() {
             .unwrap()
             .dispatch_id,
         "exclusive"
+    );
+}
+
+/// ADR-192: a Claude dispatch is claimable by its agent's own runtime when
+/// its resource is claude/anthropic with no reasoning setting; with one, it
+/// stays unclaimed (above).
+#[test]
+fn native_owned_claim_profile_claims_a_claude_dispatch() {
+    let mut f = Fixture::with_runtime("claude", Some("anthropic"), "");
+    f.queue("claude", "work");
+    let profile = f.profile("DEVICE_1", RoomPrivacy::Group {});
+    assert_eq!(
+        f.db.claim_owned_dispatch_for_host(&profile, "host", 2000, 60_000, 60_000, 1)
+            .unwrap()
+            .unwrap()
+            .dispatch_id,
+        "claude"
     );
 }
 
