@@ -55,6 +55,12 @@ pub(crate) struct Entry {
     recorded: bool,
     /// Claude withdrew the request (`control_cancel_request`).
     resolved: bool,
+    /// The tool use this request is for, whose result ends it.
+    tool_use: Option<String>,
+    /// That result was seen (`applied` recorded).
+    applied: bool,
+    /// The store's application of this request's answer, once authorized.
+    application: Option<hagency_core::approvals::ApprovalApplication>,
 }
 impl Entry {
     pub(super) fn written(&self) -> bool {
@@ -261,6 +267,9 @@ impl Callbacks {
                 expired: false,
                 recorded: false,
                 resolved: false,
+                tool_use: tool_use_id.map(str::to_owned),
+                applied: false,
+                application: None,
             },
         );
         // The reservation and callback are retained before the request.
@@ -355,12 +364,26 @@ impl ClaudeDrive<'_> {
             ),
             Message::ControlResponse { .. } => return Err(Failure::Protocol),
             Message::Event { .. } => {
-                crate::operation::record_activity(
-                    self.domain,
-                    self.cap,
-                    crate::operation::claude_activity(&message),
-                )
-                .await;
+                let activity = crate::operation::claude_activity(&message);
+                // A tool result for an answered request is its decision
+                // taking effect.
+                for event in &activity {
+                    let hagency_store::ActivityEvent::ToolEnd { event_id, .. } = event else {
+                        continue;
+                    };
+                    for entry in callbacks.claude.values_mut() {
+                        if let (false, Some(application), Some(tool_use)) =
+                            (entry.applied, &entry.application, &entry.tool_use)
+                            && (entry.write.is_some() || entry.in_flight)
+                            && crate::operation::activity_id(tool_use) == *event_id
+                        {
+                            entry.applied = true;
+                            super::observe_applied(self.domain, application, "claude tool result")
+                                .await;
+                        }
+                    }
+                }
+                crate::operation::record_activity(self.domain, self.cap, activity).await;
                 (None, Ok(false))
             }
         };
@@ -594,11 +617,15 @@ impl ApprovalRun {
                 let context = self.callbacks.context.as_ref().ok_or(Failure::Admission)?;
                 let entry = self.callbacks.claude.get(key).ok_or(Failure::Protocol)?;
                 matches(&grant, key, entry, context)?;
-                self.callbacks
+                let entry = self
+                    .callbacks
                     .claude
                     .get_mut(key)
-                    .ok_or(Failure::Protocol)?
-                    .grant = Some(grant);
+                    .ok_or(Failure::Protocol)?;
+                // Kept for the application observation: the grant itself
+                // travels with the frame while it is in flight.
+                entry.application = Some(grant.application().clone());
+                entry.grant = Some(grant);
                 if authorized.terminal? {
                     return Ok(());
                 }

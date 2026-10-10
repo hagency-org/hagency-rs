@@ -42,6 +42,23 @@ impl Drive<'_> {
         // item/started and item/completed are the counter's only source, and
         // production runs this drive, not the plain loop (board #114).
         crate::operation::record_runner_activity(self.domain, self.cap, &update).await;
+        // The answered item completing is its decision taking effect.
+        if let Update::Item {
+            id,
+            phase: hagency_runtime::codex::session::ItemPhase::Complete,
+            ..
+        } = &update
+        {
+            for entry in callbacks.entries.values_mut() {
+                if let (false, Some(application)) = (entry.applied, &entry.application)
+                    && (entry.write.is_some() || entry.in_flight)
+                    && application.item_id == *id
+                {
+                    entry.applied = true;
+                    super::observe_applied(self.domain, application, "codex item completed").await;
+                }
+            }
+        }
         let (request, terminal) = match update {
             Update::Approval(request) => (
                 Some(callbacks.retain(runner, request, self.until, &self.cap.dispatch_id)?),

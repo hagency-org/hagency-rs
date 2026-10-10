@@ -13,6 +13,27 @@ pub(crate) use observations::Drive;
 pub(crate) use state::ApprovalRun;
 use tokio::sync::mpsc;
 
+/// The owner's decision took effect: the runtime reported the end of the very
+/// tool call it answered (allowed, it ran; denied, it ended refused). Until
+/// then the approval stays `applying`; one never seen ending becomes
+/// `uncertain` when the store reopens. Observation-class: a refused write is
+/// logged and changes nothing in the turn.
+pub(crate) async fn observe_applied(
+    domain: &hagency_store::DomainStore,
+    application: &hagency_core::approvals::ApprovalApplication,
+    evidence: &str,
+) {
+    let observation = hagency_core::approvals::ApprovalApplicationObservation {
+        application: application.clone(),
+        outcome: hagency_core::approvals::ApplicationOutcome::Applied,
+        evidence: evidence.into(),
+    };
+    if let Err(error) = domain.observe_approval_application(observation).await {
+        tracing::warn!(approval = %application.id, error = ?error,
+            "approval application not recorded");
+    }
+}
+
 pub struct ApprovalNotice {
     pub request_id: String,
     pub owner_expires_at: u64,

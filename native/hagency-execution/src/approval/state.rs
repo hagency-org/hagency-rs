@@ -38,6 +38,11 @@ pub(super) struct Pending {
     pub expired: bool,
     pub recorded: bool,
     pub resolved: bool,
+    /// The answered item was seen completing (`applied` recorded).
+    pub applied: bool,
+    /// The store's application of this request's answer, once authorized:
+    /// the grant itself travels with the frame while it is in flight.
+    pub application: Option<hagency_core::approvals::ApprovalApplication>,
     /// The dispatch id of the operation that drove this entry. Test and
     /// `test-diagnostics` builds only: keys the diagnostic journal and
     /// cancellation slot so parallel tests never read each other's records
@@ -299,6 +304,8 @@ impl Callbacks {
                 expired: false,
                 recorded: false,
                 resolved: false,
+                applied: false,
+                application: None,
                 #[cfg(any(test, feature = "test-diagnostics"))]
                 dispatch: dispatch.to_owned(),
                 #[cfg(any(test, feature = "test-diagnostics"))]

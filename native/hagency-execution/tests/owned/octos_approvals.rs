@@ -93,6 +93,11 @@ async fn native_octos_approval_once_approves_that_request() {
         1
     );
     assert_eq!(f.count("SELECT COUNT(*) FROM approval_grants"), 0);
+    // The approved command's end is its decision taking effect.
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM owner_approvals WHERE state='applied'"),
+        1
+    );
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert_eq!(report.settlement, Settlement::Completed);
         assert_eq!(f.state(), "completed");

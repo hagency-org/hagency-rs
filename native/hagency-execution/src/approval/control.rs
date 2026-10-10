@@ -291,6 +291,7 @@ impl ApprovalRun {
                     .entries
                     .get_mut(key)
                     .ok_or(Failure::Protocol)?;
+                entry.application = Some(grant.application().clone());
                 entry.grant = Some(grant);
                 state::matches(
                     entry.grant.as_ref().ok_or(Failure::Protocol)?,

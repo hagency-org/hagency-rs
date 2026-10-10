@@ -336,6 +336,14 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
                 shell_approval(&stream, &id, &turn, &params["cwd"])?;
                 approved &= answer_approval(&mut stdin, marker, &stream, &id)?;
             }
+            // The approved (or refused) command's own end, as Octos main
+            // projects it once the tool returns.
+            stream.envelope(
+                "main",
+                &turn,
+                "tool_end",
+                json!({"tool_call_id":"tool-1","status":if approved { "ok" } else { "error" }}),
+            )?;
         }
         _ => {}
     }

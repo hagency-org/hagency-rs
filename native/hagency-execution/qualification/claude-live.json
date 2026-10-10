@@ -1,13 +1,13 @@
 {
   "claude_executable_sha256": "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937",
   "claude_version": "2.1.296 (Claude Code)",
-  "commit": "c67f944dd5df97d46d9bdc6687a59b925a5dab11",
+  "commit": "f75b19e5bf98a041d365b4f963ca1167c60c7d15",
   "host": {
     "arch": "aarch64",
     "os": "macos"
   },
   "launch_source_digests": {
-    "execution/approval/claude.rs": "b977591a1614f55e1b58c5b58c8f6243bd7d8dd056fc74ad75b37929f67b859f",
+    "execution/approval/claude.rs": "7548573b80994b87e54840706c1a4ef5a6c4576b6bdbc618796e2bf2690b561c",
     "execution/local_codex.rs": "eb8dce9debcbe349753141319d03723c8a0cb603253385cfb73dbf9ad19f00e9",
     "operator/claude_live.rs": "fe4cff1a7023fc9e952aab16007716e38de5609064c59fd8926a8ce7ac856eca",
     "operator/claude_source_digests.rs": "8d9f2a7bdc5783c2bc4f94b681612cf2416274fecd06bc68d4e05e0aad149a66",
@@ -21,7 +21,7 @@
   },
   "model": "claude-sonnet-5",
   "placeholder": false,
-  "recorded_at_ms": 1791595737745,
+  "recorded_at_ms": 1791597107938,
   "schema": "hagency-claude-live-qualification-v1",
   "verdicts": {
     "approve_once": {
@@ -32,7 +32,7 @@
           "card_tool": "Bash",
           "input": {
             "command": "gh --version > approved.txt",
-            "description": "Write gh version output to approved.txt"
+            "description": "Write gh version to approved.txt"
           },
           "method": "claude/canUseTool",
           "reusable_scope": true,
@@ -41,7 +41,7 @@
       ],
       "approved_file": "gh version 2.78.0 (2025-08-21)\nhttps://github.com/cli/cli/releases/tag/v2.78.0\n",
       "denied_file_exists": false,
-      "elapsed_ms": 7561,
+      "elapsed_ms": 8487,
       "failure": null,
       "leader_exited": true,
       "outside_file_exists": false,
@@ -55,13 +55,13 @@
       "usage_failure": null,
       "usage_known_growth": {
         "cacheRead": 60442,
-        "cacheWrite": 7866,
+        "cacheWrite": 7989,
         "input": 4,
-        "output": 409
+        "output": 532
       },
       "usage_observed_growth": {
         "cacheRead": 60442,
-        "cacheWrite": 7866,
+        "cacheWrite": 7989,
         "input": 4,
         "output": null
       },
@@ -87,13 +87,13 @@
       ],
       "approved_file": null,
       "denied_file_exists": false,
-      "elapsed_ms": 6773,
+      "elapsed_ms": 7237,
       "failure": null,
       "leader_exited": true,
       "outside_file_exists": false,
       "pass": true,
       "protocol": "Completed",
-      "reply": "The command was not allowed.",
+      "reply": "The command wasn't allowed.",
       "settlement": "Completed",
       "turn_failure": "",
       "usage_attached": true,
@@ -101,13 +101,13 @@
       "usage_failure": null,
       "usage_known_growth": {
         "cacheRead": 60458,
-        "cacheWrite": 7890,
+        "cacheWrite": 7980,
         "input": 4,
-        "output": 399
+        "output": 491
       },
       "usage_observed_growth": {
         "cacheRead": 60458,
-        "cacheWrite": 7890,
+        "cacheWrite": 7980,
         "input": 4,
         "output": null
       },
@@ -121,13 +121,13 @@
       "approvals": [],
       "approved_file": null,
       "denied_file_exists": false,
-      "elapsed_ms": 1823,
+      "elapsed_ms": 1801,
       "failure": null,
       "leader_exited": true,
       "outside_file_exists": false,
       "pass": true,
       "protocol": "Completed",
-      "reply": "Permission denied, so I won't retry or use another tool.",
+      "reply": "Permission denied.",
       "settlement": "Completed",
       "turn_failure": "",
       "usage_attached": true,
@@ -135,13 +135,13 @@
       "usage_failure": null,
       "usage_known_growth": {
         "cacheRead": 26509,
-        "cacheWrite": 7471,
+        "cacheWrite": 7470,
         "input": 2,
-        "output": 20
+        "output": 8
       },
       "usage_observed_growth": {
         "cacheRead": 26509,
-        "cacheWrite": 7471,
+        "cacheWrite": 7470,
         "input": 2,
         "output": null
       },
