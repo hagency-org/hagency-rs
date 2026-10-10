@@ -128,9 +128,9 @@ impl Fixture {
     }
     /// An agent whose AGENT RECORD carries per-thread worktree settings
     /// (board #78; TS backend-v2.js:2994 record fields, consumed at
-    /// backend-v2.js:2057-2075). The settings ride the production admission
-    /// path (`agentDefinition` on the verified request) — not a serve-level
-    /// or host-level switch.
+    /// backend-v2.js:2057-2075) in its stored record, as an agent admitted
+    /// before requests lost the right to name them still has. A request
+    /// naming them is refused, so they are written into the record directly.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub async fn with_worktree_agent(
         fenced: bool,
@@ -214,19 +214,7 @@ impl Fixture {
             db.put_resource(&resource).unwrap();
             resource
         };
-        let mut request = common::domain::request("bootstrap", "Worker", &resource, 100);
-        if let Some((worktrees_dir, bootstrap)) = &workspace {
-            // Board #78: the agent record carries the per-agent workspace
-            // settings through the production admission path. Mutate BEFORE
-            // the observation is built, so the request digest and the
-            // observed content stay the same serialization.
-            let mut value = serde_json::to_value(&request).unwrap();
-            value["agentDefinition"]["workspaceMode"] = json!("worktree");
-            value["agentDefinition"]["worktreesDir"] =
-                json!(worktrees_dir.to_string_lossy().into_owned());
-            value["agentDefinition"]["worktreeBootstrap"] = json!(bootstrap);
-            request = serde_json::from_value(value).unwrap();
-        }
+        let request = common::domain::request("bootstrap", "Worker", &resource, 100);
         let mut observation = common::domain::observation(&request);
         observation.observed_at_ms = now();
         let proof = hagency_core::authority::verify_request(
@@ -236,6 +224,19 @@ impl Fixture {
         )
         .unwrap();
         let e = db.admit(&proof, now()).unwrap();
+        if let Some((worktrees_dir, bootstrap)) = &workspace {
+            rusqlite::Connection::open(state_dir.join("domain.sqlite3"))
+                .unwrap()
+                .execute(
+                    "UPDATE engagements SET projection=json_set(projection,'$.workspaceMode','worktree','$.worktreesDir',?2,'$.worktreeBootstrap',json(?3)) WHERE id=?1",
+                    rusqlite::params![
+                        e.id,
+                        worktrees_dir.to_string_lossy(),
+                        json!(bootstrap).to_string()
+                    ],
+                )
+                .unwrap();
+        }
         db.approve("approve", &proof, now()).unwrap();
         let effect = db.claim_effect().unwrap().unwrap();
         db.observe_effect(

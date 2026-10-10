@@ -204,6 +204,12 @@ pub fn verify_request(
     observation: RequestObservation,
 ) -> Result<VerifiedRequest, InvalidInput> {
     request.validate(registration)?;
+    // A requester never decides where folders are made or what runs on the
+    // machine. The workspace settings would have the host create any folder
+    // they named and run their bootstrap command outside the sandbox.
+    if request.agent_definition.carries_workspace_settings() {
+        return Err(InvalidInput("a request cannot set the agent's workspace"));
+    }
     let audit = serde_json::to_value(&observation)
         .map_err(|_| InvalidInput("invalid authority observation"))?;
     if serde_json::to_vec(&audit)

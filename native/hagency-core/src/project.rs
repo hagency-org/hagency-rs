@@ -77,7 +77,10 @@ pub struct AgentDefinition {
     /// backend-v2.js:2994): `workspaceMode` is `worktree` or `shared`
     /// (normalize, backend-v2.js:512), `worktreesDir` the agent's own
     /// worktrees root, `worktreeBootstrap` its bootstrap argv (backend-v2.js:516).
-    /// All optional/absent for existing records, which stay `shared`.
+    /// TS kept them on an agent record its operator wrote. Here they arrive in
+    /// a requester's event, and they name a folder the host creates and a
+    /// command it runs outside any sandbox, so a request carrying any of them
+    /// is refused (`verify_request`). Kept only so a stored request still reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +89,13 @@ pub struct AgentDefinition {
     pub worktree_bootstrap: Vec<String>,
 }
 impl AgentDefinition {
+    /// Whether this definition names a workspace mode, worktrees folder or
+    /// bootstrap command: the machine owner's settings, never a requester's.
+    pub fn carries_workspace_settings(&self) -> bool {
+        self.workspace_mode.is_some()
+            || self.worktrees_dir.is_some()
+            || !self.worktree_bootstrap.is_empty()
+    }
     pub fn validate(&self) -> Result<(), InvalidInput> {
         let suffix = self
             .resource_id

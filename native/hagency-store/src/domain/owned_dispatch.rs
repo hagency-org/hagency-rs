@@ -225,9 +225,10 @@ pub struct OwnedDispatchScope {
     /// engagement workspace. Already covered by the fingerprint via `session`.
     thread_root: Option<String>,
     /// Per-agent workspace settings (board #78; the TS agent record,
-    /// backend-v2.js:2994, consumed at backend-v2.js:2057-2075), projected from
-    /// the engagement. `workspace_mode` normalizes to `worktree` or `shared`
-    /// (backend-v2.js:512); the repository is this agent's own workspace root.
+    /// backend-v2.js:2994, consumed at backend-v2.js:2057-2075).
+    /// `workspace_mode` is `worktree` or `shared` (backend-v2.js:512); the
+    /// repository is this agent's own workspace root. They are the machine
+    /// owner's to set: until that setting exists, every dispatch is `shared`.
     workspace_mode: String,
     worktrees_dir: Option<String>,
     worktree_bootstrap: Vec<String>,
@@ -450,9 +451,13 @@ fn project_dispatch(
         fingerprint,
         engagement_id: engagement.id,
         thread_root,
-        workspace_mode: engagement.workspace_mode,
-        worktrees_dir: engagement.worktrees_dir,
-        worktree_bootstrap: engagement.worktree_bootstrap,
+        // Every stored workspace setting came from a request (board #78),
+        // which can no longer carry one: an agent admitted before that keeps
+        // the shared workspace, and no folder or bootstrap of its requester's
+        // reaches the host.
+        workspace_mode: "shared".into(),
+        worktrees_dir: None,
+        worktree_bootstrap: Vec::new(),
         started: None,
     })
 }

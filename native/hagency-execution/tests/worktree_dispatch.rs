@@ -1,12 +1,14 @@
-//! Board #78 acceptance: two dispatches on two threads of ONE agent, driven
-//! through the production owned-dispatch path (`Operation::start`), resolve to
-//! DISTINCT per-thread worktrees and share no file visibility.
+//! Board #78's per-agent workspace settings never reach the host from a
+//! requester. A request naming them is refused at verification, and an agent
+//! whose stored record still carries them (admitted before that refusal) runs
+//! every thread in its shared workspace, driven through the production
+//! owned-dispatch path (`Operation::start`): no folder of the requester's is
+//! made and no bootstrap command of theirs runs.
 //!
 //! The child (the offline `hagency-execution-probe`) writes its request log
-//! (`owned-dispatch.requests`) and entry markers into its OWN working directory,
-//! and echoes that directory back as `thread/start.cwd` (ADR-116). So a
-//! per-thread worktree is observable: the two `thread/start.cwd` values differ,
-//! live under the worktrees root, and are not the shared engagement workspace.
+//! (`owned-dispatch.requests`) into its OWN working directory and echoes that
+//! directory back as `thread/start.cwd` (ADR-116), so where it ran is
+//! observable.
 
 #[path = "../../hagency-store/tests/common/mod.rs"]
 mod common;
@@ -54,19 +56,6 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else {
-                out.push(path);
-            }
-        }
-    }
-}
-
 fn thread_cwd(requests: &Path) -> String {
     let text = fs::read_to_string(requests).unwrap();
     let values: Vec<serde_json::Value> = text
@@ -83,7 +72,7 @@ fn thread_cwd(requests: &Path) -> String {
 }
 
 #[tokio::test]
-async fn native_worktree_two_threads_distinct_worktrees() {
+async fn native_stored_workspace_settings_never_reach_the_host() {
     let root = tempfile::tempdir().unwrap();
 
     // The agent's own workspace root. TS resolves the worktree repository from
@@ -99,20 +88,36 @@ async fn native_worktree_two_threads_distinct_worktrees() {
     git(&work, &["add", "README.md"]);
     git(&work, &["commit", "-m", "base"]);
     let worktrees = root.path().join("worktrees");
+    // A bootstrap that leaves a folder behind if it ever runs.
+    let ran = root.path().join("bootstrap-ran");
+    let bootstrap = json!(["git", "init", ran.to_string_lossy()]);
 
     // One agent's store: register, admit, approve, provision.
     let mut db = DomainRepository::open(&root.path().join("state")).unwrap();
     db.register(&registration()).unwrap();
     let pool = resource("pool", "seat", 1000);
     db.put_resource(&pool).unwrap();
-    // TS per-agent mode (backend-v2.js:2994, resolve at :2057-2075): the
-    // workspace settings ride the AGENT record through the production
-    // admission path — not a host or serve-level switch.
-    let mut value = serde_json::to_value(request("allocation", "Worker", &pool, 100)).unwrap();
-    value["agentDefinition"]["workspaceMode"] = json!("worktree");
-    value["agentDefinition"]["worktreesDir"] = json!(worktrees.to_string_lossy().into_owned());
-    let request: ProjectRequest = serde_json::from_value(value).unwrap();
-    let proof = proof(&request);
+    let plain = request("allocation", "Worker", &pool, 100);
+    // A requester naming any workspace setting is refused before admission.
+    for (key, setting) in [
+        ("workspaceMode", json!("worktree")),
+        ("worktreesDir", json!(worktrees.to_string_lossy())),
+        ("worktreeBootstrap", bootstrap.clone()),
+    ] {
+        let mut value = serde_json::to_value(&plain).unwrap();
+        value["agentDefinition"][key] = setting;
+        let request: ProjectRequest = serde_json::from_value(value).unwrap();
+        assert!(
+            hagency_core::authority::verify_request(
+                &registration(),
+                request.clone(),
+                observation(&request)
+            )
+            .is_err(),
+            "{key}"
+        );
+    }
+    let proof = proof(&plain);
     let engagement = db.admit(&proof, 1000).unwrap();
     db.approve("approved", &proof, 1000).unwrap();
     let effect = db.claim_effect().unwrap().unwrap();
@@ -140,11 +145,21 @@ async fn native_worktree_two_threads_distinct_worktrees() {
     })
     .unwrap();
     db.register_workspace("work").unwrap();
+    // The record an agent admitted before the refusal still carries.
+    rusqlite::Connection::open(root.path().join("state/domain.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE engagements SET projection=json_set(projection,'$.workspaceMode','worktree','$.worktreesDir',?2,'$.worktreeBootstrap',json(?3)) WHERE id=?1",
+            rusqlite::params![
+                engagement.id,
+                worktrees.to_string_lossy(),
+                bootstrap.to_string()
+            ],
+        )
+        .unwrap();
     let domain = DomainStore::start(db, 16).unwrap();
 
-    // The shared engagement workspace is the ONLY registered root; the
-    // per-thread worktree is resolved at dispatch time from the scope's
-    // thread root + the operator worktree config.
+    // The shared engagement workspace is the ONLY registered root.
     let host = |env: BTreeMap<OsString, OsString>| {
         Host::new(
             binary(),
@@ -205,7 +220,7 @@ async fn native_worktree_two_threads_distinct_worktrees() {
     let report_a = op_a.wait().await.unwrap();
     assert_eq!(report_a.protocol, Protocol::Completed);
 
-    // Thread B: distinct worktree, same agent.
+    // Thread B: another thread of the same agent.
     domain
         .create_canonical_task(
             "task-b".into(),
@@ -228,42 +243,12 @@ async fn native_worktree_two_threads_distinct_worktrees() {
     let report_b = op_b.wait().await.unwrap();
     assert_eq!(report_b.protocol, Protocol::Completed);
 
-    // Exactly two worktrees were produced, each holding its own request log.
-    let mut requests = Vec::new();
-    walk(&worktrees, &mut requests);
-    let requests: Vec<&Path> = requests
-        .iter()
-        .filter(|p| p.file_name() == Some(std::ffi::OsStr::new("owned-dispatch.requests")))
-        .map(|p| p.as_path())
-        .collect();
-    assert_eq!(requests.len(), 2, "two threads must create two worktrees");
-
-    let cwd_a = thread_cwd(requests[0]);
-    let cwd_b = thread_cwd(requests[1]);
+    // Both threads ran in the shared workspace; neither the requester's
+    // worktrees folder nor their bootstrap's folder exists.
+    assert!(!worktrees.exists(), "no worktrees folder may be created");
+    assert!(!ran.exists(), "the stored bootstrap must never run");
     let shared = ordinary_launch_path(&work).unwrap();
-
-    // The core acceptance: distinct worktrees, no cross-thread sharing.
-    assert_ne!(
-        cwd_a, cwd_b,
-        "two threads of one agent must get distinct worktrees"
-    );
-    assert_ne!(
-        cwd_a, shared,
-        "thread A must not run in the shared workspace"
-    );
-    assert_ne!(
-        cwd_b, shared,
-        "thread B must not run in the shared workspace"
-    );
-    let worktrees_root = worktrees.canonicalize().unwrap();
-    assert!(
-        Path::new(&cwd_a).starts_with(&worktrees_root),
-        "thread A cwd {cwd_a} must live under the worktrees root"
-    );
-    assert!(
-        Path::new(&cwd_b).starts_with(&worktrees_root),
-        "thread B cwd {cwd_b} must live under the worktrees root"
-    );
+    assert_eq!(thread_cwd(&work.join("owned-dispatch.requests")), shared);
 
     domain.shutdown().await.unwrap();
 }

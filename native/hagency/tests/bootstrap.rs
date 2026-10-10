@@ -1387,24 +1387,24 @@ async fn native_refresh_identity_rejection_parks() {
     child.exited().await;
 }
 
-/// Board #78: with the operator's `worktree` configuration present in the
-/// SERVE configuration (agent-driver.json, the production path), two thread
-/// sessions of ONE agent run in DISTINCT per-thread git worktrees — not the
-/// shared engagement workspace — and neither sees the other's files.
+/// Board #78's workspace settings never reach the host from a requester. An
+/// agent whose stored record still carries them (admitted before requests lost
+/// the right to name them) runs both thread sessions in their shared
+/// workspaces through the SERVE configuration (agent-driver.json, the
+/// production path): no worktree is made, and no bootstrap command runs.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
-async fn native_worktree_production_config_two_threads() {
+async fn native_stored_workspace_settings_keep_the_shared_workspace() {
     use std::path::Path;
-    // The agent's own worktrees root, named on the AGENT RECORD before
-    // admission (the production path — the settings ride the verified
-    // request's agentDefinition, backend-v2.js:2994 + :2057-2075).
+    // The requester's worktrees folder and a bootstrap that leaves a folder
+    // behind if it ever runs.
     let external = tempfile::tempdir().unwrap();
     let worktrees = external.path().join("worktrees");
-    let mut f = Fixture::with_worktree_agent(false, worktrees.clone(), Vec::new()).await;
-    // The per-thread worktrees branch from the AGENT's own workspace root
-    // (the TS repository = agent.workdir, backend-v2.js:2057), so that root
-    // is a git repository. The second session's workspace "work-2" is the
-    // repository for its dispatches the same way.
+    let ran = external.path().join("bootstrap-ran");
+    let bootstrap = vec!["git".into(), "init".into(), ran.to_string_lossy().into()];
+    let mut f = Fixture::with_worktree_agent(false, worktrees.clone(), bootstrap).await;
+    // Both workspaces are git repositories with a HEAD, so honouring the
+    // stored settings would really branch per-thread worktrees from them.
     for args in [
         vec!["init"],
         vec!["config", "user.email", "t@e.com"],
@@ -1459,8 +1459,8 @@ async fn native_worktree_production_config_two_threads() {
             && f.text("SELECT state FROM runner_dispatches WHERE id='dispatch-3'") == "completed"
     })
     .await;
-    // Both receipts exist and live in DISTINCT per-thread worktrees under the
-    // operator's worktrees root — neither in a shared engagement workspace.
+    // Each receipt lives in its session's shared workspace; the requester's
+    // folders were never made.
     fn receipts(root: &Path) -> Vec<std::path::PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
@@ -1476,23 +1476,10 @@ async fn native_worktree_production_config_two_threads() {
         walk(root, &mut out);
         out
     }
-    let found = receipts(&worktrees);
-    assert_eq!(
-        found.len(),
-        2,
-        "two threads must leave two worktree receipts"
-    );
-    let first = found[0].parent().unwrap().to_path_buf();
-    let second = found[1].parent().unwrap().to_path_buf();
-    assert_ne!(first, second, "the two threads ran in distinct worktrees");
-    assert!(
-        first != f.work && second != f.work,
-        "not the shared workspace"
-    );
-    assert!(first != f.second_work() && second != f.second_work());
-    // No receipt leaked into a shared workspace.
-    assert!(receipts(&f.work).is_empty());
-    assert!(receipts(&f.second_work()).is_empty());
+    assert!(!worktrees.exists(), "no worktrees folder may be created");
+    assert!(!ran.exists(), "the stored bootstrap must never run");
+    assert_eq!(receipts(&f.work).len(), 1);
+    assert_eq!(receipts(&f.second_work()).len(), 1);
     // The store settled both attempts cleanly.
     assert_eq!(f.count("SELECT COUNT(*) FROM runner_attempts"), 2);
     child.request_shutdown();
