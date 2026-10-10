@@ -106,7 +106,7 @@ impl Frozen {
             || self.content["body"].as_str().is_none_or(str::is_empty)
             || d["version"] != 1
             || d["kind"] != "request"
-            || (d["runtime"] != "codex" && d["runtime"] != "claude")
+            || !["codex", "claude", "octos"].contains(&d["runtime"].as_str().unwrap_or_default())
             || d["agent"] != a.agent_name
             || d["project"] != a.project_id
             || d["project_room_id"] != a.project_room_id
@@ -485,11 +485,13 @@ mod tests {
             }
         });
         assert!(frozen(request.clone()).validate().is_ok());
-        // A Claude agent's card names its own framework (ADR-192); any other
-        // runtime is refused.
-        let mut claude = request.clone();
-        claude["com.agentchat.approval"]["runtime"] = json!("claude");
-        assert!(frozen(claude).validate().is_ok());
+        // A Claude or Octos agent's card names its own framework (ADR-192,
+        // ADR-193); any other runtime is refused.
+        for runtime in ["claude", "octos"] {
+            let mut named = request.clone();
+            named["com.agentchat.approval"]["runtime"] = json!(runtime);
+            assert!(frozen(named).validate().is_ok(), "{runtime}");
+        }
         let mut other = request.clone();
         other["com.agentchat.approval"]["runtime"] = json!("other");
         assert!(frozen(other).validate().is_err());

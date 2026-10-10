@@ -2,7 +2,7 @@
 //! `octos serve --stdio`, against the offline OUP peer the Host launches.
 use super::*;
 
-fn octos_pool() -> Resource {
+pub(super) fn octos_pool() -> Resource {
     serde_json::from_value(json!({
         "presetId":"pool","seatId":"seat","framework":"octos",
         "model":"kimi-k3","provider":"moonshot","octosProfile":"coding",
@@ -13,7 +13,7 @@ fn octos_pool() -> Resource {
 impl Fixture {
     /// The same probe, launched as `octos serve --stdio` by an Octos host. The
     /// host environment carries provider keys the launch must drop.
-    fn octos_host(&self, mode: &str) -> Host {
+    pub(super) fn octos_host(&self, mode: &str) -> Host {
         let mut environment = BTreeMap::from([
             ("PATH".into(), "".into()),
             ("HAGENCY_OFFLINE_MODE".into(), mode.into()),

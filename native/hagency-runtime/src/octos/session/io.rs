@@ -1,5 +1,5 @@
-//! The OUP stdio wire (ADR-193): the Claude wire's bounded line transport and
-//! byte-exact write progress, on Octos frames.
+//! The OUP stdio wire (ADR-193): the Claude wire's bounded line transport,
+//! byte-exact write progress and prepared frames, on Octos frames.
 use super::Error;
 use crate::octos::{Decoder, Frame};
 use std::{collections::VecDeque, time::Duration};
@@ -66,9 +66,31 @@ struct Writing {
     bytes: Vec<u8>,
     offset: usize,
     flushed: bool,
+    prepared: Option<u64>,
 }
 pub(super) struct Received {
     pub message: Frame,
+    pub at: Instant,
+}
+pub(super) enum Controlled<T> {
+    Message(Received),
+    Control(T),
+}
+pub(super) struct PreparedFrame {
+    id: u64,
+    bytes: Option<Vec<u8>>,
+    deadline: Instant,
+    write_deadline: Option<Instant>,
+}
+impl PreparedFrame {
+    pub fn new(id: u64, bytes: Vec<u8>, deadline: Instant) -> Self {
+        Self {
+            id,
+            bytes: Some(bytes),
+            deadline,
+            write_deadline: None,
+        }
+    }
 }
 pub(super) struct Wire<R, W, E> {
     streams: Option<Streams<R, W, E>>,
@@ -79,6 +101,7 @@ pub(super) struct Wire<R, W, E> {
     input: [u8; READ_BYTES],
     start: usize,
     end: usize,
+    input_at: Instant,
     stderr_buffer: [u8; READ_BYTES],
     stderr_open: bool,
     stderr_tail: VecDeque<u8>,
@@ -105,6 +128,7 @@ impl<R, W, E> Wire<R, W, E> {
             input: [0; READ_BYTES],
             start: 0,
             end: 0,
+            input_at: origin,
             stderr_buffer: [0; READ_BYTES],
             stderr_open: true,
             stderr_tail: VecDeque::new(),
@@ -122,8 +146,33 @@ impl<R, W, E> Wire<R, W, E> {
     pub fn lifetime(&self) -> Instant {
         self.lifetime
     }
+    pub fn permission_deadlines(
+        &self,
+        at: Instant,
+        owner_ms: u64,
+        reserve_ms: u64,
+    ) -> Result<(Instant, Instant), Error> {
+        if owner_ms == 0
+            || reserve_ms < self.limits.write_timeout_ms
+            || owner_ms
+                .checked_add(reserve_ms)
+                .is_none_or(|ms| ms > MAX_DURATION_MS)
+        {
+            return Err(Error::Configuration);
+        }
+        let owner = at + Duration::from_millis(owner_ms);
+        let response = owner + Duration::from_millis(reserve_ms);
+        if owner <= Instant::now() || response > self.lifetime {
+            return Err(Error::Timeout);
+        }
+        Ok((owner, response))
+    }
     pub fn termination(&self) -> Option<&Termination> {
         self.termination.as_ref()
+    }
+    /// The prepared frame in write custody, by its sequence, if any.
+    pub fn writing_prepared(&self) -> Option<u64> {
+        self.writing.as_ref().and_then(|w| w.prepared)
     }
     pub fn write_progress(&self) -> Option<WriteProgress> {
         self.writing.as_ref().map(|w| WriteProgress {
@@ -194,14 +243,20 @@ impl<R, W, E> Wire<R, W, E> {
             if self.queue.len() >= MAX_QUEUED || total > MAX_QUEUED_BYTES {
                 return Err(Error::Capacity);
             }
-            self.queue.push_back((Received { message }, charge));
+            self.queue.push_back((
+                Received {
+                    message,
+                    at: self.input_at,
+                },
+                charge,
+            ));
             self.queued_bytes = total;
         }
         Ok(())
     }
     fn buffered(&mut self) -> Result<Option<Received>, Error> {
         // At most one decoded message per parse. Never await between accepting
-        // read bytes and storing their offset.
+        // read bytes and storing their offset or timestamp.
         while self.queue.is_empty() && self.start < self.end {
             self.parse()?;
         }
@@ -240,6 +295,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Wire<R, 
             bytes,
             offset: 0,
             flushed: false,
+            prepared: None,
         });
         loop {
             tokio::task::yield_now().await;
@@ -248,7 +304,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Wire<R, 
                 self.writing = None;
                 return Ok(progress);
             }
-            self.step(until, true).await?;
+            self.step(until, true, false).await?;
         }
     }
     pub async fn next(&mut self, until: Instant) -> Result<Received, Error> {
@@ -258,30 +314,47 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Wire<R, 
             if let Some(received) = self.buffered()? {
                 return Ok(received);
             }
-            self.step(until, false).await?;
+            self.step(until, false, false).await?;
         }
     }
-    async fn step(&mut self, until: Instant, write: bool) -> Result<(), Error> {
+    async fn step(&mut self, until: Instant, write: bool, barrier: bool) -> Result<(), Error> {
+        let control = std::future::pending::<()>();
+        tokio::pin!(control);
+        self.step_control(until, write, barrier, control.as_mut())
+            .await?;
+        Ok(())
+    }
+    async fn step_control<F: std::future::Future + ?Sized>(
+        &mut self,
+        until: Instant,
+        write: bool,
+        barrier: bool,
+        mut control: std::pin::Pin<&mut F>,
+    ) -> Result<Option<F::Output>, Error> {
         self.check(until)?;
         if self.start < self.end {
             self.parse()?;
-            return Ok(());
+            return Ok(None);
         }
         let deadline = self.deadline(until);
+        let partial = barrier && self.decoder.buffered_bytes() != 0;
         let streams = self.streams.as_mut().ok_or(Error::Closed)?;
-        enum Observed {
+        enum Observed<T> {
             Write(std::io::Result<usize>),
             Flush(std::io::Result<()>),
             Read(std::io::Result<usize>),
             Stderr(std::io::Result<usize>),
             Deadline,
+            Control(T),
         }
         let writing = write
+            && !partial
             && self
                 .writing
                 .as_ref()
                 .is_some_and(|w| w.offset < w.bytes.len());
         let flushing = write
+            && !partial
             && self
                 .writing
                 .as_ref()
@@ -290,6 +363,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Wire<R, 
             biased;
             _=tokio::time::sleep_until(deadline)=>Observed::Deadline,
             result=streams.stdout.read(&mut self.input)=>Observed::Read(result),
+            output=control.as_mut()=>Observed::Control(output),
             result=async {
                 if writing {
                     let frame=self.writing.as_ref().ok_or(Error::Closed)?;
@@ -299,6 +373,10 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Wire<R, 
             result=streams.stderr.read(&mut self.stderr_buffer), if self.stderr_open=>Observed::Stderr(result),
         };
         match observed {
+            Observed::Control(output) => {
+                self.check(until)?;
+                return Ok(Some(output));
+            }
             Observed::Deadline => {
                 self.check(until)?;
                 return Err(Error::Timeout);
@@ -320,6 +398,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Wire<R, 
             Observed::Read(Ok(n)) => {
                 self.start = 0;
                 self.end = n;
+                self.input_at = Instant::now();
             }
             Observed::Stderr(Ok(0)) => self.stderr_open = false,
             Observed::Stderr(Ok(n)) => self.stderr(n)?,
@@ -329,6 +408,65 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Wire<R, 
             Observed::Stderr(Err(_)) => return Err(Error::Io("stderr read")),
         }
         self.check(until)?;
-        Ok(())
+        Ok(None)
+    }
+
+    pub async fn next_or_control<F: std::future::Future + ?Sized>(
+        &mut self,
+        mut control: std::pin::Pin<&mut F>,
+        until: Instant,
+    ) -> Result<Controlled<F::Output>, Error> {
+        loop {
+            tokio::task::yield_now().await;
+            self.check(until)?;
+            if let Some(received) = self.buffered()? {
+                return Ok(Controlled::Message(received));
+            }
+            if let Some(output) = self
+                .step_control(until, false, false, control.as_mut())
+                .await?
+            {
+                return Ok(Controlled::Control(output));
+            }
+        }
+    }
+    pub async fn send_prepared(
+        &mut self,
+        frame: &mut PreparedFrame,
+        control_deadline: Instant,
+    ) -> Result<Controlled<WriteProgress>, Error> {
+        let until = (*frame.write_deadline.get_or_insert_with(|| {
+            frame
+                .deadline
+                .min(Instant::now() + Duration::from_millis(self.limits.write_timeout_ms))
+        }))
+        .min(control_deadline);
+        self.check(until)?;
+        match &self.writing {
+            Some(writing) if writing.prepared == Some(frame.id) && frame.bytes.is_none() => {}
+            Some(_) => return Err(Error::State),
+            None => {
+                self.writing = Some(Writing {
+                    bytes: frame.bytes.take().ok_or(Error::PermissionUnavailable)?,
+                    offset: 0,
+                    flushed: false,
+                    prepared: Some(frame.id),
+                })
+            }
+        }
+        loop {
+            tokio::task::yield_now().await;
+            self.check(until)?;
+            if let Some(progress) = self.write_progress().filter(|value| value.flushed) {
+                self.writing = None;
+                return Ok(Controlled::Control(progress));
+            }
+            // Original bytes/offset stay in the sole wire owner across each
+            // event return. Read/control calls cannot advance that writer.
+            if let Some(received) = self.buffered()? {
+                return Ok(Controlled::Message(received));
+            }
+            self.step(until, true, true).await?;
+        }
     }
 }

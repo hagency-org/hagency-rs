@@ -1,6 +1,7 @@
 use super::{Cleanup, StartError};
 use crate::octos::session::{
-    Error, Event, Limits, Observation, ObservationSource, Permissions, Phase, SessionDriver,
+    ApprovalControlPolicy, ControlUpdate, Error, Event, Limits, Observation, ObservationSource,
+    PermissionDecision, Permissions, Phase, PreparedApproval, PreparedUpdate, SessionDriver,
     StderrSnapshot, Termination, WriteProgress,
 };
 use hagency_platform::{Launch, SupervisedProcess};
@@ -115,6 +116,32 @@ impl OwnedOctosSession {
     pub fn guardian_stderr_tail(&self) -> String {
         self.owner.guardian_stderr_tail()
     }
+    pub fn enable_approval_control(&mut self, policy: ApprovalControlPolicy) -> Result<(), Error> {
+        let operation = Operation::new(self)?;
+        let result = operation.runner.session.enable_approval_control(policy);
+        operation.finish(result)
+    }
+    pub fn approval_deadline(&self, id: &str) -> Result<tokio::time::Instant, Error> {
+        self.session.approval_deadline(id)
+    }
+    pub fn enable_owner_wait_expiry(&mut self) -> Result<(), Error> {
+        self.session.enable_owner_wait_expiry()
+    }
+    pub fn expire_approval(&mut self, id: &str) -> Result<(), Error> {
+        self.session.expire_approval(id)
+    }
+    pub fn prepared_admissible(&self, prepared: &PreparedApproval) -> bool {
+        self.session.prepared_admissible(prepared)
+    }
+    pub fn prepare_approval(
+        &mut self,
+        id: &str,
+        decision: PermissionDecision,
+    ) -> Result<PreparedApproval, Error> {
+        let operation = Operation::new(self)?;
+        let result = operation.runner.session.prepare_approval(id, decision);
+        operation.finish(result)
+    }
     /// Idle is not stop: closing stdin ends the connection, and only the
     /// retained owner can supply physical stop evidence for the whole tree.
     pub fn stop(&mut self) -> Cleanup {
@@ -152,6 +179,26 @@ impl OwnedOctosSession {
     pub async fn next(&mut self) -> Result<Event, Error> {
         let operation = Operation::new(self)?;
         let result = operation.runner.session.next().await;
+        operation.finish(result)
+    }
+    pub async fn next_or_control<F: std::future::Future + ?Sized>(
+        &mut self,
+        control: std::pin::Pin<&mut F>,
+    ) -> Result<ControlUpdate<F::Output>, Error> {
+        let operation = Operation::new(self)?;
+        let result = operation.runner.session.next_or_control(control).await;
+        operation.finish(result)
+    }
+    pub async fn send_prepared_approval(
+        &mut self,
+        prepared: &mut PreparedApproval,
+    ) -> Result<PreparedUpdate, Error> {
+        let operation = Operation::new(self)?;
+        let result = operation
+            .runner
+            .session
+            .send_prepared_approval(prepared)
+            .await;
         operation.finish(result)
     }
 }

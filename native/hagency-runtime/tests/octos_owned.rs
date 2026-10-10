@@ -345,7 +345,10 @@ async fn native_octos_owned_approval_reaches_the_host() {
         (approval_id.as_str(), turn_id.as_str()),
         ("approval-1", TURN)
     );
-    assert_eq!(params["typed_details"]["command_line"], "rm -rf build");
+    assert_eq!(
+        params["typed_details"]["command"]["command_line"],
+        "rm -rf build"
+    );
     assert!(matches!(run.kind(), ObservationKind::Ignored));
     cleanup(run.runner.stop());
 }

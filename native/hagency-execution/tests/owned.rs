@@ -30,6 +30,8 @@ mod idle;
 mod inspection;
 #[path = "owned/octos.rs"]
 mod octos;
+#[path = "owned/octos_approvals.rs"]
+mod octos_approvals;
 #[path = "owned/receive.rs"]
 mod receive;
 #[path = "owned/registration.rs"]

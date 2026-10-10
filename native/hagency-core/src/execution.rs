@@ -60,6 +60,12 @@ pub enum ScopeKind {
 /// `turnId` and the control request as `itemId`, beside `toolName`, an
 /// optional `toolUseId` and the tool's `input`.
 pub const CLAUDE_TOOL_METHOD: &str = "claude/canUseTool";
+/// The approval method of an Octos `approval/requested` (ADR-193 decision 4).
+/// Its params carry the session as `threadId`, the dispatch's turn as `turnId`
+/// and the approval as `itemId`, beside the `toolName`, the turn Octos raised
+/// it in (`octosTurnId`), its `title` and `body`, and for a shell command, when
+/// Octos types it, the `command` line and its `cwd`.
+pub const OCTOS_APPROVAL_METHOD: &str = "octos/approval";
 #[derive(Serialize)]
 pub struct Scope {
     pub kind: ScopeKind,
@@ -246,6 +252,40 @@ pub fn derive(request: HostRequest<'_>) -> Option<Authorization> {
                 ScopeKind::ExactToolCall,
                 json!({"tool":tool,"input":input}),
                 format!("Exact tool call:\nTool: {tool}\nInput: {input}"),
+            )
+        }
+        OCTOS_APPROVAL_METHOD => {
+            // A shell command derives the same exact-command scope as a Codex
+            // command, from its typed command line and working directory.
+            // Octos runs commands through `shell` and its Codex-style aliases
+            // `bash` and `exec_command`, one family in its own tool registry.
+            // Without the typed command and directory, or for any other tool,
+            // there is no reusable scope: approve once or deny only.
+            if !keys_within(
+                p,
+                &[
+                    "threadId",
+                    "turnId",
+                    "itemId",
+                    "toolName",
+                    "octosTurnId",
+                    "title",
+                    "body",
+                    "command",
+                    "cwd",
+                ],
+            ) || !matches!(
+                p.get("toolName")?.as_str()?,
+                "shell" | "bash" | "exec_command"
+            ) {
+                return None;
+            }
+            let command = text(p.get("command")?)?;
+            let cwd = request.path_flavor.normalize(text(p.get("cwd")?)?)?;
+            (
+                ScopeKind::ExactCommand,
+                json!({"command":command,"cwd":cwd,"additionalPermissions":null}),
+                format!("Exact command:\n{command}\nWorking directory: {cwd}"),
             )
         }
         _ => return None,

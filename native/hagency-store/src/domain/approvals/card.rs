@@ -80,12 +80,20 @@ impl DomainRepository {
             None
         };
         actions.push(json!({"id":"deny","label":"Deny","style":"danger"}));
-        // The card names the agent's framework (ADR-192). A Claude request
-        // shows its tool and input, as the retained TS card did; a Codex
-        // request shows its method and params, unchanged.
+        // The card names the agent's framework (ADR-192, ADR-193). A Claude
+        // request shows its tool and input, as the retained TS card did; an
+        // Octos request its tool and what Octos says it does; a Codex request
+        // shows its method and params, unchanged.
         let claude = request.method == policy::CLAUDE_TOOL_METHOD;
-        let runtime = if claude { "claude" } else { "codex" };
-        let tool = if claude {
+        let octos = request.method == policy::OCTOS_APPROVAL_METHOD;
+        let runtime = if claude {
+            "claude"
+        } else if octos {
+            "octos"
+        } else {
+            "codex"
+        };
+        let tool = if claude || octos {
             request.params["toolName"]
                 .as_str()
                 .filter(|tool| !tool.is_empty())
@@ -95,6 +103,18 @@ impl DomainRepository {
         };
         let preview = if claude {
             serde_json::to_string(&request.params["input"])?
+        } else if octos {
+            let shown: serde_json::Map<String, Value> = ["title", "body", "command", "cwd"]
+                .into_iter()
+                .filter_map(|key| {
+                    request
+                        .params
+                        .get(key)
+                        .filter(|value| !value.is_null())
+                        .map(|value| (key.to_owned(), value.clone()))
+                })
+                .collect();
+            serde_json::to_string(&shown)?
         } else {
             serde_json::to_string(&request.params)?
         };

@@ -1556,6 +1556,8 @@ struct OctosTurn<'a> {
     cancel: &'a Arc<AtomicBool>,
     until: Instant,
     ceiling: Instant,
+    /// The approval context's workspace facts, when the host has approvals.
+    approval: Option<TurnApproval>,
 }
 /// The prepared session of one Octos dispatch (ADR-193).
 struct OctosSession {
@@ -1570,18 +1572,17 @@ struct OctosSession {
 /// `settle`: hello, the fixed permission profile, a fresh session on the
 /// workspace and one turn, then every event until Octos reports the session
 /// idle, its sub-agents' work and continuation turns included. The reply is
-/// the last turn's. An approval request refuses the dispatch until Octos
-/// approvals become owner cards. The child is stopped before this returns.
+/// the last turn's. With approvals, the accepted turn binds the approval
+/// context and the Octos coordinator drives the rest, so every approval
+/// becomes an owner card (decision 4). Without them an approval refuses the
+/// dispatch, as for Codex. The child is stopped before this returns.
 async fn run_octos_turn(
     turn: OctosTurn<'_>,
     launch: hagency_platform::Launch,
     prepared: OctosSession,
     report: &mut Report,
 ) -> Result<(), Failure> {
-    use hagency_runtime::octos::{
-        Outcome as OctosOutcome,
-        session::{Event, Permissions},
-    };
+    use hagency_runtime::octos::session::{Event, Permissions};
     let OctosTurn {
         domain,
         cap,
@@ -1592,6 +1593,7 @@ async fn run_octos_turn(
         cancel,
         until,
         ceiling,
+        mut approval,
     } = turn;
     note(
         domain,
@@ -1610,11 +1612,11 @@ async fn run_octos_turn(
     )
     .await;
     let refused = |_: hagency_runtime::octos::session::Error| Failure::Protocol;
-    let mut text = None;
-    let mut ended = false;
-    let mut failure = String::new();
+    let mut outcome = crate::approval::octos::OctosOutcome::default();
     let status = &mut report.canonical_status;
     let usage = report.usage.as_mut().ok_or(Failure::UsageBinding)?;
+    let mut approvals = report.approvals.as_mut();
+    let settlement_cause = &mut report.settlement_cause;
     let drive = async {
         watched_with(
             session.hello(),
@@ -1671,6 +1673,61 @@ async fn run_octos_turn(
             serde_json::json!({"session_id": session.session_id(), "turn_id": session.dispatch_turn()}),
         )
         .await;
+        if let (Some(run), Some(approval)) = (approvals.take(), approval.take()) {
+            // The session is the thread and the dispatch's turn the turn, as
+            // Codex names its thread and turn; a continuation turn's own ID
+            // rides on each request (`octosTurnId`).
+            let thread =
+                crate::approval::octos::opaque(session.session_id().ok_or(Failure::Protocol)?);
+            let turn =
+                crate::approval::octos::opaque(session.dispatch_turn().ok_or(Failure::Protocol)?);
+            let connection = hagency_core::canonical::digest(&serde_json::json!([
+                cap,
+                session.id(),
+                thread,
+                turn
+            ]))
+            .map_err(|_| Failure::Admission)?;
+            let context = hagency_core::approvals::HostApprovalContext {
+                id: format!("owned_{connection}"),
+                connection_id: connection,
+                thread_id: thread,
+                turn_id: turn,
+                workspace_resource: approval.resource,
+                workspace: approval.workspace,
+                windows_paths: cfg!(windows),
+                environment_id: None,
+                may_write: approval.may_write,
+                yolo: false,
+            };
+            run.bind_octos(
+                domain,
+                cap,
+                expected,
+                context,
+                Deadline {
+                    until: ceiling,
+                    expires_at: approval.expires_at,
+                },
+                session,
+            )
+            .await?;
+            return run
+                .drive_octos(
+                    crate::approval::octos::OctosDrive {
+                        domain,
+                        cap,
+                        cancel,
+                        until: ceiling,
+                        status,
+                        usage,
+                        outcome: &mut outcome,
+                        settlement_cause,
+                    },
+                    session,
+                )
+                .await;
+        }
         loop {
             let event = watched_with(
                 session.next(),
@@ -1684,44 +1741,31 @@ async fn run_octos_turn(
             )
             .await?;
             // Usage first: each terminal's, then the session's at idle.
-            if let Some(observation) = session.last_observation()
-                && usage.observe(observation)
-            {
-                // Storage refusal closes capture only, as for Codex.
-                let _ = bounded(usage.record_pending(), cancel, ceiling).await?;
-            }
+            let idle = outcome
+                .observe(session, usage, &event, cancel, ceiling)
+                .await?;
             match event {
-                Event::Idle(idle) => {
-                    ended = true;
-                    match (idle.outcome, idle.reply) {
-                        (OctosOutcome::Completed, Some(reply)) => text = Some(reply),
-                        (outcome, _) => {
-                            let code = idle.error_code.unwrap_or_default();
-                            failure = format!("{outcome:?}: {code}").chars().take(512).collect();
-                        }
-                    }
-                    return Ok(());
-                }
                 Event::Approval { .. } => return Err(Failure::UnsupportedApproval),
                 // No host tool is registered on the session yet.
                 Event::ToolCall { .. } => return Err(Failure::Protocol),
-                Event::TurnStarted { .. }
-                | Event::TurnEnded { .. }
-                | Event::ApprovalSettled { .. } => {}
+                _ if idle => return Ok(()),
+                _ => {}
             }
         }
     };
     // ADR-183 decision D: the budget only notifies under the turn.
     let (drive, over_budget) = budget.watch(drive, domain, cap).await;
     report.over_budget = over_budget;
-    report.protocol = match text {
+    report.protocol = match outcome.text {
         Some(text) => {
             report.text = Some(text);
             Protocol::Completed
         }
-        None if ended => Protocol::Failed,
+        None if outcome.ended => Protocol::Failed,
         None => Protocol::Unknown,
     };
+    // A drive that ended in a settlement verdict outranks Octos's own idle,
+    // as for Codex (ADR-046): no `SettlementUnknown` beside a completion.
     if matches!(drive, Err(Failure::SettlementUnknown)) && report.protocol == Protocol::Completed {
         report.protocol = Protocol::Unknown;
     }
@@ -1737,7 +1781,7 @@ async fn run_octos_turn(
     report.exit_identity = session.exit_identity();
     report.stderr_tail = session.stderr_tail(512);
     report.guardian_stderr_tail = session.guardian_stderr_tail();
-    report.turn_failure = failure;
+    report.turn_failure = outcome.failure;
     drive
 }
 /// What one Claude turn borrows from `execute` (ADR-192).
@@ -1753,9 +1797,10 @@ struct ClaudeTurn<'a> {
     until: Instant,
     ceiling: Instant,
     /// The approval context's workspace facts, when the host has approvals.
-    approval: Option<ClaudeApproval>,
+    approval: Option<TurnApproval>,
 }
-struct ClaudeApproval {
+/// The approval context's workspace facts of a Claude or Octos turn.
+struct TurnApproval {
     workspace: String,
     resource: String,
     may_write: bool,
@@ -2168,6 +2213,21 @@ async fn execute(
     let ceiling_expires_at = crate::approval::state::wall_now()?
         .checked_add(TURN_CEILING_MS)
         .ok_or(Failure::Deadline)?;
+    let turn_approval = match (&runner, &approval_workspace) {
+        (crate::host::PreparedRunner::Codex { .. }, _) | (_, None) => None,
+        (_, Some(workspace)) => Some(TurnApproval {
+            workspace: workspace.clone(),
+            resource: scope
+                .input()
+                .resources
+                .first()
+                .ok_or(Failure::Admission)?
+                .id
+                .clone(),
+            may_write: approval_may_write,
+            expires_at: ceiling_expires_at,
+        }),
+    };
     let (settings, input, late_helper) = match runner {
         crate::host::PreparedRunner::Codex {
             settings,
@@ -2191,21 +2251,7 @@ async fn execute(
                     cancel,
                     until,
                     ceiling,
-                    approval: match approval_workspace {
-                        Some(workspace) => Some(ClaudeApproval {
-                            workspace,
-                            resource: scope
-                                .input()
-                                .resources
-                                .first()
-                                .ok_or(Failure::Admission)?
-                                .id
-                                .clone(),
-                            may_write: approval_may_write,
-                            expires_at: ceiling_expires_at,
-                        }),
-                        None => None,
-                    },
+                    approval: turn_approval,
                 },
                 launch,
                 prompt,
@@ -2237,6 +2283,7 @@ async fn execute(
                     cancel,
                     until,
                     ceiling,
+                    approval: turn_approval,
                 },
                 launch,
                 OctosSession {
