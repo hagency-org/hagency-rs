@@ -125,7 +125,7 @@ async fn native_claude_permission_exact_response() {
         let expected = match decision {
             PermissionDecision::Allow => json!({"behavior":"allow","updatedInput":original}),
             PermissionDecision::Deny => {
-                json!({"behavior":"deny","message":"Permission denied by Hagency.","interrupt":true})
+                json!({"behavior":"deny","message":"Permission denied by Hagency."})
             }
         };
         assert_eq!(
@@ -253,6 +253,88 @@ async fn native_claude_permission_control_deadlines() {
             .accepted_bytes,
         0
     );
+}
+
+/// The owner-wait expiry (ADR-192, the ADR046 amendment as for Codex): the
+/// host takes an unanswered callback over at its owner bound and may answer
+/// it only with a deny, inside the response reserve. Before that bound the
+/// owner is still deciding, and a refused handover leaves the turn running.
+#[tokio::test(start_paused = true)]
+async fn native_claude_permission_owner_wait_expiry() {
+    let (mut driver, mut peer) = running(4096, true).await;
+    driver.enable_owner_wait_expiry().unwrap();
+    callback(&mut driver, &mut peer, "unanswered", json!({"command":"x"})).await;
+    // Before the owner bound: refused, and the session still runs.
+    assert!(matches!(
+        driver.expire_approval("unanswered"),
+        Err(Error::Timeout)
+    ));
+    assert_eq!(driver.phase(), Phase::Running);
+    assert!(matches!(
+        driver.expire_approval("unknown"),
+        Err(Error::Identity)
+    ));
+    assert_eq!(driver.phase(), Phase::Running);
+    // Past the owner bound the session stays readable for the host.
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    let ready = std::future::ready(3);
+    tokio::pin!(ready);
+    assert!(matches!(
+        driver.next_or_control(ready.as_mut()).await.unwrap(),
+        ControlUpdate::Control(3)
+    ));
+    driver.expire_approval("unanswered").unwrap();
+    assert!(matches!(
+        driver.expire_approval("unanswered"),
+        Err(Error::State)
+    ));
+    let mut prepared = driver
+        .prepare_approval("unanswered", PermissionDecision::Deny)
+        .unwrap();
+    assert!(driver.prepared_admissible(&prepared));
+    let (sent, response) = tokio::join!(
+        driver.send_prepared_approval(&mut prepared),
+        read(&mut peer)
+    );
+    assert!(matches!(sent.unwrap(), PreparedUpdate::WriteAccepted(_)));
+    assert_eq!(response["response"]["response"]["behavior"], "deny");
+    assert!(!driver.prepared_admissible(&prepared));
+
+    // An expired callback never yields an allow.
+    let (mut driver, mut peer) = running(4096, true).await;
+    driver.enable_owner_wait_expiry().unwrap();
+    callback(&mut driver, &mut peer, "late", json!({})).await;
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    driver.expire_approval("late").unwrap();
+    assert!(
+        driver
+            .prepare_approval("late", PermissionDecision::Allow)
+            .is_err()
+    );
+
+    // Without the opt-in the owner bound still ends the session, as before.
+    let (mut driver, mut peer) = running(4096, true).await;
+    callback(&mut driver, &mut peer, "plain", json!({})).await;
+    assert!(matches!(driver.expire_approval("plain"), Err(Error::State)));
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    assert!(matches!(driver.next_message().await, Err(Error::Timeout)));
+
+    // A callback Claude cancelled after preparation is no longer admissible,
+    // and checking says so without failing the session.
+    let (mut driver, mut peer) = running(4096, true).await;
+    callback(&mut driver, &mut peer, "withdrawn", json!({})).await;
+    let prepared = driver
+        .prepare_approval("withdrawn", PermissionDecision::Allow)
+        .unwrap();
+    assert!(driver.prepared_admissible(&prepared));
+    assert!(matches!(
+        event(&mut driver, &mut peer, cancel("withdrawn"))
+            .await
+            .unwrap(),
+        Message::ControlCancel { .. }
+    ));
+    assert!(!driver.prepared_admissible(&prepared));
+    assert_eq!(driver.phase(), Phase::Running);
 }
 
 #[tokio::test(start_paused = true)]

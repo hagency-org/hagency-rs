@@ -51,6 +51,13 @@ impl ApprovalHost {
             response_reserve_ms: self.inner.response_reserve_ms,
         }
     }
+    /// The same owner wait and response reserve on the Claude stream.
+    pub(crate) fn claude_policy(&self) -> hagency_runtime::claude::session::ApprovalControlPolicy {
+        hagency_runtime::claude::session::ApprovalControlPolicy {
+            owner_wait_ms: self.inner.owner_wait_ms,
+            response_reserve_ms: self.inner.response_reserve_ms,
+        }
+    }
     pub(crate) fn fits(&self, limits: crate::Limits) -> bool {
         self.inner.response_reserve_ms >= limits.response_ms
             && self.inner.owner_wait_ms + self.inner.response_reserve_ms <= limits.operation_ms

@@ -47,6 +47,11 @@ impl PreparedApproval {
 }
 enum Stage {
     Waiting,
+    /// The owner wait ran out unanswered and the host took the callback over
+    /// (the ADR046 amendment, as for Codex). It grants nothing and renews no
+    /// clock; the only frame it can produce is the deny, inside the response
+    /// reserve fixed at admission.
+    Expired,
     Prepared(u64),
     Sent,
     Cancelled,
@@ -60,6 +65,9 @@ struct Callback {
 #[derive(Default)]
 pub(super) struct State {
     policy: Option<ApprovalControlPolicy>,
+    /// The host answers an unanswered callback at its owner bound instead of
+    /// letting the session time out there.
+    host_expiry: bool,
     entries: BTreeMap<String, Callback>,
     read_deadline: Option<Instant>,
     sequence: u64,
@@ -136,8 +144,13 @@ impl State {
             .entries
             .values()
             .filter_map(|callback| match callback.stage {
+                // A host that expires callbacks needs the session readable
+                // through the owner bound, or the wait spanning it would end
+                // the session before the host could act. A read bound only: an
+                // allow prepared after the owner bound is still refused.
+                Stage::Waiting if self.host_expiry => callback.response,
                 Stage::Waiting => callback.owner,
-                Stage::Prepared(_) => callback.response,
+                Stage::Expired | Stage::Prepared(_) => callback.response,
                 Stage::Sent | Stage::Cancelled => None,
             })
             .min()
@@ -175,6 +188,49 @@ impl<R, W, E> SessionDriver<R, W, E> {
         self.control.policy = Some(policy);
         Ok(())
     }
+    /// The host will answer an unanswered callback at its owner bound with a
+    /// deny (`expire_approval`). Without this the session times out at the
+    /// owner bound, as before. Grants nothing.
+    pub fn enable_owner_wait_expiry(&mut self) -> Result<(), Error> {
+        if self.phase != Phase::Running || self.control.policy.is_none() {
+            return Err(Error::State);
+        }
+        self.control.host_expiry = true;
+        Ok(())
+    }
+    /// Hand one unanswered callback from the owner to the host at its owner
+    /// bound. Writes no byte and renews no clock. Not wrapped in `Operation`:
+    /// an error here is a host sequencing fault, and failing the session on it
+    /// would end the very turn this exists to keep alive.
+    pub fn expire_approval(&mut self, id: &str) -> Result<(), Error> {
+        if self.phase != Phase::Running || !self.control.host_expiry {
+            return Err(Error::State);
+        }
+        let callback = self.control.entries.get_mut(id).ok_or(Error::Identity)?;
+        if !matches!(callback.stage, Stage::Waiting) {
+            return Err(Error::State);
+        }
+        let now = Instant::now();
+        // Before the owner bound the owner is still deciding; at or after the
+        // response bound there is no margin left to answer in.
+        if now < callback.owner.ok_or(Error::State)?
+            || now >= callback.response.ok_or(Error::State)?
+        {
+            return Err(Error::Timeout);
+        }
+        callback.stage = Stage::Expired;
+        Ok(())
+    }
+    /// Whether this prepared frame may still be sent: its callback is neither
+    /// cancelled by Claude nor answered, and the turn is still running. A read
+    /// only, so a cancelled callback is skipped without failing the session.
+    pub fn prepared_admissible(&self, prepared: &PreparedApproval) -> bool {
+        self.phase == Phase::Running
+            && Arc::ptr_eq(&self.source, &prepared.source)
+            && self.control.entries.get(&prepared.id).is_some_and(|callback| {
+                matches!(callback.stage, Stage::Prepared(sequence) if sequence == prepared.sequence)
+            })
+    }
     pub fn approval_deadline(&self, id: &str) -> Result<Instant, Error> {
         self.control
             .entries
@@ -205,17 +261,28 @@ impl<R, W, E> SessionDriver<R, W, E> {
         let until = self.control.deadline(&self.wire)?;
         self.wire.check(until)?;
         let callback = self.control.entries.get_mut(id).ok_or(Error::Identity)?;
-        if !matches!(callback.stage, Stage::Waiting) {
-            return Err(Error::PermissionUnavailable);
-        }
-        if Instant::now() >= callback.owner.ok_or(Error::State)? {
-            return Err(Error::Timeout);
+        match callback.stage {
+            // The owner's path: preparation finishes before the owner bound.
+            Stage::Waiting => {
+                if Instant::now() >= callback.owner.ok_or(Error::State)? {
+                    return Err(Error::Timeout);
+                }
+            }
+            // The host's expiry path: the reserve covers one deny only.
+            Stage::Expired if decision == PermissionDecision::Deny => {}
+            Stage::Expired => return Err(Error::State),
+            Stage::Prepared(_) | Stage::Sent | Stage::Cancelled => {
+                return Err(Error::PermissionUnavailable);
+            }
         }
         let input = callback.input.take().ok_or(Error::State)?;
         let response = match decision {
             PermissionDecision::Allow => json!({"behavior":"allow","updatedInput":input}),
+            // A deny never interrupts (ADR-192 decision 4, amending ADR-156):
+            // Claude continues its turn and can say what it could not do, as
+            // Codex does after a decline. Only Claude's own turn ends it.
             PermissionDecision::Deny => {
-                json!({"behavior":"deny","message":"Permission denied by Hagency.","interrupt":true})
+                json!({"behavior":"deny","message":"Permission denied by Hagency."})
             }
         };
         let bytes = crate::claude::encode(json!({"type":"control_response","response":{

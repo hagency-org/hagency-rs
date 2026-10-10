@@ -123,6 +123,15 @@ impl OwnedClaudeSession {
     pub fn approval_deadline(&self, id: &str) -> Result<tokio::time::Instant, Error> {
         self.session.approval_deadline(id)
     }
+    pub fn enable_owner_wait_expiry(&mut self) -> Result<(), Error> {
+        self.session.enable_owner_wait_expiry()
+    }
+    pub fn expire_approval(&mut self, id: &str) -> Result<(), Error> {
+        self.session.expire_approval(id)
+    }
+    pub fn prepared_admissible(&self, prepared: &PreparedApproval) -> bool {
+        self.session.prepared_admissible(prepared)
+    }
     pub fn prepare_approval(
         &mut self,
         id: &str,

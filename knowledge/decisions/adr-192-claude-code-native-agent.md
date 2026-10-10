@@ -111,7 +111,7 @@ ADR-189 says Claude Code is added through its own ADR. This is that ADR.
    - The store's request binding gains a Claude form: session ID, control request ID, tool name and a digest of the input, in place of Codex's thread, turn and item IDs.
    - The card names the agent's framework instead of a fixed "codex".
    - **Approve once** answers allow with the exact original input (ADR-156).
-   - **Deny** answers deny with `interrupt`.
+   - **Deny** answers deny without `interrupt`, so Claude continues its turn and can say what it could not do, as Codex does after a decline. This amends ADR-156.
    - **Allow for this task** and **Always allow this operation** are Hagency-side grants matched on tool name and canonical input. Hagency answers later matching requests itself and never sends Claude `updatedPermissions` (ADR-156).
    - No answer before the card expires is a deny, as for Codex.
    - A turn waiting on its owner keeps its session and leases.
