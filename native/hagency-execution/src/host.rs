@@ -148,6 +148,9 @@ pub struct Host {
     /// ADR-193: the private root of the Octos agents' instance directories.
     octos_instances: Option<PathBuf>,
     task_helper: Option<(PathBuf, SocketAddr)>,
+    /// The executable whose `claude-write-guard` asks the owner before a
+    /// Claude file tool writes outside the workspace.
+    claude_guard: Option<PathBuf>,
     pub(crate) task_context: Option<Arc<hagency_store::task_context::RetainedTaskContext>>,
     file_tools: bool,
     receive_tools: bool,
@@ -234,6 +237,7 @@ impl Host {
             local_codex: None,
             octos_instances: None,
             task_helper: None,
+            claude_guard: None,
             task_context: None,
             file_tools: false,
             receive_tools: false,
@@ -300,6 +304,19 @@ impl Host {
             return Err(super::Failure::Admission);
         }
         self.runner = Runner::Claude;
+        Ok(self)
+    }
+    /// The Claude write guard (`claude-write-guard`, served by the `hagency`
+    /// executable): a Claude host launches only with it.
+    pub fn with_claude_write_guard(mut self, executable: PathBuf) -> Result<Self, super::Failure> {
+        if self.runner != Runner::Claude
+            || self.claude_guard.is_some()
+            || !executable.is_absolute()
+            || !executable.is_file()
+        {
+            return Err(super::Failure::Admission);
+        }
+        self.claude_guard = Some(executable);
         Ok(self)
     }
     /// Launch Octos instead of Codex (ADR-193): one `octos serve --stdio` per
@@ -728,11 +745,21 @@ impl Host {
         };
         // Every owned dispatch holds its exclusive workspace lease (checked in
         // `prepare_bound`), so the TS rule selects `auto`, never `plan`.
-        let arguments = hagency_runtime::claude::task_arguments(&resource.model, true)
-            .map_err(|_| super::Failure::Admission)?
-            .into_iter()
-            .map(OsString::from)
-            .collect();
+        let mut arguments = hagency_runtime::claude::task_arguments(&resource.model, true)
+            .map_err(|_| super::Failure::Admission)?;
+        // Claude's file tools ask the owner before writing outside this
+        // workspace: auto mode alone lets them write anywhere.
+        let guard = self
+            .claude_guard
+            .as_ref()
+            .ok_or(super::Failure::Admission)?;
+        hagency_runtime::claude::write_guard::guard(
+            &mut arguments,
+            guard.to_str().ok_or(super::Failure::Admission)?,
+            path.to_str().ok_or(super::Failure::Admission)?,
+        )
+        .ok_or(super::Failure::Admission)?;
+        let arguments = arguments.into_iter().map(OsString::from).collect();
         let launch = Launch {
             executable: self.executable.clone(),
             arguments,

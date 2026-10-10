@@ -69,6 +69,8 @@ async fn run(claude: &Path, model: &str, scenario: &Scenario, outside: &Path) ->
     .unwrap()
     .with_claude_runner()
     .unwrap()
+    .with_claude_write_guard(binary())
+    .unwrap()
     .with_local_codex(binding)
     .unwrap()
     .with_approvals(ApprovalHost::new(4, 2, 120_000, 10_000).unwrap())

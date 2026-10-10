@@ -1692,10 +1692,28 @@ async fn native_provisioning_claude_agent_first_dispatch() {
     assert_eq!(report.text.as_deref(), Some("claude fixture reply"));
     let argv: Vec<String> =
         serde_json::from_slice(&fs::read(f.work().join("owned-dispatch.argv")).unwrap()).unwrap();
+    // The task launch, its settings with the write guard on this workspace.
+    let mut expected = hagency_runtime::claude::task_arguments("claude-opus-5", true).unwrap();
+    let settings = argv.iter().find(|a| a.starts_with("--settings=")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&settings["--settings=".len()..]).unwrap();
+    let command = value["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (executable, rest) = command[1..].split_once("' claude-write-guard '").unwrap();
     assert_eq!(
-        argv,
-        hagency_runtime::claude::task_arguments("claude-opus-5", true).unwrap()
+        std::path::Path::new(rest.trim_end_matches('\''))
+            .canonicalize()
+            .unwrap(),
+        f.work().canonicalize().unwrap()
     );
+    hagency_runtime::claude::write_guard::guard(
+        &mut expected,
+        executable,
+        rest.trim_end_matches('\''),
+    )
+    .unwrap();
+    assert_eq!(argv, expected);
     report.retry_stop();
     drop(report);
     drop(operation);

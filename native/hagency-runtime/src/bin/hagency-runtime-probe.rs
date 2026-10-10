@@ -638,6 +638,10 @@ fn main() -> io::Result<()> {
         ),
         // The task helper an Octos host runs for its host tools
         // (`hagency mcp --owned-task-profile`), offline.
+        // The Claude write guard, the same code `hagency` runs.
+        [command, workspace] if command == "claude-write-guard" => {
+            hagency_runtime::claude::write_guard::run(Path::new(workspace))
+        }
         [command, flag] if command == "mcp" && flag == "--owned-task-profile" => {
             octos_probe::task_helper()
         }

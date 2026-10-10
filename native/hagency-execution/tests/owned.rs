@@ -274,7 +274,11 @@ impl Fixture {
     /// ADR-192: the same probe, launched as Claude Code by a Claude host. The
     /// offline mode travels in the host environment, as for the app server.
     fn claude_host(&self, mode: &str) -> Host {
-        self.host(mode, "work", false).with_claude_runner().unwrap()
+        self.host(mode, "work", false)
+            .with_claude_runner()
+            .unwrap()
+            .with_claude_write_guard(binary())
+            .unwrap()
     }
     fn operation(&self, mode: &str) -> Operation {
         Operation::start(
@@ -703,6 +707,25 @@ fn claude_pool() -> Resource {
 /// session. The argv is exactly the fixed task profile (ADR-158), the one
 /// prompt is the dispatch payload, the result text is the reply, and the
 /// usage source attaches at `system/init`, so the dispatch settles Completed.
+/// A Claude host launches only with the write guard: without it the dispatch
+/// is refused before anything runs, and the guard binds a Claude host only.
+#[tokio::test]
+async fn native_claude_dispatch_refuses_without_the_write_guard() {
+    let f = Fixture::configured_resource(false, false, claude_pool());
+    let host = f.host("task", "work", false).with_claude_runner().unwrap();
+    let mut operation = Operation::start(f.domain.clone(), f.cap.clone(), host, limits()).unwrap();
+    let report = operation.wait().await.unwrap();
+    assert_eq!(report.failure, Some(Failure::Admission));
+    assert!(!f.work.join("owned-dispatch.argv").exists());
+    assert!(
+        f.host("task", "work", false)
+            .with_claude_write_guard(binary())
+            .is_err()
+    );
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn native_claude_dispatch_completes_with_its_result() {
     let f = Fixture::configured_resource(false, false, claude_pool());
@@ -730,10 +753,28 @@ async fn native_claude_dispatch_completes_with_its_result() {
     }
     let argv: Vec<String> =
         serde_json::from_slice(&fs::read(f.work.join("owned-dispatch.argv")).unwrap()).unwrap();
+    // The task launch, its settings with the write guard on this workspace.
+    let mut expected = hagency_runtime::claude::task_arguments("claude-opus-5", true).unwrap();
+    let settings = argv.iter().find(|a| a.starts_with("--settings=")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&settings["--settings=".len()..]).unwrap();
+    let command = value["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (executable, rest) = command[1..].split_once("' claude-write-guard '").unwrap();
     assert_eq!(
-        argv,
-        hagency_runtime::claude::task_arguments("claude-opus-5", true).unwrap()
+        std::path::Path::new(rest.trim_end_matches('\''))
+            .canonicalize()
+            .unwrap(),
+        f.work.canonicalize().unwrap()
     );
+    hagency_runtime::claude::write_guard::guard(
+        &mut expected,
+        executable,
+        rest.trim_end_matches('\''),
+    )
+    .unwrap();
+    assert_eq!(argv, expected);
     let prompt: serde_json::Value =
         serde_json::from_slice(&fs::read(f.work.join("owned-dispatch.prompt")).unwrap()).unwrap();
     assert_eq!(prompt["type"], "user");
