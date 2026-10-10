@@ -120,6 +120,10 @@ impl OctosOutcome {
 pub(crate) struct OctosDrive<'a> {
     pub domain: &'a DomainStore,
     pub cap: &'a RunnerCapability,
+    /// The dispatch's lease fingerprint, renewed while a host tool runs.
+    pub expected: &'a str,
+    /// The dispatch's task helper, behind its host tools (decision 5).
+    pub tools: &'a mut crate::octos_tools::HostTools,
     pub cancel: &'a AtomicBool,
     pub until: Instant,
     pub status: &'a mut Option<TaskState>,
@@ -359,8 +363,21 @@ impl OctosDrive<'_> {
                     .ok_or(Failure::Protocol)?
                     .resolution_arrives(),
             ),
-            // No host tool is registered on the session yet.
-            Event::ToolCall { .. } => return Err(Failure::Protocol),
+            Event::ToolCall { params } => {
+                crate::operation::answer_octos_tool(
+                    self.tools,
+                    session,
+                    params,
+                    self.domain,
+                    self.cap,
+                    self.expected,
+                    self.cancel,
+                    self.until,
+                    self.status,
+                )
+                .await?;
+                (None, Ok(false))
+            }
             Event::TurnStarted { .. } | Event::TurnEnded { .. } | Event::Idle(_) => {
                 (None, Ok(false))
             }

@@ -627,6 +627,11 @@ fn main() -> io::Result<()> {
             mode.to_str().ok_or(io::ErrorKind::InvalidInput)?,
             Path::new(marker),
         ),
+        // The task helper an Octos host runs for its host tools
+        // (`hagency mcp --owned-task-profile`), offline.
+        [command, flag] if command == "mcp" && flag == "--owned-task-profile" => {
+            octos_probe::task_helper()
+        }
         [command, mode, marker] if command == "fake-octos" => octos_probe::run(
             mode.to_str().ok_or(io::ErrorKind::InvalidInput)?,
             Path::new(marker),

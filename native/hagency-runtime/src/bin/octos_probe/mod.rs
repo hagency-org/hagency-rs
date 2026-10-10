@@ -9,8 +9,9 @@ use std::{
 
 /// The kernel's continuation turn in `background` (a fixed UUID).
 const CONTINUATION: &str = "0192f0c1-0000-7000-8000-00000000c0de";
-const MODES: [&str; 14] = [
+const MODES: [&str; 15] = [
     "normal",
+    "host-tools",
     "quiet",
     "duplicate",
     "error",
@@ -42,14 +43,22 @@ fn refuse(request: &Value) -> io::Result<()> {
     emit(json!({"jsonrpc":"2.0","id":request["id"],
         "error":{"code":-32602,"message":"offline refusal","data":{"kind":"offline"}}}))
 }
-/// The next request, which must be `method` with a string ID.
-fn expect(stdin: &mut io::StdinLock<'_>, method: &str) -> io::Result<Value> {
+/// The next request, with a string ID.
+fn request(stdin: &mut io::StdinLock<'_>) -> io::Result<Value> {
     let mut line = String::new();
     if stdin.read_line(&mut line)? == 0 {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
     let request: Value = serde_json::from_str(&line)?;
-    if request["jsonrpc"] != "2.0" || request["method"] != method || !request["id"].is_string() {
+    if request["jsonrpc"] != "2.0" || !request["id"].is_string() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(request)
+}
+/// The next request, which must be `method` with a string ID.
+fn expect(stdin: &mut io::StdinLock<'_>, method: &str) -> io::Result<Value> {
+    let request = request(stdin)?;
+    if request["method"] != method {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     Ok(request)
@@ -218,7 +227,32 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
         json!({"opened":{"session_id":params["session_id"],"active_profile_id":params["profile_id"],
             "workspace_root":params["cwd"]}}),
     )?;
-    let start = expect(&mut stdin, "turn/start")?;
+    // Hagency's task tools, when registered on the session before its turn:
+    // each is offered under its model name, as Octos main answers.
+    let mut next = request(&mut stdin)?;
+    if next["method"] == "peer/tools/register" {
+        let register = next;
+        record(marker, &register)?;
+        let registered: Vec<Value> = register["params"]["tools"]
+            .as_array()
+            .ok_or(io::ErrorKind::InvalidInput)?
+            .iter()
+            .map(|tool| {
+                json!({"name":tool["name"],"app":"hagency","risk":tool["risk"],
+                    "model_name":tool["name"].as_str().unwrap_or_default().replace('.', "_")})
+            })
+            .collect();
+        answer(
+            &register,
+            json!({"session_id":register["params"]["session_id"],"version":1,"previous_version":0,
+                "tools":registered,"applies":"next_turn"}),
+        )?;
+        next = request(&mut stdin)?;
+    }
+    if next["method"] != "turn/start" {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let start = next;
     record(marker, &start)?;
     fs::write(
         marker.with_extension("prompt"),
@@ -244,6 +278,27 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
     )?;
     if mode != "quiet" {
         stream.orchestration(true, 0, 0)?;
+    }
+    // Two host tool calls: one the helper answers, one it refuses.
+    if mode == "host-tools" {
+        for (call, name, args) in [
+            (
+                "ptc-1",
+                "hagency.get_task",
+                json!({"task_id":"offline-task"}),
+            ),
+            ("ptc-2", "hagency.transition_task", json!({})),
+        ] {
+            notify(
+                "peer/tool/call",
+                json!({"peer":null,"session_id":stream.session,"turn_id":turn,"call_id":call,
+                    "tool_call_id":call,"name":name,"app":"hagency","args":args,"risk":"read",
+                    "confirm_required":false,"timeout_ms":60000,"tools_version":1}),
+            )?;
+            let result = expect(&mut stdin, "peer/tool/result")?;
+            record(marker, &result)?;
+            answer(&result, json!({"call_id":call,"accepted":true}))?;
+        }
     }
     stream.envelope(
         "main",
@@ -379,4 +434,55 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
     // original guardian's stop or the bounded fixture fuse ends the pulse.
     drop(stdin);
     super::pulse(marker)
+}
+
+/// The offline task helper: the MCP lifecycle of `hagency mcp
+/// --owned-task-profile` with the same tool names. A call answers what it
+/// was asked and which task and capability it inherited (never the value);
+/// `transition_task` is refused, so a tool failure reaches Octos too.
+pub(super) fn task_helper() -> io::Result<()> {
+    let file_tools = std::env::var_os("HAGENCY_FILE_TOOLS").is_some();
+    let receive_tools = std::env::var_os("HAGENCY_RECEIVE_FILE_TOOLS").is_some();
+    let mut stdin = io::stdin().lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        let request: Value = serde_json::from_str(&line)?;
+        let result = match request["method"].as_str() {
+            Some("initialize") => json!({"protocolVersion":"2025-11-25",
+                "capabilities":{"tools":{}},"serverInfo":{"name":"offline","version":"0"}}),
+            Some("notifications/initialized") => continue,
+            Some("tools/list") => {
+                let tools: Vec<Value> =
+                    hagency_runtime::task_mcp::owned_task_tools(file_tools, receive_tools)
+                        .into_iter()
+                        .map(|name| {
+                            json!({"name":name,"description":format!("offline {name}"),
+                                "inputSchema":{"type":"object","properties":{}},
+                                "annotations":{"readOnlyHint":name.starts_with("get_")
+                                    || name.starts_with("list_") || name == "read_conversation"}})
+                        })
+                        .collect();
+                json!({"tools":tools})
+            }
+            Some("tools/call") => {
+                let name = request["params"]["name"].as_str().unwrap_or_default();
+                if name == "transition_task" {
+                    json!({"content":[{"type":"text","text":"offline refusal"}],"isError":true})
+                } else {
+                    let structured = json!({"tool":name,"arguments":request["params"]["arguments"],
+                        "task":std::env::var("HAGENCY_TASK_ID").ok(),
+                        "capability":std::env::var_os("HAGENCY_RUNNER_CAPABILITY").is_some(),
+                        "address":std::env::var("HAGENCY_RUNNER_API_ADDR").ok()});
+                    json!({"content":[{"type":"text","text":structured.to_string()}],
+                        "structuredContent":structured,"isError":false})
+                }
+            }
+            _ => return Err(io::ErrorKind::InvalidInput.into()),
+        };
+        emit(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))?;
+    }
 }

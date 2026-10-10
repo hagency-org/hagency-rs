@@ -1701,8 +1701,9 @@ async fn native_provisioning_claude_agent_first_dispatch() {
 /// ADR-193: an Octos resource provisions an agent with no warm child, as a
 /// Claude Code one does. Each task launches its own `octos serve --stdio` on
 /// the agent's workspace, with the agent's private instance directory,
-/// Hagency's settings file, network denied, the allowlisted environment only
-/// and no task helper, and completes with Octos's reply. A restart re-attaches
+/// Hagency's settings file, network denied and the allowlisted environment
+/// only; its task tools are host tools on that session (decision 5), served
+/// by the task helper outside Octos, and it completes with Octos's reply. A restart re-attaches
 /// the agent the same way. A profile the user changed afterwards refuses the
 /// next task before anything is launched.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

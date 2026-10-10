@@ -5,6 +5,7 @@
 use serde_json::{Value, json};
 
 pub mod session;
+pub mod task_tools;
 
 pub const PROTOCOL: &str = "octos-ui/v1alpha1";
 /// OUP's own frame bound (`MAX_TEXT_FRAME_BYTES`).

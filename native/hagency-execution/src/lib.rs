@@ -7,6 +7,7 @@ mod inspection;
 mod local_binding;
 mod local_codex;
 mod local_octos;
+mod octos_tools;
 mod operation;
 mod registration;
 mod usage;

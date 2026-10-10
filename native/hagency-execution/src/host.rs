@@ -816,6 +816,47 @@ impl Host {
         .into_iter()
         .map(OsString::from)
         .collect();
+        // ADR-193 decision 5: the task tools are Hagency's host tools, served
+        // by the same scoped helper as for Codex and Claude Code. The helper
+        // is Hagency's own child: the capability never reaches Octos.
+        let (executable, address) = self.task_helper.as_ref().ok_or(super::Failure::Admission)?;
+        let mut task_tools = hagency_runtime::octos::task_tools::TaskTools::new(
+            executable.clone(),
+            scope.task().id.clone(),
+        )
+        .map_err(|_| super::Failure::Admission)?;
+        let encoded = serde_json::to_string(capability).map_err(|_| super::Failure::Admission)?;
+        if encoded.len() > 4096 {
+            return Err(super::Failure::Admission);
+        }
+        let mut helper_environment = BTreeMap::from([
+            (
+                OsString::from(TASK_MCP_ENV[0]),
+                OsString::from(address.to_string()),
+            ),
+            (OsString::from(TASK_MCP_ENV[1]), OsString::from(encoded)),
+            (
+                OsString::from(TASK_MCP_ENV[2]),
+                OsString::from(scope.task().id.clone()),
+            ),
+        ]);
+        if self.file_tools {
+            helper_environment.insert(TaskMcp::FILE_TOOLS_ENV.into(), "1".into());
+            task_tools = task_tools.with_file_tools();
+        }
+        if self.receive_tools {
+            helper_environment.insert(TaskMcp::RECEIVE_TOOLS_ENV.into(), "1".into());
+            task_tools = task_tools.with_receive_tools();
+        }
+        let prompt = task_tools.prompt(&prompt);
+        if prompt.len() > hagency_runtime::octos::MAX_TEXT_BYTES {
+            return Err(super::Failure::Admission);
+        }
+        let tools = crate::octos_tools::Spec {
+            executable: executable.clone(),
+            environment: helper_environment,
+            tools: task_tools.tools(),
+        };
         let mut environment = self.environment.clone();
         environment.retain(|key, _| !provider_key(key));
         // First use would otherwise download a 334 MB embedding model.
@@ -844,6 +885,7 @@ impl Host {
                 session,
                 turn,
                 workspace: path.to_str().ok_or(super::Failure::Admission)?.to_owned(),
+                tools,
             },
         })
     }
@@ -871,13 +913,9 @@ impl Host {
         home: &hagency_store::agent_home::ManagedAgentHome,
         workspace_id: &str,
     ) -> Result<Arc<crate::workspace::Root>, super::Failure> {
-        // An Octos agent's task tools are host tools on its own OUP connection
-        // (ADR-193 decision 5), never the task helper.
-        let helper = match self.runner {
-            Runner::Codex | Runner::Claude => self.task_helper.is_some(),
-            Runner::Octos => self.task_helper.is_none(),
-        };
-        if !helper || self.task_context.is_some() {
+        // Every runner has the task helper. An Octos agent reaches it through
+        // host tools on its own OUP connection (ADR-193 decision 5).
+        if self.task_helper.is_none() || self.task_context.is_some() {
             return Err(super::Failure::Admission);
         }
         let resource = scope.resource();
@@ -1046,6 +1084,8 @@ pub(crate) enum PreparedRunner {
         session: String,
         turn: String,
         workspace: String,
+        /// The task helper this dispatch's host tools run on (decision 5).
+        tools: crate::octos_tools::Spec,
     },
 }
 

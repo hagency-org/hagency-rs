@@ -127,6 +127,42 @@ pub enum Event {
     },
     Idle(Idle),
 }
+/// The most host tools one registration may carry (Octos's own bound).
+pub const MAX_HOST_TOOLS: usize = 64;
+/// How long Octos waits for one host tool's result before it gives up.
+pub const HOST_TOOL_TIMEOUT_MS: u64 = 60_000;
+/// One host tool as Octos registers it: `<app>.<tool>`, shown to the model as
+/// `<app>_<tool>`.
+pub struct HostTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    /// `read`, else `act`. Neither asks the owner in Octos.
+    pub read_only: bool,
+}
+/// One host tool call Octos sent. Arguments may carry private text;
+/// deliberately no Debug.
+pub struct HostToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub args: Value,
+}
+/// Octos's rule for a host tool name: two to four dotted segments, each
+/// `[a-z][a-z0-9_]{0,31}`, at most 64 bytes.
+pub fn host_tool_name(name: &str) -> bool {
+    let segments: Vec<&str> = name.split('.').collect();
+    name.len() <= 64
+        && (2..=4).contains(&segments.len())
+        && segments.iter().all(|segment| {
+            let bytes = segment.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= 32
+                && bytes[0].is_ascii_lowercase()
+                && bytes
+                    .iter()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+        })
+}
 #[derive(Default)]
 struct Turn {
     reply: Option<String>,
@@ -335,7 +371,13 @@ impl<R, W, E> SessionDriver<R, W, E> {
                 .control
                 .settled(&approval_id, self.wire.writing_prepared())
                 .then_some(Event::ApprovalSettled { approval_id }),
-            Notification::ToolCall { params } => Some(Event::ToolCall { params }),
+            Notification::ToolCall { params }
+                if params["session_id"]
+                    .as_str()
+                    .is_some_and(|session| self.ours(session)) =>
+            {
+                Some(Event::ToolCall { params })
+            }
             // Another session's or a child stream's frames, and every other
             // notification: OUP's additive rule.
             _ => None,
@@ -519,6 +561,125 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> SessionD
         }
         self.phase = Phase::Running;
         Ok(())
+    }
+    /// Hagency's task tools on the open session, before its turn (ADR-193
+    /// decision 5). They add to Octos's own tools: `generic_tools`, which
+    /// would narrow them, is never sent. Each is `act` or `read` and never
+    /// outward, so Octos runs it without an approval of its own; every call
+    /// still meets the dispatch's capability in Hagency.
+    pub async fn register_tools(&mut self, tools: &[HostTool]) -> Result<(), Error> {
+        let operation = Operation::new(self, Phase::Open)?;
+        let result = operation.driver.register_inner(tools).await;
+        operation.finish(result)
+    }
+    async fn register_inner(&mut self, tools: &[HostTool]) -> Result<(), Error> {
+        if tools.is_empty() || tools.len() > MAX_HOST_TOOLS {
+            return Err(Error::Protocol(super::Error::Input));
+        }
+        let session_id = self.session_id.clone().ok_or(Error::State)?;
+        let mut declared = Vec::with_capacity(tools.len());
+        for tool in tools {
+            if !host_tool_name(&tool.name)
+                || tool.description.trim().is_empty()
+                || tool.description.len() > 2048
+                || tool.input_schema["type"] != "object"
+            {
+                return Err(Error::Protocol(super::Error::Input));
+            }
+            declared.push(json!({"name":tool.name,"description":tool.description,
+                "input_schema":tool.input_schema,
+                "risk":if tool.read_only { "read" } else { "act" },
+                "background":false,"outward":false}));
+        }
+        let answer = self
+            .call(
+                "peer/tools/register",
+                json!({"session_id":session_id,"tools":declared,
+                    "call_timeout_ms":HOST_TOOL_TIMEOUT_MS}),
+            )
+            .await?;
+        // A tool Octos skipped (a kernel tool of the same name) is not offered.
+        let registered = answer["tools"].as_array().ok_or(Error::Identity)?;
+        if answer["session_id"] != session_id.as_str()
+            || registered.len() != tools.len()
+            || tools.iter().zip(registered).any(|(tool, answer)| {
+                answer["name"] != tool.name.as_str()
+                    || answer["model_name"] != tool.name.replace('.', "_").as_str()
+            })
+        {
+            return Err(Error::Identity);
+        }
+        Ok(())
+    }
+    /// One `peer/tool/call` for this session: its call ID, its declared
+    /// (dotted) name and its arguments. Its other fields stay unread.
+    pub fn host_tool_call(&self, params: &Value) -> Result<HostToolCall, Error> {
+        let session = params["session_id"].as_str().ok_or(Error::Identity)?;
+        let call_id = params["call_id"].as_str().ok_or(Error::Identity)?;
+        let name = params["name"].as_str().ok_or(Error::Identity)?;
+        if !self.ours(session)
+            || call_id.is_empty()
+            || call_id.len() > 128
+            || call_id.chars().any(char::is_control)
+            || !host_tool_name(name)
+        {
+            return Err(Error::Identity);
+        }
+        let args = match params.get("args") {
+            None | Some(Value::Null) => json!({}),
+            Some(args) if args.is_object() => args.clone(),
+            Some(_) => return Err(Error::Identity),
+        };
+        Ok(HostToolCall {
+            call_id: call_id.to_owned(),
+            name: name.to_owned(),
+            args,
+        })
+    }
+    /// Answer one host tool call: `Ok(data)` is the tool's output, `Err`
+    /// its failure message. `false` when Octos no longer waits for it (it
+    /// timed out or was cancelled): Octos already told the model, and the
+    /// session goes on.
+    pub async fn host_tool_result(
+        &mut self,
+        call_id: &str,
+        result: Result<Value, String>,
+    ) -> Result<bool, Error> {
+        let operation = Operation::new(self, Phase::Running)?;
+        let result = operation.driver.result_inner(call_id, result).await;
+        operation.finish(result)
+    }
+    async fn result_inner(
+        &mut self,
+        call_id: &str,
+        result: Result<Value, String>,
+    ) -> Result<bool, Error> {
+        let session_id = self.session_id.clone().ok_or(Error::State)?;
+        let mut params = json!({"session_id":session_id,"call_id":call_id});
+        match result {
+            Ok(data) => {
+                params["ok"] = true.into();
+                params["data"] = data;
+            }
+            Err(message) => {
+                let mut message = message;
+                if message.len() > 4096 {
+                    let mut end = 4096;
+                    while !message.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    message.truncate(end);
+                }
+                params["ok"] = false.into();
+                params["error"] = json!({"kind":"tool_error","message":message});
+            }
+        }
+        match self.call("peer/tool/result", params).await {
+            Ok(answer) if answer["call_id"] == call_id => Ok(answer["accepted"] == true),
+            Ok(_) => Err(Error::Identity),
+            Err(Error::Refused(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
     /// The next event the host must see, ending with `Idle`. Every return
     /// carries exactly one observation (`last_observation`).

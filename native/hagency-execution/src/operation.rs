@@ -1568,6 +1568,50 @@ struct OctosSession {
     session: String,
     turn: String,
     workspace: String,
+    tools: crate::octos_tools::Spec,
+}
+/// ADR-193 decision 5: answer one Octos host tool call through the dispatch's
+/// task helper, then give Octos the result. The lease is renewed meanwhile,
+/// as it is while Codex's own helper runs. A tool's failure is the model's to
+/// read; only a broken session refuses the dispatch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn answer_octos_tool(
+    tools: &mut crate::octos_tools::HostTools,
+    session: &mut OwnedOctosSession,
+    params: &serde_json::Value,
+    domain: &DomainStore,
+    cap: &RunnerCapability,
+    expected: &str,
+    cancel: &AtomicBool,
+    until: Instant,
+    status: &mut Option<TaskState>,
+) -> Result<(), Failure> {
+    let call = session
+        .host_tool_call(params)
+        .map_err(|_| Failure::Protocol)?;
+    let result = watched_with(
+        async { Ok::<_, ()>(tools.call(&call.name, call.args).await) },
+        |_| Failure::Protocol,
+        domain,
+        cap,
+        expected,
+        cancel,
+        until,
+        status,
+    )
+    .await?;
+    watched_with(
+        session.host_tool_result(&call.call_id, result),
+        |_| Failure::Protocol,
+        domain,
+        cap,
+        expected,
+        cancel,
+        until,
+        status,
+    )
+    .await?;
+    Ok(())
 }
 /// One Octos dispatch on a fresh guardian-owned `octos serve --stdio`
 /// (ADR-193), between the shared admission in `execute` and the shared
@@ -1597,6 +1641,14 @@ async fn run_octos_turn(
         ceiling,
         mut approval,
     } = turn;
+    // The task helper first: without its tools the dispatch does not start.
+    let (mut tools, registered) = bounded(
+        crate::octos_tools::HostTools::start(&prepared.tools),
+        cancel,
+        until,
+    )
+    .await?
+    .map_err(|_| Failure::Admission)?;
     note(
         domain,
         cap,
@@ -1647,6 +1699,17 @@ async fn run_octos_turn(
                 &prepared.workspace,
                 Permissions::WorkspaceWrite,
             ),
+            refused,
+            domain,
+            cap,
+            expected,
+            cancel,
+            until,
+            status,
+        )
+        .await?;
+        watched_with(
+            session.register_tools(&registered),
             refused,
             domain,
             cap,
@@ -1720,6 +1783,8 @@ async fn run_octos_turn(
                     crate::approval::octos::OctosDrive {
                         domain,
                         cap,
+                        expected,
+                        tools: &mut tools,
                         cancel,
                         until: ceiling,
                         status,
@@ -1749,8 +1814,16 @@ async fn run_octos_turn(
                 .await?;
             match event {
                 Event::Approval { .. } => return Err(Failure::UnsupportedApproval),
-                // No host tool is registered on the session yet.
-                Event::ToolCall { .. } => return Err(Failure::Protocol),
+                Event::ToolCall { params } => {
+                    answer_octos_tool(
+                        &mut tools, session, &params, domain, cap, expected, cancel, ceiling,
+                        status,
+                    )
+                    .await?;
+                    if idle {
+                        return Ok(());
+                    }
+                }
                 _ if idle => return Ok(()),
                 _ => {}
             }
@@ -2282,6 +2355,7 @@ async fn execute(
             session,
             turn,
             workspace,
+            tools,
         } => {
             let drive = run_octos_turn(
                 OctosTurn {
@@ -2303,6 +2377,7 @@ async fn execute(
                     session,
                     turn,
                     workspace,
+                    tools,
                 },
                 report,
             )
