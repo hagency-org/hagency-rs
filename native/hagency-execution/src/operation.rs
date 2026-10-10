@@ -43,6 +43,7 @@ pub enum AuthoritySite {
     AccountCheck,
     LocalCodexCheck,
     LocalClaudeCheck,
+    LocalOctosCheck,
     TaskMcpBind,
     WarmRoot,
     WarmScope,
@@ -71,6 +72,7 @@ impl AuthoritySite {
             Self::AccountCheck => "account_check",
             Self::LocalCodexCheck => "local_codex_check",
             Self::LocalClaudeCheck => "local_claude_check",
+            Self::LocalOctosCheck => "local_octos_check",
             Self::TaskMcpBind => "task_mcp_bind",
             Self::WarmRoot => "warm_root",
             Self::WarmScope => "warm_scope",
@@ -498,7 +500,7 @@ pub struct Report {
     stopped_scope: Option<hagency_store::OwnedDispatchScope>,
     stop_inspection: crate::inspection::Inspection,
     pub(crate) account: Option<hagency_store::ManagedLaunch>,
-    local_codex: Option<Arc<crate::LocalCodex>>,
+    local_codex: Option<Arc<crate::LocalBinding>>,
     handoff: Handoff,
     registration: Option<Gate>,
 }
@@ -1612,6 +1614,7 @@ async fn run_octos_turn(
     )
     .await;
     let refused = |_: hagency_runtime::octos::session::Error| Failure::Protocol;
+    let local = report.local_codex.clone();
     let mut outcome = crate::approval::octos::OctosOutcome::default();
     let status = &mut report.canonical_status;
     let usage = report.usage.as_mut().ok_or(Failure::UsageBinding)?;
@@ -1751,6 +1754,14 @@ async fn run_octos_turn(
                 _ if idle => return Ok(()),
                 _ => {}
             }
+        }
+    };
+    // The user's Octos home is checked through the turn, as a sign-in folder
+    // is for Codex and Claude Code.
+    let drive = async move {
+        match local {
+            Some(local) => local.watch(drive).await,
+            None => drive.await,
         }
     };
     // ADR-183 decision D: the budget only notifies under the turn.

@@ -2,8 +2,8 @@
 //! the session driver reads, and every other frame ignored by OUP's additive
 //! rule.
 use hagency_runtime::octos::{
-    Decoder, Error, Frame, MAX_FRAME_BYTES, Notification, Outcome, Payload, profile_id, request,
-    serve_arguments, session_key, uuid,
+    Decoder, Error, Frame, MAX_FRAME_BYTES, MAX_PROFILE_BYTES, Notification, Outcome, Payload,
+    ProfileModel, profile_id, profile_model, request, serve_arguments, session_key, uuid,
 };
 use serde_json::{Value, json};
 
@@ -266,6 +266,68 @@ fn native_octos_requests_and_launch_arguments_are_bounded() {
     ] {
         assert!(!uuid(invalid), "{invalid}");
     }
+}
+
+/// ADR-193 decision 7: Hagency reads a profile's own ID and its primary model
+/// only. Keys beside them are never kept, a sub-account (whose model is its
+/// parent's) is never read as runnable, and a file for another ID is refused.
+#[test]
+fn native_octos_profile_model_reads_the_primary_only() {
+    let profile = json!({
+        "id": "dev", "name": "Dev", "enabled": true,
+        "created_at": "2026-10-08T00:00:00Z", "updated_at": "2026-10-08T00:00:00Z",
+        "config": {
+            "llm": {
+                "primary": {"family_id": "zai-coding", "model_id": "glm-5.3-flash",
+                    "route": {"base_url": "https://example.test/api"}},
+                "fallbacks": [{"family_id": "deepseek", "model_id": "deepseek-v4-flash"}],
+            },
+            "env_vars": {"SYNTHETIC_API_KEY": "synthetic-secret-never-kept"},
+        },
+    });
+    let bytes = serde_json::to_vec(&profile).unwrap();
+    let model = profile_model("dev", &bytes).unwrap();
+    assert_eq!(
+        model,
+        ProfileModel {
+            family: "zai-coding".into(),
+            model: "glm-5.3-flash".into(),
+        }
+    );
+    assert!(!format!("{model:?}").contains("synthetic-secret"));
+    // The file must be the profile the resource names.
+    assert_eq!(profile_model("other", &bytes), None);
+    assert_eq!(profile_model("../dev", &bytes), None);
+    // A sub-account inherits its parent's primary: never read as its own.
+    let mut child = profile.clone();
+    child["parent_id"] = json!("dev");
+    assert_eq!(
+        profile_model("dev", &serde_json::to_vec(&child).unwrap()),
+        None
+    );
+    // No primary, a partial primary, or a malformed file runs nothing.
+    for config in [
+        json!({}),
+        json!({"llm": {"fallbacks": []}}),
+        json!({"llm": {"primary": {"family_id": "zai-coding"}}}),
+        json!({"llm": {"primary": {"family_id": "", "model_id": "glm-5.3-flash"}}}),
+        json!({"llm": {"primary": {"family_id": "zai\ncoding", "model_id": "glm"}}}),
+    ] {
+        let mut changed = profile.clone();
+        changed["config"] = config;
+        assert_eq!(
+            profile_model("dev", &serde_json::to_vec(&changed).unwrap()),
+            None
+        );
+    }
+    assert_eq!(profile_model("dev", b"{\"id\":\"dev\""), None);
+    // A file over the bound is not read at all.
+    let mut large = profile;
+    large["padding"] = json!("x".repeat(MAX_PROFILE_BYTES as usize));
+    assert_eq!(
+        profile_model("dev", &serde_json::to_vec(&large).unwrap()),
+        None
+    );
 }
 
 #[test]

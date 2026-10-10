@@ -1799,6 +1799,7 @@ div[data-engagement-id] > section:nth-last-child(-n+2) { grid-column: auto; }
 .setup-agent { border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin: 16px 0; background: var(--page); }
 .setup-agent h3 { margin: 0 0 8px; font-size: 16px; }
 .setup-agent code { overflow-wrap: anywhere; }
+.setup-profiles { margin: 4px 0 8px; padding-left: 20px; }
 .setup-source-form, .association-form, .association-form fieldset { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px; }
 .association-form fieldset { border: 0; padding: 0; margin: 0; min-width: 0; background: transparent; }
 .setup-source-form label, .association-form label { display: grid; gap: 8px; }

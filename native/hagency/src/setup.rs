@@ -3,9 +3,10 @@
 //!
 //! It initializes the state directory when it is new, finds each coding
 //! agent on this machine (Codex and its sign-in folder, Claude Code and its
-//! folder, ADR-192), writes `fleet-runtime.json` (0600) and then validates it
-//! with the same loader `serve` uses, so a file this command accepts is a
-//! file the service accepts.
+//! folder, ADR-192; Octos, its home and the profiles Hagency qualifies,
+//! ADR-193), writes `fleet-runtime.json` (0600) and then validates it with
+//! the same loader `serve` uses, so a file this command accepts is a file the
+//! service accepts.
 use crate::bootstrap::Failure;
 use hagency_store::{DomainRepository, Repository, private};
 use sha2::{Digest, Sha256};
@@ -46,6 +47,14 @@ pub struct Options {
     pub claude_config_dir: Option<PathBuf>,
     /// Leave Claude Code out.
     pub no_claude: bool,
+    /// The Octos executable (ADR-193); when absent, the one the runtime
+    /// already pins, else the one found on `PATH`.
+    pub octos: Option<PathBuf>,
+    /// The Octos home holding the user's profiles; when absent, the one the
+    /// runtime already names, else `$OCTOS_HOME` or `~/.octos`.
+    pub octos_home: Option<PathBuf>,
+    /// Leave Octos out.
+    pub no_octos: bool,
     /// Replace an existing `fleet-runtime.json` (the old one is kept as a
     /// `.bak-<seconds>` copy).
     pub force: bool,
@@ -67,7 +76,40 @@ pub struct Report {
     pub claude_folder: Option<PathBuf>,
     /// Why a Claude Code found on `PATH` was left out.
     pub claude_problem: Option<String>,
+    /// The Octos executable and home, when Octos is configured, and every
+    /// profile found there with its primary model.
+    pub octos: Option<PathBuf>,
+    pub octos_home: Option<PathBuf>,
+    pub octos_profiles: Vec<OctosProfile>,
+    /// Why an Octos found on `PATH` (or pinned before) was left out.
+    pub octos_problem: Option<String>,
     pub runtime_file: PathBuf,
+}
+
+/// One of the user's Octos profiles as Setup lists it (ADR-193 decision 8):
+/// its ID, its primary model and the tier Hagency qualifies that model at,
+/// if any. Nothing else of the profile is read: it may hold the user's keys.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OctosProfile {
+    pub id: String,
+    /// The primary's provider family and model; `None` for a profile with
+    /// no primary of its own (a sub-account), which is never offered.
+    pub family: Option<String>,
+    pub model: Option<String>,
+    pub tier: Option<hagency_core::qualification::Tier>,
+}
+impl OctosProfile {
+    /// Offered and allowed: its model is one Hagency qualifies.
+    pub fn qualified(&self) -> bool {
+        self.tier.is_some()
+    }
+}
+/// What Setup configures for Octos.
+struct OctosFound {
+    executable: PathBuf,
+    home: PathBuf,
+    profiles: Vec<OctosProfile>,
 }
 
 /// `hagency init`: a new or empty private directory, a fresh operator token
@@ -124,6 +166,7 @@ pub fn configure(options: &Options) -> Result<Report, String> {
     // operator names must work. Claude Code merely found on `PATH` is left
     // out with its reason when it cannot be used; Codex merely missing from
     // `PATH` is left out only when Claude Code is configured instead.
+    let path = state.join(RUNTIME_FILE);
     let mut claude_problem = None;
     let requested = options.claude.is_some() || options.claude_config_dir.is_some();
     let claude = if options.no_claude || (!requested && which("claude").is_none()) {
@@ -146,16 +189,57 @@ pub fn configure(options: &Options) -> Result<Report, String> {
             Err(problem) => return Err(problem),
         }
     };
+    // Octos (ADR-193 decision 8): the binary and home the operator names, else
+    // the ones the runtime already pins (a stable install the operator chose
+    // is kept across rewrites), else the ones found here. Octos keeps its keys
+    // itself; Hagency neither asks about nor checks them. Its profiles are
+    // listed, and those whose primary model Hagency qualifies are allowed.
+    let mut octos_problem = None;
+    let octos_requested = options.octos.is_some() || options.octos_home.is_some();
+    let pinned = pinned_octos(&path);
+    let octos = if options.no_octos
+        || (!octos_requested && pinned.0.is_none() && which("octos").is_none())
+    {
+        None
+    } else {
+        let found = octos_executable(options.octos.as_deref().or(pinned.0.as_deref())).and_then(
+            |executable| {
+                let home = octos_home(options.octos_home.as_deref().or(pinned.1.as_deref()))?;
+                let profiles = octos_profiles(&home)?;
+                if !profiles.iter().any(OctosProfile::qualified) {
+                    return Err(format!(
+                        "no Octos profile in {} runs a model Hagency qualifies; give one a qualified primary model, then run setup again",
+                        home.display()
+                    ));
+                }
+                Ok(OctosFound {
+                    executable,
+                    home,
+                    profiles,
+                })
+            },
+        );
+        match found {
+            Ok(found) => Some(found),
+            Err(problem) if !octos_requested => {
+                octos_problem = Some(problem);
+                None
+            }
+            Err(problem) => return Err(problem),
+        }
+    };
     let codex = if options.no_codex
-        || (options.codex.is_none() && which("codex").is_none() && claude.is_some())
+        || (options.codex.is_none()
+            && which("codex").is_none()
+            && (claude.is_some() || octos.is_some()))
     {
         None
     } else {
         Some(codex_executable(options.codex.as_deref())?)
     };
-    if codex.is_none() && claude.is_none() {
-        return Err(claude_problem.unwrap_or_else(|| {
-            "no coding agent to configure; install Codex or Claude Code".to_owned()
+    if codex.is_none() && claude.is_none() && octos.is_none() {
+        return Err(claude_problem.or(octos_problem).unwrap_or_else(|| {
+            "no coding agent to configure; install Codex, Claude Code or Octos".to_owned()
         }));
     }
     // The host's own Codex folder matters only to the local Codex binding;
@@ -181,7 +265,6 @@ pub fn configure(options: &Options) -> Result<Report, String> {
     let task_client = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|e| format!("running executable path: {e}"))?;
-    let path = state.join(RUNTIME_FILE);
     // A rewrite (an agent updated or newly found, ADR-192 decision 7) replaces
     // only the coding-agent blocks: every other setting of the existing file,
     // the operator's own included, is kept as it was.
@@ -194,7 +277,13 @@ pub fn configure(options: &Options) -> Result<Report, String> {
     let mut document = match existing {
         Some(mut existing) => {
             if let Some(settings) = existing.as_object_mut() {
-                for agent in ["executable", "executable_sha256", "local_codex", "claude"] {
+                for agent in [
+                    "executable",
+                    "executable_sha256",
+                    "local_codex",
+                    "claude",
+                    "octos",
+                ] {
                     settings.remove(agent);
                 }
             }
@@ -238,6 +327,26 @@ pub fn configure(options: &Options) -> Result<Report, String> {
             },
         });
     }
+    if let Some(octos) = &octos {
+        let allowed: Vec<&str> = octos
+            .profiles
+            .iter()
+            .filter(|profile| profile.qualified())
+            .map(|profile| profile.id.as_str())
+            .collect();
+        document["octos"] = serde_json::json!({
+            "executable": octos.executable,
+            "executable_sha256": sha256_file(&octos.executable)?,
+            "local_octos": {
+                "profile": "provider_owned_octos_v1",
+                "preset": "local_octos",
+                "seat": "local_octos_seat",
+                "home": user_home()?,
+                "octos_home": octos.home,
+                "profiles": allowed,
+            },
+        });
+    }
     let bytes = serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?;
 
     if path.exists() {
@@ -272,6 +381,13 @@ pub fn configure(options: &Options) -> Result<Report, String> {
         claude_folder: claude.as_ref().map(|(_, folder)| folder.clone()),
         claude: claude.map(|(executable, _)| executable),
         claude_problem,
+        octos_home: octos.as_ref().map(|octos| octos.home.clone()),
+        octos_profiles: octos
+            .as_ref()
+            .map(|octos| octos.profiles.clone())
+            .unwrap_or_default(),
+        octos: octos.map(|octos| octos.executable),
+        octos_problem,
         runtime_file: path,
     })
 }
@@ -323,6 +439,138 @@ fn claude_executable(requested: Option<&Path>) -> Result<PathBuf, String> {
         ));
     }
     Ok(canonical)
+}
+
+/// The Octos executable and home `fleet-runtime.json` already pins, while
+/// they still exist: an operator's chosen install is kept across rewrites.
+fn pinned_octos(runtime: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
+    let value = std::fs::read(runtime)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+    let named = |value: &serde_json::Value| value.as_str().map(PathBuf::from);
+    (
+        named(&value["octos"]["executable"]).filter(|path| path.is_file()),
+        named(&value["octos"]["local_octos"]["octos_home"]).filter(|path| path.is_dir()),
+    )
+}
+
+/// The user's Octos home: as given, else `$OCTOS_HOME`, else `~/.octos`.
+fn octos_home(requested: Option<&Path>) -> Result<PathBuf, String> {
+    let path = match requested {
+        Some(path) => path.to_owned(),
+        None => match std::env::var_os("OCTOS_HOME").filter(|home| !home.is_empty()) {
+            Some(home) => PathBuf::from(home),
+            None => user_home()?.join(".octos"),
+        },
+    };
+    path.canonicalize().map_err(|_| {
+        format!(
+            "Octos home {} not found; set up an Octos profile on this machine first, or pass --octos-home",
+            path.display()
+        )
+    })
+}
+
+/// The user's Octos profiles (ADR-193 decision 8), sorted by ID: of each
+/// `profiles/<id>.json`, its ID and primary model only, read bounded. Keys a
+/// profile holds are never kept or shown.
+pub fn octos_profiles(home: &Path) -> Result<Vec<OctosProfile>, String> {
+    const MAX_ENTRIES: usize = 1024;
+    const MAX_PROFILES: usize = 64;
+    let folder = home.join("profiles");
+    let entries = std::fs::read_dir(&folder).map_err(|_| {
+        format!(
+            "Octos profiles folder {} not found; set up an Octos profile first",
+            folder.display()
+        )
+    })?;
+    let mut profiles = Vec::new();
+    for entry in entries.flatten().take(MAX_ENTRIES) {
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .filter(|id| hagency_runtime::octos::profile_id(id))
+        else {
+            continue;
+        };
+        let model = read_bounded(&entry.path(), hagency_runtime::octos::MAX_PROFILE_BYTES)
+            .and_then(|bytes| hagency_runtime::octos::profile_model(id, &bytes));
+        let tier = model.as_ref().and_then(|model| {
+            hagency_core::qualification::model(&hagency_core::qualification::ModelProfile {
+                framework: "octos".into(),
+                model: model.model.clone(),
+                provider: Some(model.family.clone()),
+                reasoning: None,
+            })
+            .0
+        });
+        profiles.push(OctosProfile {
+            id: id.to_owned(),
+            family: model.as_ref().map(|model| model.family.clone()),
+            model: model.map(|model| model.model),
+            tier,
+        });
+        if profiles.len() == MAX_PROFILES {
+            break;
+        }
+    }
+    profiles.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(profiles)
+}
+
+/// A regular file's bytes, or nothing when it is not one or is over `max`.
+fn read_bounded(path: &Path, max: u64) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > max {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max).then_some(bytes)
+}
+
+/// The Octos executable `serve` must run (ADR-193 decision 8): an absolute,
+/// canonical, native binary. Homebrew's `bin/octos` is a bash wrapper that
+/// execs `libexec/octos`, and npm's `bin/octos.js` is a Node launcher for
+/// `vendor/octos`; each is resolved to that binary, beside which Octos finds
+/// its bundled skills. Any other script is refused.
+fn octos_executable(requested: Option<&Path>) -> Result<PathBuf, String> {
+    let found = match requested {
+        Some(path) => path.to_owned(),
+        None => which("octos")
+            .ok_or("Octos was not found on PATH; install it or pass --octos <path-to-binary>")?,
+    };
+    let canonical = found
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", found.display()))?;
+    if !is_script(&canonical)? {
+        return Ok(canonical);
+    }
+    native_beside_octos_script(&canonical).ok_or_else(|| {
+        format!(
+            "{} is a launcher script and no native Octos binary was found beside it; pass --octos <path-to-binary>",
+            canonical.display()
+        )
+    })
+}
+
+/// `<package>/bin/octos` (Homebrew) or `<package>/bin/octos.js` (npm) runs
+/// `<package>/libexec/octos` or `<package>/vendor/octos`.
+fn native_beside_octos_script(script: &Path) -> Option<PathBuf> {
+    let bin = script.parent()?;
+    if bin.file_name()? != "bin" {
+        return None;
+    }
+    let package = bin.parent()?;
+    ["libexec", "vendor"]
+        .iter()
+        .map(|folder| package.join(folder).join("octos"))
+        .find(|binary| binary.is_file() && !is_script(binary).unwrap_or(true))?
+        .canonicalize()
+        .ok()
 }
 
 fn codex_home(requested: Option<&Path>) -> Result<PathBuf, String> {
@@ -465,14 +713,15 @@ mod tests {
             serde_json::json!({"executable": binary, "executable_sha256": digest}).to_string(),
         )
         .unwrap();
-        assert!(runtime_matches(root.path(), Some(&binary), None));
+        assert!(runtime_matches(root.path(), Some(&binary), None, None));
         // A Codex update replaces the binary in place.
         std::fs::write(&binary, b"version two").unwrap();
-        assert!(!runtime_matches(root.path(), Some(&binary), None));
+        assert!(!runtime_matches(root.path(), Some(&binary), None, None));
         // A different binary path is stale too.
         assert!(!runtime_matches(
             root.path(),
             Some(&root.path().join("other")),
+            None,
             None
         ));
     }
@@ -494,28 +743,48 @@ mod tests {
             std::fs::write(root.path().join(RUNTIME_FILE), value.to_string()).unwrap()
         };
         write(&both);
-        assert!(runtime_matches(root.path(), Some(&codex), Some(&claude)));
+        assert!(runtime_matches(
+            root.path(),
+            Some(&codex),
+            Some(&claude),
+            None
+        ));
         // A Claude Code update replaces its binary.
         std::fs::write(&claude, b"claude two").unwrap();
-        assert!(!runtime_matches(root.path(), Some(&codex), Some(&claude)));
+        assert!(!runtime_matches(
+            root.path(),
+            Some(&codex),
+            Some(&claude),
+            None
+        ));
         std::fs::write(&claude, b"claude one").unwrap();
         // An agent named but no longer found would be refused by serve.
-        assert!(!runtime_matches(root.path(), Some(&codex), None));
-        assert!(!runtime_matches(root.path(), None, Some(&claude)));
+        assert!(!runtime_matches(root.path(), Some(&codex), None, None));
+        assert!(!runtime_matches(root.path(), None, Some(&claude), None));
         // An agent found but not named is not configured yet.
         let mut codex_only = both.clone();
         codex_only.as_object_mut().unwrap().remove("claude");
         write(&codex_only);
-        assert!(runtime_matches(root.path(), Some(&codex), None));
-        assert!(!runtime_matches(root.path(), Some(&codex), Some(&claude)));
+        assert!(runtime_matches(root.path(), Some(&codex), None, None));
+        assert!(!runtime_matches(
+            root.path(),
+            Some(&codex),
+            Some(&claude),
+            None
+        ));
         // Claude Code alone.
         let mut claude_only = both.clone();
         let object = claude_only.as_object_mut().unwrap();
         object.remove("executable");
         object.remove("executable_sha256");
         write(&claude_only);
-        assert!(runtime_matches(root.path(), None, Some(&claude)));
-        assert!(!runtime_matches(root.path(), Some(&codex), Some(&claude)));
+        assert!(runtime_matches(root.path(), None, Some(&claude), None));
+        assert!(!runtime_matches(
+            root.path(),
+            Some(&codex),
+            Some(&claude),
+            None
+        ));
     }
 
     #[cfg(unix)]
@@ -537,6 +806,159 @@ mod tests {
         std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
         let error = claude_executable(Some(&script)).unwrap_err();
         assert!(error.contains("launcher script"), "{error}");
+    }
+
+    /// ADR-193 decision 8: Homebrew's bash wrapper and npm's Node launcher
+    /// are resolved to the native binary they run; a native binary is pinned
+    /// as given, and any other script is refused.
+    #[test]
+    fn octos_wrappers_resolve_to_the_native_binary() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        // Homebrew: Cellar/octos/<version>/bin/octos execs ../libexec/octos.
+        let cellar = root.join("Cellar/octos/2.0.3-rc.13");
+        std::fs::create_dir_all(cellar.join("bin")).unwrap();
+        std::fs::create_dir_all(cellar.join("libexec")).unwrap();
+        let libexec = cellar.join("libexec/octos");
+        std::fs::write(
+            cellar.join("bin/octos"),
+            format!("#!/bin/bash\nexec \"{}\" \"$@\"\n", libexec.display()),
+        )
+        .unwrap();
+        std::fs::write(&libexec, b"\xcf\xfa\xed\xfe native octos").unwrap();
+        assert_eq!(
+            octos_executable(Some(&cellar.join("bin/octos"))).unwrap(),
+            libexec
+        );
+        // npm: @octos-org/octos/bin/octos.js spawns ../vendor/octos.
+        let package = root.join("lib/node_modules/@octos-org/octos");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::create_dir_all(package.join("vendor")).unwrap();
+        std::fs::write(package.join("bin/octos.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(package.join("vendor/octos"), b"\x7fELF native octos").unwrap();
+        assert_eq!(
+            octos_executable(Some(&package.join("bin/octos.js"))).unwrap(),
+            package.join("vendor/octos")
+        );
+        // A native binary, such as a release build, is pinned as given.
+        let release = root.join("octos");
+        std::fs::write(&release, b"\xcf\xfa\xed\xfe native octos").unwrap();
+        assert_eq!(octos_executable(Some(&release)).unwrap(), release);
+        // A script with no native binary where the wrappers keep it.
+        let script = root.join("scripts/octos");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/sh\nexec octos \"$@\"\n").unwrap();
+        let error = octos_executable(Some(&script)).unwrap_err();
+        assert!(error.contains("launcher script"), "{error}");
+        let lone = root.join("lone/bin/octos");
+        std::fs::create_dir_all(lone.parent().unwrap()).unwrap();
+        std::fs::write(&lone, "#!/bin/bash\n").unwrap();
+        assert!(octos_executable(Some(&lone)).is_err());
+    }
+
+    /// ADR-193 decision 8: Setup lists every profile with its primary model
+    /// and qualifies that model; it reads nothing else of a profile, and a
+    /// profile without a primary of its own is listed but never qualified.
+    #[test]
+    fn octos_profiles_list_their_primary_models() {
+        let root = tempfile::tempdir().unwrap();
+        let profiles = root.path().join("profiles");
+        std::fs::create_dir_all(profiles.join("dev")).unwrap();
+        let write = |id: &str, value: serde_json::Value| {
+            std::fs::write(
+                profiles.join(format!("{id}.json")),
+                serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap()
+        };
+        let primary = |id: &str, family: &str, model: &str| {
+            serde_json::json!({"id": id, "name": id, "config": {
+                "llm": {"primary": {"family_id": family, "model_id": model}},
+                "env_vars": {"SYNTHETIC_API_KEY": "synthetic-secret-never-listed"}}})
+        };
+        write("dev", primary("dev", "zai-coding", "glm-5.3-flash"));
+        write("kimi", primary("kimi", "moonshot", "kimi-k3"));
+        write("other", primary("other", "acme", "unknown-model"));
+        write(
+            "legacy",
+            serde_json::json!({"id": "legacy", "name": "legacy", "config": {}}),
+        );
+        let mut child = primary("child", "zai-coding", "glm-5.3-flash");
+        child["parent_id"] = "dev".into();
+        write("child", child);
+        // A file named for one profile but holding another is not that profile.
+        write("alias", primary("dev", "zai-coding", "glm-5.3-flash"));
+        std::fs::write(profiles.join("notes.txt"), "not a profile").unwrap();
+        std::fs::write(profiles.join("-bad.json"), "{}").unwrap();
+        let listed = octos_profiles(root.path()).unwrap();
+        let ids: Vec<_> = listed.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["alias", "child", "dev", "kimi", "legacy", "other"]);
+        let by_id = |id: &str| listed.iter().find(|p| p.id == id).unwrap().clone();
+        assert_eq!(
+            by_id("dev"),
+            OctosProfile {
+                id: "dev".into(),
+                family: Some("zai-coding".into()),
+                model: Some("glm-5.3-flash".into()),
+                tier: Some(hagency_core::qualification::Tier::Medium),
+            }
+        );
+        assert_eq!(
+            by_id("kimi").tier,
+            Some(hagency_core::qualification::Tier::Strong)
+        );
+        assert!(by_id("other").model.is_some() && !by_id("other").qualified());
+        for unread in ["alias", "child", "legacy"] {
+            assert_eq!(by_id(unread).model, None, "{unread}");
+            assert!(!by_id(unread).qualified(), "{unread}");
+        }
+        assert!(!format!("{listed:?}").contains("synthetic-secret"));
+        // No profiles folder is a problem named for the operator.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(
+            octos_profiles(empty.path())
+                .unwrap_err()
+                .contains("profiles folder")
+        );
+    }
+
+    /// The runtime is stale for Octos when its binary changed or the allowed
+    /// profiles are no longer exactly the qualified ones found.
+    #[test]
+    fn octos_staleness_covers_the_binary_and_the_allowed_profiles() {
+        let root = tempfile::tempdir().unwrap();
+        let octos = root.path().join("octos");
+        std::fs::write(&octos, b"octos one").unwrap();
+        std::fs::write(
+            root.path().join(RUNTIME_FILE),
+            serde_json::json!({"octos": {"executable": octos,
+                "executable_sha256": sha256_file(&octos).unwrap(),
+                "local_octos": {"profiles": ["dev"]}}})
+            .to_string(),
+        )
+        .unwrap();
+        let dev = ["dev".to_owned()];
+        assert!(runtime_matches(
+            root.path(),
+            None,
+            None,
+            Some((&octos, &dev))
+        ));
+        let more = ["dev".to_owned(), "kimi".to_owned()];
+        assert!(!runtime_matches(
+            root.path(),
+            None,
+            None,
+            Some((&octos, &more))
+        ));
+        assert!(!runtime_matches(root.path(), None, None, None));
+        std::fs::write(&octos, b"octos two").unwrap();
+        assert!(!runtime_matches(
+            root.path(),
+            None,
+            None,
+            Some((&octos, &dev))
+        ));
     }
 
     #[test]
@@ -562,10 +984,15 @@ pub struct AgentStatus {
     pub signed_in: bool,
     /// `chatgpt` or `api_key`, as the agent reports its sign-in.
     pub sign_in_kind: Option<&'static str>,
-    /// The sign-in is assumed, not checked: Claude Code (ADR-192 decision 6).
+    /// The sign-in is assumed, not checked: Claude Code (ADR-192 decision 6)
+    /// and Octos's keys (ADR-193 decision 8).
     pub sign_in_assumed: bool,
     /// Why the agent could not be used, in words for the page.
     pub problem: Option<String>,
+    /// Octos only, on an imported fleet: the user's profiles with their
+    /// primary models. Octos is usable once one runs a qualified model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<Vec<OctosProfile>>,
 }
 
 /// Detect Codex: the binary `setup` would use, its version, and
@@ -580,6 +1007,7 @@ pub async fn detect_codex() -> AgentStatus {
         sign_in_kind: None,
         sign_in_assumed: false,
         problem: None,
+        profiles: None,
     };
     let executable = match codex_executable(None) {
         Ok(path) => path,
@@ -626,6 +1054,7 @@ pub async fn detect_claude() -> AgentStatus {
         sign_in_kind: None,
         sign_in_assumed: true,
         problem: None,
+        profiles: None,
     };
     let executable = match claude_executable(None) {
         Ok(path) => path,
@@ -644,6 +1073,60 @@ pub async fn detect_claude() -> AgentStatus {
     // Usable once its own folder exists; the sign-in in it is assumed.
     match claude_folder(None) {
         Ok(_) => status.signed_in = true,
+        Err(problem) => status.problem = Some(problem),
+    }
+    status
+}
+
+/// Detect Octos (ADR-193 decision 8): the binary `setup` would pin (the one
+/// `<state>/fleet-runtime.json` pins, else the one on `PATH`) and `octos
+/// --version`, nothing else of it. Its keys are its own and assumed: Hagency
+/// neither asks about nor checks them, and a profile without a usable key
+/// shows up as refused turns on its agent. Only with a state directory (an
+/// imported fleet, where Setup applies) is the binary run and are the
+/// profiles in the Octos home listed; Octos is usable once one of them runs a
+/// model Hagency qualifies. Elsewhere it is only located.
+pub async fn detect_octos(state: Option<&Path>) -> AgentStatus {
+    let mut status = AgentStatus {
+        kind: "octos",
+        found: false,
+        path: None,
+        version: None,
+        signed_in: false,
+        sign_in_kind: None,
+        sign_in_assumed: true,
+        problem: None,
+        profiles: None,
+    };
+    let (pinned, pinned_home) = state
+        .map(|state| pinned_octos(&state.join(RUNTIME_FILE)))
+        .unwrap_or_default();
+    let executable = match octos_executable(pinned.as_deref()) {
+        Ok(path) => path,
+        Err(problem) => {
+            status.problem = Some(problem);
+            return status;
+        }
+    };
+    status.found = true;
+    status.path = Some(executable.clone());
+    if state.is_none() {
+        return status;
+    }
+    status.version = run_agent(&executable, &["--version"])
+        .await
+        .ok()
+        .map(|(_, out)| out.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    match octos_home(pinned_home.as_deref()).and_then(|home| octos_profiles(&home)) {
+        Ok(profiles) => {
+            status.signed_in = profiles.iter().any(OctosProfile::qualified);
+            if !status.signed_in {
+                status.problem =
+                    Some("none of the Octos profiles runs a model Hagency qualifies".into());
+            }
+            status.profiles = Some(profiles);
+        }
         Err(problem) => status.problem = Some(problem),
     }
     status
@@ -673,9 +1156,15 @@ async fn run_agent(executable: &Path, args: &[&str]) -> Result<(bool, String), S
 /// here, each binary with its current SHA-256 (ADR-192 decision 7). An
 /// update changes a binary, and `serve` refuses a pinned digest that no
 /// longer matches (`refused_config`); an agent found but not named is not
-/// configured yet, and one named but gone would be refused too. The setup
-/// page rewrites the file when this is false.
-pub fn runtime_matches(state: &Path, codex: Option<&Path>, claude: Option<&Path>) -> bool {
+/// configured yet, and one named but gone would be refused too. For Octos the
+/// allowed profiles must also be the qualified ones found (ADR-193). The
+/// setup page rewrites the file when this is false.
+pub fn runtime_matches(
+    state: &Path,
+    codex: Option<&Path>,
+    claude: Option<&Path>,
+    octos: Option<(&Path, &[String])>,
+) -> bool {
     let Ok(bytes) = std::fs::read(state.join(RUNTIME_FILE)) else {
         return false;
     };
@@ -695,5 +1184,10 @@ pub fn runtime_matches(state: &Path, codex: Option<&Path>, claude: Option<&Path>
         }
         _ => false,
     };
-    pinned(&value, codex) && pinned(&value["claude"], claude)
+    pinned(&value, codex)
+        && pinned(&value["claude"], claude)
+        && pinned(&value["octos"], octos.map(|(executable, _)| executable))
+        && octos.is_none_or(|(_, allowed)| {
+            value["octos"]["local_octos"]["profiles"] == serde_json::json!(allowed)
+        })
 }

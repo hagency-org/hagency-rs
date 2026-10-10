@@ -142,7 +142,9 @@ pub struct Host {
     environment: BTreeMap<OsString, OsString>,
     workspaces: Workspaces,
     managed_account: Option<hagency_store::ManagedAccount>,
-    pub(crate) local_codex: Option<Arc<crate::LocalCodex>>,
+    /// The provider-owned local binding: the user's Codex or Claude Code
+    /// folder, or their Octos home (ADR-193).
+    pub(crate) local_codex: Option<Arc<crate::LocalBinding>>,
     /// ADR-193: the private root of the Octos agents' instance directories.
     octos_instances: Option<PathBuf>,
     task_helper: Option<(PathBuf, SocketAddr)>,
@@ -269,20 +271,19 @@ impl Host {
     }
     /// Explicit provider-owned local login, separate from managed readiness.
     pub fn with_local_codex(self, local: crate::LocalCodex) -> Result<Self, super::Failure> {
-        self.with_retained_local_codex(Arc::new(local))
+        self.with_retained_local_codex(Arc::new(crate::LocalBinding::Folder(local)))
     }
     pub(crate) fn with_retained_local_codex(
         mut self,
-        local: Arc<crate::LocalCodex>,
+        local: Arc<crate::LocalBinding>,
     ) -> Result<Self, super::Failure> {
         // The binding names the runner's own agent folder: select the runner
-        // first (`with_claude_runner`), then bind its folder.
-        let matching = match self.runner {
-            Runner::Codex => local.provider() == crate::LocalProvider::Codex,
-            Runner::Claude => local.provider() == crate::LocalProvider::Claude,
-            Runner::Octos => false,
-        };
-        if self.managed_account.is_some() || self.local_codex.is_some() || !matching {
+        // first (`with_claude_runner`, `with_octos_runner`), then bind its
+        // folder.
+        if self.managed_account.is_some()
+            || self.local_codex.is_some()
+            || !local.serves(self.runner)
+        {
             return Err(super::Failure::Admission);
         }
         local.apply(&mut self.environment)?;
@@ -870,7 +871,13 @@ impl Host {
         home: &hagency_store::agent_home::ManagedAgentHome,
         workspace_id: &str,
     ) -> Result<Arc<crate::workspace::Root>, super::Failure> {
-        if self.task_helper.is_none() || self.task_context.is_some() {
+        // An Octos agent's task tools are host tools on its own OUP connection
+        // (ADR-193 decision 5), never the task helper.
+        let helper = match self.runner {
+            Runner::Codex | Runner::Claude => self.task_helper.is_some(),
+            Runner::Octos => self.task_helper.is_none(),
+        };
+        if !helper || self.task_context.is_some() {
             return Err(super::Failure::Admission);
         }
         let resource = scope.resource();

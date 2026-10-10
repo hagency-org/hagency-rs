@@ -30,14 +30,25 @@ pub struct WarmHostPlan {
     limits: WarmLimits,
     files: Option<(usize, bool, bool)>,
     coordination: bool,
-    local_codex: Option<Arc<crate::LocalCodex>>,
+    local_codex: Option<Arc<crate::LocalBinding>>,
     claude: Option<ClaudePlan>,
+    octos: Option<OctosPlan>,
 }
 /// ADR-192: what a Claude agent's Host is built from, beside the Codex plan.
 struct ClaudePlan {
     executable: PathBuf,
     environment: BTreeMap<OsString, OsString>,
-    local: Option<Arc<crate::LocalCodex>>,
+    local: Option<Arc<crate::LocalBinding>>,
+}
+/// ADR-193: what an Octos agent's Host is built from: the pinned `octos`
+/// binary, its own allowlisted environment, the user's Octos home with the
+/// profiles Hagency may run, and the private root of the agents' instance
+/// directories.
+struct OctosPlan {
+    executable: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+    local: Arc<crate::LocalBinding>,
+    instances: PathBuf,
 }
 /// The fixed native task helper, loopback origin and retained private context
 /// root form one Host capability. No getters, cloning or serialization.
@@ -125,6 +136,7 @@ impl WarmHostPlan {
             coordination: false,
             local_codex: None,
             claude: None,
+            octos: None,
         })
     }
     /// ADR-192: a plan for a machine that runs Claude Code only. Add the Claude
@@ -150,6 +162,7 @@ impl WarmHostPlan {
             coordination: false,
             local_codex: None,
             claude: None,
+            octos: None,
         })
     }
     /// ADR-192: also run Claude Code agents, from this executable and, when the
@@ -164,18 +177,50 @@ impl WarmHostPlan {
         if self.claude.is_some() || !executable.is_absolute() || !executable.is_file() {
             return Err(Failure::Admission);
         }
-        let local = local.map(Arc::new);
         let mut environment = environment;
-        if let Some(local) = &local {
-            if local.provider() != crate::LocalProvider::Claude {
-                return Err(Failure::Admission);
+        let local = match local {
+            Some(local) => {
+                if local.provider() != crate::LocalProvider::Claude {
+                    return Err(Failure::Admission);
+                }
+                local.apply(&mut environment)?;
+                Some(Arc::new(crate::LocalBinding::Folder(local)))
             }
-            local.apply(&mut environment)?;
-        }
+            None => None,
+        };
         self.claude = Some(ClaudePlan {
             executable,
             environment,
             local,
+        });
+        Ok(self)
+    }
+    /// ADR-193: also run Octos agents, from this pinned `octos` binary, the
+    /// user's Octos home binding (required: admission reads the profile it
+    /// names) and `instances`, the private root of each agent's instance
+    /// directory. The environment is the Octos agents' own; the Codex one is
+    /// untouched.
+    pub fn with_octos(
+        mut self,
+        executable: PathBuf,
+        environment: BTreeMap<OsString, OsString>,
+        local: crate::LocalOctos,
+        instances: PathBuf,
+    ) -> Result<Self, Failure> {
+        if self.octos.is_some()
+            || !executable.is_absolute()
+            || !executable.is_file()
+            || !instances.is_absolute()
+        {
+            return Err(Failure::Admission);
+        }
+        let mut environment = environment;
+        local.apply(&mut environment)?;
+        self.octos = Some(OctosPlan {
+            executable,
+            environment,
+            local: Arc::new(crate::LocalBinding::Octos(local)),
+            instances,
         });
         Ok(self)
     }
@@ -226,8 +271,10 @@ impl WarmHostPlan {
         scope: OwnedProvisionScope,
         home: Arc<ManagedAgentHome>,
     ) -> Result<FactoryRuntime, Failure> {
-        if scope.resource().framework == "claude" {
-            return self.claude_runtime(domain, scope, home, false).await;
+        match scope.resource().framework.as_str() {
+            "claude" => return self.claude_runtime(domain, scope, home, false).await,
+            "octos" => return self.octos_runtime(domain, scope, home, false).await,
+            _ => {}
         }
         let executable = self.codex_executable()?;
         let until = Instant::now() + Duration::from_millis(self.limits.initialize.operation_ms);
@@ -320,8 +367,10 @@ impl WarmHostPlan {
         scope: OwnedProvisionScope,
         home: Arc<ManagedAgentHome>,
     ) -> Result<FactoryRuntime, Failure> {
-        if scope.resource().framework == "claude" {
-            return self.claude_runtime(domain, scope, home, true).await;
+        match scope.resource().framework.as_str() {
+            "claude" => return self.claude_runtime(domain, scope, home, true).await,
+            "octos" => return self.octos_runtime(domain, scope, home, true).await,
+            _ => {}
         }
         let executable = self.codex_executable()?;
         // The original deadline includes the original writer and blocking Host
@@ -538,21 +587,110 @@ impl WarmHostPlan {
         .await
         .map_err(|_| Failure::Worker)?
     }
+    /// ADR-193: an Octos agent's runtime, attached like a Claude agent's: no
+    /// warm child, and every dispatch starts its own `octos serve --stdio`
+    /// through the follow-up binding. Its Host has approvals but no task
+    /// helper: Octos takes no MCP server per session, and its task tools are
+    /// host tools on its own connection (ADR-193 decision 5). Admission reads
+    /// the profile the resource names from the user's Octos home.
+    async fn octos_runtime(
+        &self,
+        domain: DomainStore,
+        scope: OwnedProvisionScope,
+        home: Arc<ManagedAgentHome>,
+        original: bool,
+    ) -> Result<FactoryRuntime, Failure> {
+        let octos = self
+            .octos
+            .as_ref()
+            .ok_or_else(|| Failure::UnsupportedRunner {
+                framework: "octos".into(),
+            })?;
+        // Managed accounts are Codex homes; Octos uses the keys in its own
+        // store (ADR-193 operator decision 2).
+        if scope.requires_managed_account() {
+            return Err(Failure::Admission);
+        }
+        let until = Instant::now() + Duration::from_millis(self.limits.initialize.operation_ms);
+        let guardian = self.guardian.clone();
+        let executable = octos.executable.clone();
+        let environment = octos.environment.clone();
+        let local = octos.local.clone();
+        let instances = octos.instances.clone();
+        let approvals = self.approvals.clone();
+        let files = self.files;
+        let activation_ms = self.limits.initialize.response_ms;
+        tokio::task::spawn_blocking(move || {
+            if Instant::now() >= until {
+                return Err(Failure::Deadline);
+            }
+            if original {
+                scope.claim_warm().map_err(|_| Failure::Admission)?;
+            }
+            let runtime_lease = scope.claim_runtime().map_err(|_| Failure::Admission)?;
+            let workspace = format!("work_{}", scope.engagement_id());
+            let work = home.workdir_path().map_err(|_| Failure::Admission)?;
+            local.admit_provision(&scope)?;
+            local.separate_from(&work)?;
+            let mut environment = environment;
+            local.apply(&mut environment)?;
+            let mut host = Host::new(
+                guardian,
+                executable,
+                environment,
+                BTreeMap::from([(workspace.clone(), work)]),
+            )?
+            .with_octos_runner(instances)?
+            .with_approvals(approvals)?;
+            // The file tools need the task helper; only the limit applies.
+            if let Some((limit, _, _)) = files {
+                host = host.with_file_limit(limit)?;
+            }
+            host = host.with_retained_local_codex(local.clone())?;
+            let root = host.reattach_root(&scope, &home, &workspace)?;
+            let binding = crate::warm::Binding::reattached(
+                scope,
+                runtime_lease,
+                home,
+                root,
+                workspace,
+                Some(local),
+            );
+            Ok(FactoryRuntime {
+                host: host.into_shared(),
+                domain,
+                warm: None,
+                activation_ms,
+                phase: Phase::Reattached(Box::new(binding)),
+                last: None,
+                cancelled: AtomicBool::new(false),
+            })
+        })
+        .await
+        .map_err(|_| Failure::Worker)?
+    }
 }
 impl FactoryRuntime {
     pub async fn ready(&mut self) -> Result<(), Failure> {
         match self.warm.as_mut() {
             Some(warm) => warm.ready().await,
-            // ADR-192: a Claude agent has no warm child before its first task;
-            // it is ready while its own root and sign-in folder check.
-            None => self.attached_claude()?.check_attached(),
+            // ADR-192, ADR-193: a Claude or Octos agent has no warm child
+            // before its first task; it is ready while its own root and local
+            // folder check.
+            None => self.attached()?.check_attached(),
         }
     }
-    /// The binding of a Claude agent attached without a warm child, before its
-    /// first dispatch. Anything else has no attached-only readiness.
-    fn attached_claude(&self) -> Result<&crate::warm::Binding, Failure> {
+    /// The binding of a Claude or Octos agent attached without a warm child,
+    /// before its first dispatch. Anything else has no attached-only
+    /// readiness.
+    fn attached(&self) -> Result<&crate::warm::Binding, Failure> {
         match &self.phase {
-            Phase::Reattached(binding) if self.host.0.runner == crate::host::Runner::Claude => {
+            Phase::Reattached(binding)
+                if matches!(
+                    self.host.0.runner,
+                    crate::host::Runner::Claude | crate::host::Runner::Octos
+                ) =>
+            {
                 Ok(binding)
             }
             _ => Err(Failure::Admission),
@@ -579,7 +717,7 @@ impl FactoryRuntime {
         }
         // ADR-192: the store's provision completion, bracketed by the attached
         // agent's own checks as a warm child brackets it with its process's.
-        let binding = self.attached_claude()?;
+        let binding = self.attached()?;
         binding.check_attached()?;
         let scope = binding.scope().clone();
         let until = Instant::now() + Duration::from_millis(self.activation_ms);
@@ -588,7 +726,7 @@ impl FactoryRuntime {
                 .await
                 .map_err(|_| Failure::Deadline)?
                 .map_err(|error| Failure::lost(crate::AuthoritySite::WarmProvision, &error))?;
-        self.attached_claude()?.check_attached()?;
+        self.attached()?.check_attached()?;
         Ok(engagement)
     }
     pub fn bind_claim_profile(

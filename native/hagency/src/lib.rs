@@ -163,6 +163,23 @@ impl App {
         live.start_pairings();
         self.with_palpo(status).with_palpo_live(live)
     }
+    /// The same for an imported fleet's own service (ADR-187), so the setup
+    /// page's fleet steps apply. Nothing connects and no fleet starts.
+    pub fn with_palpo_fleet_import(
+        self,
+        state: std::path::PathBuf,
+        address: std::net::SocketAddr,
+    ) -> Self {
+        let Some(domain) = self.domain.clone() else {
+            return self;
+        };
+        let status = bootstrap::palpo::StatusHandle::new(false);
+        let live =
+            bootstrap::palpo::Live::new(state, self.store.clone(), domain, status.clone(), false)
+                .with_fleet_service(address);
+        live.start_pairings();
+        self.with_palpo(status).with_palpo_live(live)
+    }
 
     pub(crate) fn palpo_live(&self) -> Option<&bootstrap::palpo::Live> {
         self.palpo_live.as_ref()

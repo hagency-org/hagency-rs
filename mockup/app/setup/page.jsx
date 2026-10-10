@@ -9,7 +9,7 @@ import { fetchSetup, checkSetup, offerResource } from '@/lib/native-api';
 import NativeAssociation from '@/components/NativeAssociation';
 
 const STEPS = ['runtime', 'connection', 'resource', 'track'];
-const AGENT_NAMES = { codex: 'Codex', claude: 'Claude Code' };
+const AGENT_NAMES = { codex: 'Codex', claude: 'Claude Code', octos: 'Octos' };
 
 function AgentCard({ agent }) {
   const t = useT();
@@ -17,8 +17,13 @@ function AgentCard({ agent }) {
   return <article className="setup-agent">
     <h3>{name}{agent.version ? ` · ${agent.version}` : ''}</h3>
     {!agent.found && <p>{t('st.notFound', { name })}</p>}
-    {/* ADR-192 decision 6: Claude Code's sign-in is assumed, never checked. */}
-    {agent.found && agent.signedIn && agent.signInAssumed && <p>{t('st.signInAssumed', { name })}</p>}
+    {/* ADR-192 decision 6: Claude Code's sign-in is assumed, never checked;
+        ADR-193 decision 8: so are Octos's keys. */}
+    {agent.found && agent.signedIn && agent.signInAssumed && <p>{t(agent.kind === 'octos' ? 'st.octosKeys' : 'st.signInAssumed', { name })}</p>}
+    {agent.kind === 'octos' && agent.profiles && <p>{t('st.octosProfiles')}</p>}
+    {agent.kind === 'octos' && agent.profiles && <ul className="setup-profiles">
+      {agent.profiles.map(p => <li key={p.id}><code>{p.id}</code> · {p.model ? `${p.family} / ${p.model}` : t('st.octosNoPrimary')} · {p.tier ? t('st.octosOffered', { tier: p.tier }) : t('st.octosNotQualified')}</li>)}
+    </ul>}
     {agent.found && agent.signedIn && !agent.signInAssumed && <p>{t('st.signedIn', { kind: agent.signInKind === 'api_key' ? t('st.kindApiKey') : agent.signInKind === 'chatgpt' ? t('st.kindChatgpt') : '—' })}</p>}
     {agent.found && agent.signedIn && agent.signInKind === 'chatgpt' && <p className="note">{t('st.planNote')}</p>}
     {agent.found && !agent.signedIn && !agent.signInAssumed && <p>{t('st.notSignedIn', { name })} <code>{agent.kind === 'codex' ? 'codex login' : ''}</code></p>}
@@ -82,7 +87,7 @@ export default function SetupPage() {
     event.preventDefault(); if (busy || !choice) return;
     setBusy(true); setNote(null);
     try {
-      await offerResource(choice.model, choice.reasoning, Number(tokens), choice.framework ?? 'codex');
+      await offerResource(choice.model, choice.reasoning, Number(tokens), choice.framework ?? 'codex', choice.profile ?? null);
       await load(); await data.refresh();
     } catch (error) {
       setNote(errorText(t, error.message));
@@ -122,7 +127,7 @@ export default function SetupPage() {
           {choices.length > 0 && <form className="setup-source-form" onSubmit={prepareSource}>
             <p>{t('guided.sourceHelp')}</p>
             <label>{t('guided.model')}<select value={choiceAt} onChange={e => setChoiceIndex(Number(e.target.value))} disabled={busy}>
-              {choices.map((c, i) => <option key={`${c.framework}:${c.model}:${c.reasoning}`} value={i}>{AGENT_NAMES[c.framework] ?? 'Codex'} · {c.model}{c.reasoning ? ` · ${c.reasoning}` : ''}</option>)}
+              {choices.map((c, i) => <option key={`${c.framework}:${c.profile ?? ''}:${c.model}:${c.reasoning}`} value={i}>{AGENT_NAMES[c.framework] ?? 'Codex'}{c.profile ? ` · ${c.profile}` : ''} · {c.model}{c.reasoning ? ` · ${c.reasoning}` : ''}</option>)}
             </select></label>
             <label>{t('guided.ceiling')}<input type="number" min="1" max={Number.MAX_SAFE_INTEGER} step="1" required value={tokens} onChange={e => setTokens(e.target.value)} disabled={busy} /></label>
             <p className="dim">{t('guided.ceilingHelp')}</p>

@@ -4,7 +4,9 @@ mod approval;
 mod factory;
 mod host;
 mod inspection;
+mod local_binding;
 mod local_codex;
+mod local_octos;
 mod operation;
 mod registration;
 mod usage;
@@ -16,7 +18,9 @@ pub use approval::{ApprovalHost, ApprovalNotice, ApprovalRequests};
 pub use factory::{FactoryDispatch, FactoryRuntime, WarmHostPlan, WarmTaskBridge};
 pub use host::{Host, Limits, Runner, SharedHost};
 pub use inspection::StopInspectionStatus;
+pub(crate) use local_binding::LocalBinding;
 pub use local_codex::{LocalCodex, LocalProvider};
+pub use local_octos::LocalOctos;
 pub use operation::{
     AuthorityCause, AuthoritySite, BudgetWatch, Failure, Operation, OverBudget, Protocol, Report,
     RuntimeObservation, RuntimeStage, RuntimeWriteObservation, Settlement, SettlementCause,
