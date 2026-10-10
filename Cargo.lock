@@ -1115,7 +1115,7 @@ dependencies = [
  "salvo",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "subtle",
  "tempfile",
  "thiserror",
@@ -1134,7 +1134,7 @@ dependencies = [
  "ryu-js",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror",
  "unicode-normalization",
 ]
@@ -1169,7 +1169,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1183,7 +1183,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
 ]
@@ -1213,7 +1213,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1245,7 +1245,7 @@ dependencies = [
  "matrix-sdk-crypto",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
 ]
@@ -1259,7 +1259,7 @@ dependencies = [
  "hagency-files",
  "hagency-media",
  "hagency-store",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "windows-sys 0.61.2",
@@ -1271,7 +1271,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror",
 ]
 
@@ -1327,7 +1327,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror",
 ]
 
@@ -1374,7 +1374,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "time",
