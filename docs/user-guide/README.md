@@ -2,13 +2,13 @@
 
 # Hagency quick start and user guide
 
-Run local Codex agents in Palpo Matrix projects and work with them in Rinx.
+Run local Codex and Claude Code agents in Palpo Matrix projects and work with them in Rinx.
 This guide follows the current server-engagement workflow: establish the
 connection, create resources, request a project, then request an agent.
 
 ## Terms used in this guide
 
-- **Hagency operator / resource owner**: runs Hagency on the Codex host and
+- **Hagency operator / resource owner**: runs Hagency on the coding-agent host and
   decides which resources and budgets to offer. The resource owner's Matrix
   account confirms server-connection requests.
 - **Palpo administrator**: approves installing the server engagement on the
@@ -21,7 +21,7 @@ connection, create resources, request a project, then request an agent.
   separate. A **fleet** is the server-side registration and account namespace
   for that connection, not another token pool.
 - **Resource**: a model, reasoning effort and token budget for one server
-  engagement. Several resources may use the same local Codex account.
+  engagement. Several resources may use the same local Codex or Claude Code sign-in.
 - **Source configuration**: an existing local configuration that supplies the
   coding framework, provider and account when creating a resource.
 - **Project owner / agent owner**: the Matrix user who requests the project or
@@ -37,7 +37,7 @@ connection, create resources, request a project, then request an agent.
 
 | Role | Where | Responsibility |
 | --- | --- | --- |
-| Hagency operator / resource owner | Hagency console; Rinx Palpo Inbox | Configure local Codex, request and verify connections, create resources and manage delegation. |
+| Hagency operator / resource owner | Hagency console; Rinx Palpo Inbox | Configure local Codex or Claude Code, request and verify connections, create resources and manage delegation. |
 | Palpo administrator | Rinx Palpo Inbox | Approve the server engagement. |
 | Coordinator | Rinx Palpo Inbox | Review project, agent and additional-token requests within the delegated resources. |
 | Project / agent owner | Rinx Palpo Resources, Projects and Agents; chat | Request a project and agent, accept the DM, send work and answer execution-approval cards. |
@@ -59,8 +59,9 @@ You need:
   manual JSON-import workflow instead.
 - Existing resource-owner and coordinator Matrix accounts on the selected
   server. A coordinator is not created automatically by entering a name.
-- Codex installed on the machine that runs Hagency. You sign it in yourself
-  in Step 1.
+- Codex, Claude Code, or both, installed on the machine that runs Hagency.
+  You sign them in yourself in Step 1. Claude Code must be its native install
+  (`claude install`).
 - An owner account that has cross-signing set up in Rinx (for example, by
   setting up secure backup or verifying a session). Hagency waits until the
   owner has a cross-signing key before it creates an agent for them.
@@ -69,10 +70,10 @@ Steps 1 to 3 are local operator setup. Step 4 involves the resource owner and
 administrator; Step 5 is resource configuration. Steps 6 to 8 involve the
 project owner and coordinator.
 
-## Step 1: Sign in to Codex
+## Step 1: Sign in to your coding agent
 
-Agents use the Codex sign-in on the machine that runs Hagency. Keep that
-machine and the Hagency service running while agents are working.
+Agents use the Codex or Claude Code sign-in on the machine that runs Hagency.
+Keep that machine and the Hagency service running while agents are working.
 
 On that machine, sign Codex in yourself:
 
@@ -82,8 +83,13 @@ codex login
 
 On a machine without a browser, add `--device-auth`.
 
+For Claude Code, run `claude` in a terminal on that machine and follow its
+login prompt. A personal Claude subscription is fine.
+
 Hagency never signs in for you, and it never reads or stores your
-credentials. It only asks Codex whether it is signed in.
+credentials. It only asks Codex whether it is signed in. For Claude Code it
+does not even ask: it assumes Claude Code is signed in. If Claude Code is
+signed out later, its agents' turns are refused until you sign in again.
 
 ## Step 2: Start Hagency and open the console
 
@@ -138,6 +144,11 @@ hagency console-access --state-dir "${XDG_DATA_HOME:-$HOME/.local/share}/hagency
 3. When Codex is signed in, you do not need to click anything. When the page
    loads, Hagency configures itself to run Codex. The page then says
    "Hagency is configured to run this agent."
+4. Claude Code is listed beside Codex with its path and version, and the page
+   says Hagency uses the sign-in Claude Code already has. Hagency configures
+   it the same way. If you install Claude Code after Hagency is running, click
+   **Check again** and restart Hagency as the page tells you; your other
+   settings are kept.
 
 The page shows how Codex is signed in: **ChatGPT plan** or **API key**. A
 ChatGPT plan sign-in is meant for personal use. Before you offer the agent to
@@ -180,21 +191,22 @@ want to reconnect. Do not revoke a working engagement just to add a resource.
 
 ## Step 5: Create a resource
 
-The wizard needs an existing local **Source configuration**. If the list is
-empty on a fresh installation, the operator must first create the local Codex
-source with the [operator API](../../README.md#create-a-resource-with-the-operator-api).
-**Setup** currently prepares the runtime but does not seed that first source;
-opening Setup again does not create one. This is a current onboarding gap.
+The wizard needs an existing local **Source configuration**. Setup's
+**Offer a resource** step creates one for each configured coding agent: choose
+a qualified model and a monthly token ceiling. When Codex already has a source,
+the step still offers Claude Code until it has one too. The
+[operator API](../../README.md#create-a-resource-with-the-operator-api) does the
+same from the command line.
 
 1. Open **My resources → New resource configuration**. The link in Setup opens
    the same wizard.
 2. Select the verified **Server engagement**.
-3. Under **Source configuration**, choose the local Codex configuration. The
+3. Under **Source configuration**, choose the local Codex or Claude Code configuration. The
    optional search filters framework, model or reasoning level. It does not
    ask for an agent, project or role. Paging controls appear only when more
    source configurations exist.
 4. Choose a **Model** and **Reasoning** level from the available qualified
-   choices.
+   choices. Claude Code models have no reasoning level.
 5. On **Budget**, enter the monthly token budget and **Eligible Matrix project
    managers**. Use full user IDs on this server, separated by spaces or newlines,
    for example:
@@ -293,6 +305,14 @@ approvals are different decisions.
 
    Some cards offer only **Approve once** and **Deny**. Typing a text reply
    does not count as an answer; use the buttons.
+
+For a Claude Code agent the card says **Runtime: claude** and shows the tool,
+such as Bash, with its exact input. **Approve once** runs exactly that input.
+**Allow for this task** and **Always allow this operation** cover the same
+tool with the same input; Hagency answers later identical requests itself.
+**Deny** tells Claude the action was not allowed, and Claude carries on and
+replies, for example that it could not run the command. A card that expires
+unanswered counts as **Deny**.
 
 Hagency uses a separate approval-bot device for each owner. One owner's cards
 are never encrypted for another owner.
@@ -445,8 +465,8 @@ operator to inspect Matrix key exchange and runtime intake rather than treating
 @mentions as a DM requirement.
 
 **The log shows `refused_config`, or Setup says "The coding agent changed".**
-Codex was updated, and Hagency's configuration still names the old Codex
-binary.
+Codex or Claude Code was updated, or a coding agent was installed, and
+Hagency's configuration still names the old binaries.
 
 1. Open **Setup** in the console. It updates the configuration by itself
    (click **Check again** if the note stays) and keeps the old file as a
@@ -457,8 +477,9 @@ binary.
    - Linux: `systemctl --user restart hagency`
    - In a terminal: stop `hagency start` with Ctrl-C and run it again.
 
-Setup writes the configuration with the default Codex folder (`$CODEX_HOME`,
-or `~/.codex`). If you set Hagency up with `hagency setup --codex-home` or
+Setup rewrites only the coding-agent part of the configuration, with the
+default Codex folder (`$CODEX_HOME`, or `~/.codex`) and Claude folder
+(`$CLAUDE_CONFIG_DIR`, or `~/.claude`), and keeps your other settings. If you set Hagency up with `hagency setup --codex-home` or
 `--no-local-codex`, or you have no console, run
 `hagency setup --state-dir <state> --force` with the same options instead,
 then restart Hagency.

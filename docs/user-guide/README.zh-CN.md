@@ -2,13 +2,13 @@
 
 # Hagency 快速开始与使用指南
 
-让本机 Codex agent 加入 Palpo Matrix 项目，并在 Rinx 中与它协作。
+让本机 Codex 和 Claude Code agent 加入 Palpo Matrix 项目，并在 Rinx 中与它们协作。
 本指南按当前服务器关联流程介绍：建立连接、创建资源、申请项目，再申请 agent。
 主要入口按“中文（English）”标注。
 
 ## 本指南使用的术语
 
-- **Hagency 运维者／资源所有者**：在 Codex 所在机器运行 Hagency，决定提供哪些
+- **Hagency 运维者／资源所有者**：在编程代理所在机器运行 Hagency，决定提供哪些
   资源和预算。资源所有者的 Matrix 账号确认服务器关联请求。
 - **Palpo 管理员**：批准在 Matrix 服务器上安装关联。
 - **协调者（Coordinator）**：被委托审批关联中的项目、agent 和追加 token 申请
@@ -17,7 +17,7 @@
   有独立的协调者和资源。Hagency 可以隔离管理多个关联。**车队（fleet）**是该
   连接在服务器上的登记和账号命名空间，不是另一个 token 资源池。
 - **资源**：为某个服务器关联提供的模型、推理档位和 token 预算。多个资源可以
-  使用同一个本地 Codex 账号。
+  使用同一个本地 Codex 或 Claude Code 登录。
 - **来源配置（Source configuration）**：创建资源时提供框架、提供方和账号的
   已有本地配置。
 - **项目／agent 所有者**：申请项目或 agent 的 Matrix 用户。agent 所有者收到
@@ -32,7 +32,7 @@
 
 | 角色 | 在哪里操作 | 负责什么 |
 | --- | --- | --- |
-| Hagency 运维者／资源所有者 | Hagency 控制台；Rinx Palpo Inbox | 配置本机 Codex，申请并验证连接，创建资源，管理委托。 |
+| Hagency 运维者／资源所有者 | Hagency 控制台；Rinx Palpo Inbox | 配置本机 Codex 或 Claude Code，申请并验证连接，创建资源，管理委托。 |
 | Palpo 管理员 | Rinx Palpo Inbox | 批准服务器关联。 |
 | 协调者 | Rinx Palpo Inbox | 在授权资源范围内审批项目、agent 和追加 token 申请。 |
 | 项目／agent 所有者 | Rinx Palpo 资源、项目、Agents；聊天 | 申请项目和 agent，接受私聊，发送任务，处理执行审批。 |
@@ -53,7 +53,7 @@
   预发布版本可能仍然使用手工导入 JSON 的流程。
 - 所选服务器上已有的资源所有者和协调者 Matrix 账号。填写协调者名字不会
   自动创建账号。
-- 运行 Hagency 的机器上已安装的 Codex。你在第 1 步中自己登录它。
+- 运行 Hagency 的机器上已安装的 Codex、Claude Code，或两者。你在第 1 步中自己登录它们。Claude Code 须为原生安装（`claude install`）。
 - 一个已在 Rinx 中设置好交叉签名（cross-signing）的所有者账号，例如已设置
   安全备份，或已验证过会话。所有者有交叉签名密钥之前，Hagency 不会为其创建
   agent。
@@ -61,10 +61,10 @@
 第 1 到第 3 步是本机运维设置；第 4 步需要资源所有者和管理员参与；第 5 步配置
 资源；第 6 到第 8 步需要项目所有者和协调者参与。
 
-## 第 1 步：登录 Codex
+## 第 1 步：登录编程代理
 
-agent 使用 Hagency 所在机器上的 Codex 登录。agent 工作期间，需要保持该机器
-和 Hagency 服务运行。
+agent 使用 Hagency 所在机器上的 Codex 或 Claude Code 登录。agent 工作期间，
+需要保持该机器和 Hagency 服务运行。
 
 在那台机器上，由你自己登录 Codex：
 
@@ -74,7 +74,9 @@ codex login
 
 机器上没有浏览器时，加上 `--device-auth`。
 
-Hagency 从不替你登录，也从不读取或保存你的凭据。它只询问 Codex 是否已登录。
+Claude Code：在那台机器的终端里运行 `claude`，按提示登录。个人 Claude 订阅也可以。
+
+Hagency 从不替你登录，也从不读取或保存你的凭据。它只询问 Codex 是否已登录。对 Claude Code，它连询问也不做：直接假定 Claude Code 已登录。之后如果 Claude Code 退出登录，它的 agent 任务会被拒绝，直到你重新登录。
 
 ## 第 2 步：启动 Hagency 并打开控制台
 
@@ -126,6 +128,10 @@ hagency console-access --state-dir "${XDG_DATA_HOME:-$HOME/.local/share}/hagency
      点击 **重新检查**。
 3. Codex 已登录时，无需点击任何按钮。页面加载时，Hagency 会自行完成运行
    Codex 所需的配置。页面随后显示“Hagency 已配置好运行这个代理。”
+4. Claude Code 显示在 Codex 旁边，带路径和版本，页面说明 Hagency 直接使用
+   Claude Code 已有的登录。Hagency 同样会自行完成它的配置。如果在 Hagency
+   运行之后才安装 Claude Code，点击 **重新检查**，再按页面提示重启 Hagency；
+   你的其他设置会保留。
 
 页面会显示 Codex 的登录方式：**ChatGPT 订阅（ChatGPT plan）** 或 **API 密钥（API key）**。ChatGPT 订阅登录仅供个人使用。在把这个代理提供给他人之前，请考虑
 用 API 密钥登录 Codex。页面会给出这条提示，但不会阻止你继续。
@@ -159,16 +165,16 @@ Hagency 自动创建所需服务账号；无需单独创建协调者机器人，
 
 ## 第 5 步：创建资源
 
-向导需要已有的本地 **来源配置**。全新安装中如果列表为空，运维者需先通过
-[运维 API](../../README.zh-CN.md#用运维-api-创建资源) 创建一次本地 Codex 来源。
-**设置** 目前只准备运行环境，不会创建第一个来源；重新打开设置也不会生成它。
-这是当前首次使用流程的缺口。
+向导需要已有的本地 **来源配置**。设置的 **提供资源** 一步会为每个已配置的
+编程代理创建一个来源：选择有资格的模型和每月 token 上限。Codex 已有来源时，
+这一步仍会为 Claude Code 提供，直到它也有来源。
+[运维 API](../../README.zh-CN.md#用运维-api-创建资源) 可以在命令行上做同样的事。
 
 1. 打开 **我的资源 → 新建资源配置**。设置页面的链接也进入同一个向导。
 2. 选择已验证的 **服务器关联**。
-3. 在 **来源配置** 中选择本地 Codex 配置。可选搜索框按框架、模型或推理档位
+3. 在 **来源配置** 中选择本地 Codex 或 Claude Code 配置。可选搜索框按框架、模型或推理档位
    过滤，不需要填写 agent、项目或角色。有更多来源配置时才显示翻页控件。
-4. 从有资格的组合中选择 **模型** 和 **推理档位**。
+4. 从有资格的组合中选择 **模型** 和 **推理档位**。Claude Code 模型没有推理档位。
 5. 在 **预算** 中填写每月 token 预算和 **可申请项目的 Matrix 用户**。使用同一
    服务器上的完整用户 ID，以空格或换行分隔，例如：
 
@@ -251,6 +257,12 @@ agent 私聊和审批室分别加密。agent 不在与其他人共享的加密�
 
    有些卡片只提供 **Approve once** 和 **Deny**。用文字回复不算作答复，请使用
    按钮。
+
+Claude Code agent 的卡片标注 **Runtime: claude**，并显示工具（例如 Bash）及其
+确切输入。**Approve once** 只执行这一确切输入。**Allow for this task** 和
+**Always allow this operation** 覆盖同一工具、同一输入；之后相同的请求由
+Hagency 自行作答。**Deny** 告诉 Claude 该操作未获允许，Claude 会继续并回复，
+例如说明它没能运行这条命令。卡片过期仍未作答，按 **Deny** 处理。
 
 Hagency 为每位所有者使用单独的审批机器人设备。一位所有者的卡片绝不会为另一位
 所有者加密。
@@ -385,7 +397,7 @@ agent 私聊和审批室都是端到端加密的。
 私聊的使用要求。
 
 **日志显示 `refused_config`，或设置页面提示“编程代理已变化”。**
-Codex 已更新，而 Hagency 的配置仍指向旧的 Codex 二进制。
+Codex 或 Claude Code 已更新，或安装了新的编程代理，而 Hagency 的配置仍指向旧的二进制。
 
 1. 在控制台中打开 **设置（Setup）**。它会自动更新配置（如果提示一直存在，点击
    **重新检查（Check again）**），并把旧文件保留为备份。
@@ -395,7 +407,7 @@ Codex 已更新，而 Hagency 的配置仍指向旧的 Codex 二进制。
    - Linux：`systemctl --user restart hagency`
    - 在终端中运行时：按 Ctrl-C 停止 `hagency start`，再重新运行它。
 
-设置页面使用默认的 Codex 目录（`$CODEX_HOME` 或 `~/.codex`）写入配置。如果你
+设置页面只重写配置中的编程代理部分，使用默认的 Codex 目录（`$CODEX_HOME` 或 `~/.codex`）和 Claude 目录（`$CLAUDE_CONFIG_DIR` 或 `~/.claude`），其他设置保持不变。如果你
 当初用 `hagency setup --codex-home` 或 `--no-local-codex` 完成设置，或者没有
 控制台，请改用相同的选项运行 `hagency setup --state-dir <state> --force`，
 然后重启 Hagency。
