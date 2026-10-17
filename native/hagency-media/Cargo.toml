@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 hagency-files = { path = "../hagency-files" }
 matrix-sdk-crypto = "=0.18.0"
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

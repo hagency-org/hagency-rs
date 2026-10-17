@@ -33,7 +33,7 @@ ruma = { version = "=0.16.0", features = ["client-api-c", "events"] }
 tokio = { workspace = true, features = ["process", "test-util"] }
 hagency-files = { path = "../hagency-files" }
 cap-std = "=4.0.3"
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 tempfile.workspace = true
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
