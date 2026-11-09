@@ -482,6 +482,12 @@ pub struct Report {
     /// ADR-193: this dispatch's `octos serve --stdio` when its host runs Octos,
     /// under the same custody rule. Boxed: a report crosses nested host futures
     /// by value, and an inline session adds its 34 KB to every dispatch's.
+    /// Runtime plugin custody is held until supervised cleanup is observed.
+    pub(crate) plugin: Option<hagency_runtime::owned::OwnedPluginSession>,
+    pub(crate) plugin_leases: Option<(
+        hagency_plugin::PluginLease,
+        Option<hagency_plugin::PluginLease>,
+    )>,
     pub(crate) octos: Option<Box<OwnedOctosSession>>,
     pub(crate) warm: Option<crate::warm::Binding>,
     factory: Option<crate::warm::Binding>,
@@ -524,6 +530,8 @@ impl Report {
             text: None,
             owner: None,
             claude: None,
+            plugin: None,
+            plugin_leases: None,
             octos: None,
             warm: None,
             factory: None,
@@ -598,6 +606,7 @@ impl Report {
     pub fn retains_process_custody(&self) -> bool {
         self.owner.is_some()
             || self.claude.is_some()
+            || self.plugin.is_some()
             || self.octos.is_some()
             || match self.cleanup {
                 Cleanup::Pending => false,
@@ -611,6 +620,8 @@ impl Report {
             self.cleanup = owner.stop();
         } else if let Some(claude) = &mut self.claude {
             self.cleanup = claude.stop();
+        } else if let Some(plugin) = &mut self.plugin {
+            self.cleanup = plugin.stop();
         } else if let Some(octos) = &mut self.octos {
             self.cleanup = octos.stop();
         } else if self.cleanup == Cleanup::Pending
@@ -637,6 +648,8 @@ impl Report {
             }
             self.owner.take();
             self.claude.take();
+            self.plugin.take();
+            self.plugin_leases.take();
             self.octos.take();
         }
         self.cleanup
@@ -2243,6 +2256,306 @@ async fn run_claude_turn(
     report.turn_failure = outcome.failure;
     drive
 }
+fn harness_control_receipt(
+    request: &hagency_plugin::HarnessRequest,
+    cancel: &AtomicBool,
+    dispatch_id: &str,
+) -> Result<serde_json::Value, std::io::Error> {
+    match request {
+        hagency_plugin::HarnessRequest::StopAttempt { attempt_id } => {
+            let accepted = attempt_id == dispatch_id;
+            if accepted {
+                cancel.store(true, Ordering::Release);
+            }
+            Ok(serde_json::json!({
+                "control": "stop_attempt",
+                "accepted": accepted,
+                "reason": if accepted { serde_json::Value::Null } else { serde_json::json!("attempt_mismatch") },
+            }))
+        }
+        hagency_plugin::HarnessRequest::OpenConsole { .. } => Ok(serde_json::json!({
+            "control": "open_console",
+            "accepted": false,
+            "reason": "console_unavailable",
+        })),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported harness control request",
+        )),
+    }
+}
+async fn release_harness_agent(
+    harness: &mut hagency_runtime::owned::OwnedHarnessSession,
+    allocation_id: &str,
+    dispatch_id: &str,
+    target: &str,
+    outcome: &str,
+) {
+    let _ = harness
+        .release_agent(
+            &hagency_plugin::HarnessRequest::ReleaseAgent {
+                allocation_id: allocation_id.to_owned(),
+                dispatch_id: dispatch_id.to_owned(),
+                target: target.to_owned(),
+                outcome: outcome.to_owned(),
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+}
+async fn run_plugin_turn(
+    domain: &DomainStore,
+    cap: &RunnerCapability,
+    host: &Host,
+    budget: &Budget,
+    cancel: &Arc<AtomicBool>,
+    until: Instant,
+    expected: &str,
+    runtime: hagency_plugin::RuntimeLaunch,
+    environment: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+    allocation_id: String,
+    agent_name: String,
+    harness_template: Option<hagency_plugin::HarnessTemplateDocument>,
+    harness_launch: Option<hagency_plugin::HarnessLaunch>,
+    harness_environment: Option<std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>>,
+    prompt: String,
+    dispatch_id: String,
+    turn_id: String,
+    workspace: String,
+    leases: (
+        hagency_plugin::PluginLease,
+        Option<hagency_plugin::PluginLease>,
+    ),
+    report: &mut Report,
+) -> Result<(), Failure> {
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::SpawnStarted,
+        serde_json::json!({}),
+    )
+    .await;
+    if let Some(service) = host.plugin_service()
+        && let Ok(event) = hagency_plugin::RedactedEvent::new(
+            "dispatch.started",
+            &cap.dispatch_id,
+            "working",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        )
+    {
+        let _ = service.publish_event(event);
+    }
+    let mut harness_session = match (harness_launch, harness_environment, harness_template) {
+        (Some(launch), Some(environment), Some(template)) => {
+            let mut harness = match hagency_runtime::owned::OwnedHarnessSession::spawn(
+                &host.guardian,
+                &launch,
+                std::path::PathBuf::from(&workspace),
+                environment,
+            ) {
+                Ok(harness) => harness,
+                Err(hagency_runtime::owned::StartError::Uncertain { cleanup, .. }) => {
+                    report.cleanup = cleanup;
+                    return Err(Failure::SpawnFailed);
+                }
+                Err(_) => return Err(Failure::SpawnFailed),
+            };
+            if harness
+                .request_value_with(
+                    "initialize",
+                    &hagency_plugin::HarnessRequest::Initialize {
+                        protocol: "hagency.harness/v1".into(),
+                        capabilities: vec![
+                            "snapshot".into(),
+                            "event".into(),
+                            "stop_attempt".into(),
+                            "open_console".into(),
+                        ],
+                    },
+                    Duration::from_secs(2),
+                    |request| harness_control_receipt(request, cancel, &dispatch_id),
+                )
+                .await
+                .is_err()
+            {
+                report.cleanup = harness.stop();
+                return Err(Failure::SpawnFailed);
+            }
+            let prepared = match harness
+                .prepare_agent_with(
+                    &hagency_plugin::HarnessRequest::PrepareAgent {
+                        allocation_id: allocation_id.clone(),
+                        dispatch_id: dispatch_id.clone(),
+                        agent_name: agent_name.clone(),
+                        workspace: workspace.clone(),
+                        template,
+                    },
+                    Duration::from_secs(2),
+                    |request| harness_control_receipt(request, cancel, &dispatch_id),
+                )
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    report.cleanup = harness.stop();
+                    return Err(Failure::SpawnFailed);
+                }
+            };
+            Some((harness, prepared))
+        }
+        (None, None, None) => None,
+        _ => return Err(Failure::Admission),
+    };
+    let session = match hagency_runtime::owned::OwnedPluginSession::spawn(
+        &host.guardian,
+        &runtime,
+        std::path::PathBuf::from(&workspace),
+        environment,
+    ) {
+        Ok(session) => session,
+        Err(hagency_runtime::owned::StartError::Uncertain { cleanup, .. }) => {
+            if let Some((mut harness, prepared)) = harness_session.take() {
+                release_harness_agent(
+                    &mut harness,
+                    &allocation_id,
+                    &dispatch_id,
+                    &prepared.target,
+                    "failed",
+                )
+                .await;
+                let _ = harness.shutdown(Duration::from_secs(2)).await;
+                let _ = harness.stop();
+            }
+            report.cleanup = cleanup;
+            return Err(Failure::SpawnFailed);
+        }
+        Err(_) => {
+            if let Some((mut harness, prepared)) = harness_session.take() {
+                release_harness_agent(
+                    &mut harness,
+                    &allocation_id,
+                    &dispatch_id,
+                    &prepared.target,
+                    "failed",
+                )
+                .await;
+                let _ = harness.shutdown(Duration::from_secs(2)).await;
+                report.cleanup = harness.stop();
+            }
+            return Err(Failure::SpawnFailed);
+        }
+    };
+    report.plugin = Some(session);
+    report.plugin_leases = Some(leases);
+    let harness_context = harness_session.as_ref().map(|(_, prepared)| {
+        serde_json::json!({
+            "target": &prepared.target,
+            "ownership": &prepared.ownership,
+        })
+    });
+    let drive = {
+        let session = report.plugin.as_mut().ok_or(Failure::Worker)?;
+        watched_with(
+            session.run_turn(
+                dispatch_id.clone(),
+                turn_id,
+                prompt,
+                workspace,
+                harness_context,
+                Duration::from_millis(2_000),
+                Arc::clone(cancel),
+            ),
+            |_| Failure::Protocol,
+            domain,
+            cap,
+            expected,
+            cancel,
+            until,
+            &mut report.canonical_status,
+        )
+    };
+    let (drive, over_budget) = budget.watch(drive, domain, cap).await;
+    if matches!(&drive, Err(Failure::Cancelled | Failure::Deadline))
+        && let Some(session) = report.plugin.as_mut()
+    {
+        let _ = session.cancel_turn(Duration::from_secs(2)).await;
+    }
+    report.over_budget = over_budget;
+    match &drive {
+        Ok(turn) => {
+            report.text = turn.final_text.clone();
+            report.turn_failure = turn.error.clone().unwrap_or_default();
+            report.protocol = match turn.outcome {
+                hagency_plugin::RuntimeOutcome::Completed => Protocol::Completed,
+                hagency_plugin::RuntimeOutcome::Failed
+                | hagency_plugin::RuntimeOutcome::Interrupted
+                | hagency_plugin::RuntimeOutcome::RateLimited => Protocol::Failed,
+            };
+        }
+        Err(_) => report.protocol = Protocol::Unknown,
+    }
+    let (kind, state) = match report.protocol {
+        Protocol::Completed => ("dispatch.completed", "completed"),
+        Protocol::Failed => ("dispatch.failed", "failed"),
+        _ => ("dispatch.failed", "unknown"),
+    };
+    if let Some(service) = host.plugin_service()
+        && let Ok(event) = hagency_plugin::RedactedEvent::new(
+            kind,
+            &cap.dispatch_id,
+            state,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        )
+    {
+        let _ = service.publish_event(event);
+    }
+    note(
+        domain,
+        cap,
+        hagency_store::AttemptPhase::StopRequested,
+        serde_json::json!({}),
+    )
+    .await;
+    if let Some((mut harness, prepared)) = harness_session.take() {
+        let outcome = match &drive {
+            Ok(_) if report.protocol == Protocol::Completed => "completed",
+            Err(Failure::Cancelled) => "cancelled",
+            Err(Failure::Deadline) => "deadline",
+            Ok(_) => "failed",
+            Err(_) => "unknown",
+        };
+        release_harness_agent(
+            &mut harness,
+            &allocation_id,
+            &dispatch_id,
+            &prepared.target,
+            outcome,
+        )
+        .await;
+        let _ = harness.shutdown(Duration::from_secs(2)).await;
+        let _ = harness.stop();
+    }
+    report.cleanup = report.retry_stop();
+    report.exit_identity = report
+        .plugin
+        .as_ref()
+        .and_then(|session| session.exit_identity());
+    report.stderr_tail = report
+        .plugin
+        .as_ref()
+        .map_or_else(String::new, |session| session.stderr_tail(512));
+    report.guardian_stderr_tail = report
+        .plugin
+        .as_ref()
+        .map_or_else(String::new, |session| session.guardian_stderr_tail());
+    drive.map(|_| ())
+}
 async fn execute(
     domain: &DomainStore,
     cap: &RunnerCapability,
@@ -2270,6 +2583,29 @@ async fn execute(
     bounded(domain.admit_owned_dispatch(cap.clone()), cancel, until)
         .await?
         .map_err(|_| Failure::Admission)?;
+    if let Some(runtime) = scope.resource().runtime_plugin.clone() {
+        let provider = scope
+            .resource()
+            .provider
+            .clone()
+            .ok_or(Failure::Admission)?;
+        let qualified = bounded(
+            domain.plugin_runtime_qualification(
+                runtime,
+                scope.resource().framework.clone(),
+                scope.resource().model.clone(),
+                provider,
+                scope.resource().reasoning.clone(),
+            ),
+            cancel,
+            until,
+        )
+        .await?
+        .map_err(|_| Failure::Admission)?;
+        if qualified.is_none() {
+            return Err(Failure::Admission);
+        }
+    }
     if let Some(binding) = report.factory.as_ref().or(report.warm.as_ref()) {
         binding.check(domain, &scope, cancel, until).await?;
     }
@@ -2338,7 +2674,13 @@ async fn execute(
     report.canonical_status = Some(started.task().status);
     checkpoint(cancel, until)?;
     let binding = bounded(
-        UsageRun::bind(domain.clone(), cap.clone(), started.clone()),
+        async {
+            if matches!(&runner, crate::host::PreparedRunner::Plugin { .. }) {
+                UsageRun::bind_unmetered(domain.clone(), cap.clone(), started.clone()).await
+            } else {
+                UsageRun::bind(domain.clone(), cap.clone(), started.clone()).await
+            }
+        },
         cancel,
         until,
     )
@@ -2375,10 +2717,9 @@ async fn execute(
     checkpoint(cancel, until)?;
     let approval_may_write = match &runner {
         crate::host::PreparedRunner::Codex { settings, .. } => !settings.is_read_only(),
-        // Every owned dispatch holds its exclusive workspace lease (ADR-192).
-        crate::host::PreparedRunner::Claude { .. } | crate::host::PreparedRunner::Octos { .. } => {
-            true
-        }
+        crate::host::PreparedRunner::Claude { .. }
+        | crate::host::PreparedRunner::Octos { .. }
+        | crate::host::PreparedRunner::Plugin { .. } => true,
     };
     if let Some(live) = &mut report.live {
         live.possible();
@@ -2417,6 +2758,50 @@ async fn execute(
             expires_at: ceiling_expires_at,
         }),
     };
+    if let crate::host::PreparedRunner::Plugin {
+        runtime,
+        environment,
+        prompt,
+        dispatch_id,
+        turn_id,
+        allocation_id,
+        agent_name,
+        harness_template,
+        runtime_lease,
+        harness: _harness,
+        harness_launch,
+        harness_environment,
+        harness_lease,
+    } = runner
+    {
+        let drive = run_plugin_turn(
+            domain,
+            cap,
+            &host,
+            budget,
+            cancel,
+            until,
+            &expected,
+            runtime,
+            environment,
+            allocation_id,
+            agent_name,
+            harness_template,
+            harness_launch,
+            harness_environment,
+            prompt,
+            dispatch_id,
+            turn_id,
+            launch.directory.to_string_lossy().into_owned(),
+            (runtime_lease, harness_lease),
+            report,
+        )
+        .await;
+        return settle(
+            domain, cap, &host, report, drive, &scope, started, expected, cancel, ceiling,
+        )
+        .await;
+    }
     let (settings, input, late_helper) = match runner {
         crate::host::PreparedRunner::Codex {
             settings,
@@ -2492,6 +2877,7 @@ async fn execute(
             )
             .await;
         }
+        crate::host::PreparedRunner::Plugin { .. } => unreachable!("plugin runner handled above"),
     };
     if report.owner.is_none() {
         note(

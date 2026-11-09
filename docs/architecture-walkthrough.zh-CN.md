@@ -396,7 +396,7 @@ stateDiagram-v2
 | agent 私聊 | 是 | 所有者和一个 agent | 所有者发来的任何消息 | `admit_matrix_input`；房间形态见 `domain/matrix_routes.rs` |
 | 审批室 | 是 | 所有者和审批机器人 | 无。它承载卡片和裁决。 | `domain/approvals.rs` 中的 `observe_approval_room` |
 | 加入的房间，未加密 | 否 | 邀请者拉进来的任何人 | 提及该 agent 的人类消息 | 与项目房间相同 |
-| 加入的房间，只有所有者和 agent | 均可 | 所有者和该 agent | 所有者发来的任何消息 | `verified_ingress.rs` 中的 `owner_only_joined_room` |
+| 加入的房间，只有所有者和 agent | 均可 | 所有者和 agent | 所有者发来的任何消息 | `verified_ingress.rs` 中的 `owner_only_joined_room` |
 | 加入的房间，加密且有其他人 | 是 | 所有者、该 agent 和其他人 | 无。agent 不在其中工作。 | `provisioning/factory.rs` 中的 `joined_rooms` |
 
 所有成员都必须在车队自己的服务器上：`hagency-core/src/replies.rs` 中的 `matrix_user` 和 `matrix_room` 拒绝其他服务器名。

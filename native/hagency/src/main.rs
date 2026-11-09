@@ -41,6 +41,15 @@ enum Command {
         #[command(subcommand)]
         command: hagency::task_client::Command,
     },
+    Plugin {
+        /// Loopback address of the running Hagency service.
+        #[arg(long, default_value = "127.0.0.1:13300")]
+        listen: SocketAddr,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[command(subcommand)]
+        command: hagency::plugin_cli::Command,
+    },
     /// Internal native guardian. Requires a private inherited channel on stdin.
     #[cfg(unix)]
     #[command(hide = true)]
@@ -341,6 +350,18 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
             println!("{}", serde_json::to_string(&output)?);
+        }
+        Command::Plugin {
+            listen,
+            state_dir,
+            command,
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &hagency::plugin_cli::run(&state_dir, listen, command).await?
+                )?
+            );
         }
         #[cfg(unix)]
         Command::Guardian => return Err("guardian requires isolated synchronous startup".into()),

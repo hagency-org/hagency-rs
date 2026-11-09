@@ -5,10 +5,14 @@ use std::io;
 
 mod session;
 pub use session::OwnedSession;
+mod harness;
+pub use harness::OwnedHarnessSession;
 mod claude;
 pub use claude::OwnedClaudeSession;
 mod octos;
 pub use octos::OwnedOctosSession;
+mod plugin;
+pub use plugin::{OwnedPluginSession, PluginSessionError, PluginTurn};
 
 /// Exact platform observations, deliberately distinct from upstream completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

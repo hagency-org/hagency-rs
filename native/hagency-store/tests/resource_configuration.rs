@@ -306,6 +306,140 @@ async fn native_resource_configuration_create_edit() {
 }
 
 #[test]
+fn native_plugin_resource_requires_exact_qualification_row() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let mut db = DomainRepository::open(&state).unwrap();
+    let runtime = hagency_core::project::RuntimePluginIdentity {
+        plugin_id: "example.plugin".into(),
+        adapter_id: "adapter".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "c".repeat(64),
+    };
+    let resource: Resource = serde_json::from_value(json!({
+        "presetId":"plugin_resource",
+        "seatId":"plugin_seat",
+        "framework":"custom",
+        "model":"model",
+        "provider":"provider",
+        "runtimePlugin":runtime,
+        "ceiling":{"tokens":100,"period":"monthly"},
+        "published":true
+    }))
+    .unwrap();
+    assert!(matches!(
+        db.put_resource(&resource),
+        Err(Error::Unqualified)
+    ));
+    db.put_plugin_runtime_qualification(&PluginRuntimeQualification {
+        plugin_id: "example.plugin".into(),
+        adapter_id: "adapter".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "c".repeat(64),
+        framework: "custom".into(),
+        model: "model".into(),
+        provider: "provider".into(),
+        reasoning: None,
+        roles: vec!["coding".into()],
+        evidence_digest: "b".repeat(64),
+        qualified_at: 1,
+        evidence: json!({"passed":true}),
+    })
+    .unwrap();
+    let catalog = db.put_resource(&resource).unwrap();
+    assert_eq!(catalog.roles, vec!["coding"]);
+    db.revoke_plugin_runtime_qualifications("example.plugin")
+        .unwrap();
+    assert!(
+        db.plugin_runtime_qualification(
+            &resource.runtime_plugin.clone().unwrap(),
+            "custom",
+            "model",
+            "provider",
+            None,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(matches!(
+        db.put_resource(&resource),
+        Err(Error::Unqualified)
+    ));
+}
+
+#[test]
+fn native_resource_configuration_selects_qualified_runtime_and_harness() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let mut db = DomainRepository::open(&state).unwrap();
+    let source = resource();
+    db.put_resource(&source).unwrap();
+    db.put_seat(
+        &serde_json::from_value(json!({
+            "id": source.seat_id,
+            "declaration": {"quotaTokens": 9000, "period": "monthly"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let runtime = hagency_core::project::RuntimePluginIdentity {
+        plugin_id: "example.plugin".into(),
+        adapter_id: "adapter".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "c".repeat(64),
+    };
+    let harness = hagency_core::project::HarnessPluginIdentity {
+        plugin_id: "example.harness".into(),
+        harness_id: "harness".into(),
+        package_sha256: "b".repeat(64),
+        settings_sha256: "d".repeat(64),
+    };
+    db.put_plugin_runtime_qualification(&PluginRuntimeQualification {
+        plugin_id: runtime.plugin_id.clone(),
+        adapter_id: runtime.adapter_id.clone(),
+        package_sha256: runtime.package_sha256.clone(),
+        settings_sha256: runtime.settings_sha256.clone(),
+        framework: "herdr".into(),
+        model: "herdr".into(),
+        provider: "herdr".into(),
+        reasoning: None,
+        roles: vec!["coding".into()],
+        evidence_digest: "c".repeat(64),
+        qualified_at: 1,
+        evidence: json!({"passed": true}),
+    })
+    .unwrap();
+    let configured = db
+        .configure_resource(
+            access()
+                .prepare(
+                    source.id(),
+                    resource_publication_revision(&source).unwrap(),
+                    true,
+                    ProfileChange::SelectPlugin {
+                        runtime_plugin: runtime.clone(),
+                        harness_plugin: Some(harness.clone()),
+                        framework: "herdr".into(),
+                        model: "herdr".into(),
+                        provider: "herdr".into(),
+                        reasoning: None,
+                    },
+                    CeilingChange::Monthly {
+                        tokens: 100u64.try_into().unwrap(),
+                    },
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let saved = db.resource_configuration(&configured.resource_id).unwrap();
+    assert_eq!(saved.framework, "herdr");
+    assert_eq!(saved.runtime_plugin, Some(runtime));
+    assert_eq!(saved.harness_plugin, Some(harness));
+    assert_eq!(saved.roles, vec!["coding"]);
+}
+
+#[test]
 fn engagement_resources_are_atomic_independent_budgets_on_one_shared_account() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");

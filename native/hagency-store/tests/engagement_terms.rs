@@ -5,9 +5,11 @@
 //! lib/engagement-store.js:178-232, 396-478; lib/resource-agent-definitions.js.
 mod common;
 use common::*;
-use hagency_core::project::{EngagementState, Seat};
-use hagency_store::{DomainRepository, Error};
+use hagency_core::project::{EngagementState, HarnessPluginIdentity, RuntimePluginIdentity, Seat};
+use hagency_plugin::{HARNESS_TEMPLATE_SCHEMA, HarnessTemplateDocument, harness_template_digest};
+use hagency_store::{AgentDefinitionInput, DomainRepository, Error, PluginRuntimeQualification};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 fn setup() -> (tempfile::TempDir, DomainRepository) {
     let dir = tempfile::tempdir().unwrap();
@@ -20,6 +22,25 @@ fn role() -> &'static str {
     // every existing domain test admits+approves with it, so the fixture
     // resource provably qualifies for this role.
     "coding"
+}
+fn definition(value: serde_json::Value) -> AgentDefinitionInput {
+    serde_json::from_value(value).unwrap()
+}
+
+fn harness_template(identity: &HarnessPluginIdentity, target: &str) -> HarnessTemplateDocument {
+    let mut values = BTreeMap::new();
+    values.insert("target".into(), json!(target));
+    let mut document = HarnessTemplateDocument {
+        schema: HARNESS_TEMPLATE_SCHEMA.into(),
+        plugin_id: identity.plugin_id.clone(),
+        harness_id: identity.harness_id.clone(),
+        package_sha256: identity.package_sha256.clone(),
+        settings_sha256: identity.settings_sha256.clone(),
+        template_sha256: String::new(),
+        values,
+    };
+    document.template_sha256 = harness_template_digest(&document).unwrap();
+    document
 }
 
 #[test]
@@ -206,7 +227,7 @@ fn resource_delete_guards_and_cascade() {
     db.edit_agent_definition(
         &id,
         None,
-        Some(&json!({"name":"helper","role":role()})),
+        Some(&definition(json!({"name":"helper","role":role()}))),
         1000,
     )
     .unwrap();
@@ -243,15 +264,30 @@ fn agent_definitions_ts_rules() {
 
     // Name rules (TS resource-agent-definitions.js:24-26).
     assert!(
-        db.edit_agent_definition(&id, None, Some(&json!({"name":"Bad","role":r})), 1000)
-            .is_err()
+        db.edit_agent_definition(
+            &id,
+            None,
+            Some(&definition(json!({"name":"Bad","role":r}))),
+            1000
+        )
+        .is_err()
     );
     assert!(
-        db.edit_agent_definition(&id, None, Some(&json!({"name":"1bad","role":r})), 1000)
-            .is_err()
+        db.edit_agent_definition(
+            &id,
+            None,
+            Some(&definition(json!({"name":"1bad","role":r}))),
+            1000
+        )
+        .is_err()
     );
     let created = db
-        .edit_agent_definition(&id, None, Some(&json!({"name":"good_one","role":r})), 1000)
+        .edit_agent_definition(
+            &id,
+            None,
+            Some(&definition(json!({"name":"good_one","role":r}))),
+            1000,
+        )
         .unwrap()
         .unwrap();
     assert!(created.id.starts_with("rad_"));
@@ -265,18 +301,20 @@ fn agent_definitions_ts_rules() {
     // across ALL resources; the UNIQUE index is per-resource. The TS rule is
     // cross-resource, so assert the store-level check too.)
     assert!(matches!(
-        db.edit_agent_definition(&id, None, Some(&json!({"name":"good_one","role":r})), 2000),
+        db.edit_agent_definition(
+            &id,
+            None,
+            Some(&definition(json!({"name":"good_one","role":r}))),
+            2000
+        ),
         Err(Error::Conflict)
     ));
 
     // Enabled must be a boolean.
     assert!(
-        db.edit_agent_definition(
-            &id,
-            None,
-            Some(&json!({"name":"other","role":r,"enabled":"yes"})),
-            2000
-        )
+        serde_json::from_value::<AgentDefinitionInput>(json!({
+            "name":"other","role":r,"enabled":"yes"
+        }))
         .is_err()
     );
 
@@ -285,7 +323,9 @@ fn agent_definitions_ts_rules() {
         db.edit_agent_definition(
             &id,
             None,
-            Some(&json!({"name":"other","role":"reviewer_but_not_supplying"})),
+            Some(&definition(
+                json!({"name":"other","role":"reviewer_but_not_supplying"})
+            )),
             2000
         ),
         Err(Error::Unqualified)
@@ -302,7 +342,7 @@ fn agent_definitions_ts_rules() {
         .edit_agent_definition(
             &id,
             Some(&created.id),
-            Some(&json!({"name":"good_two","role":r})),
+            Some(&definition(json!({"name":"good_two","role":r}))),
             3000,
         )
         .unwrap()
@@ -315,7 +355,7 @@ fn agent_definitions_ts_rules() {
         db.edit_agent_definition(
             &id,
             Some("rad_missing"),
-            Some(&json!({"name":"x_y","role":r})),
+            Some(&definition(json!({"name":"x_y","role":r}))),
             3000
         ),
         Err(Error::NotFound)
@@ -325,11 +365,168 @@ fn agent_definitions_ts_rules() {
         db.edit_agent_definition(
             "res_missing",
             None,
-            Some(&json!({"name":"x_y","role":r})),
+            Some(&definition(json!({"name":"x_y","role":r}))),
             3000
         ),
         Err(Error::NotFound)
     ));
+}
+
+#[test]
+fn plugin_resource_accepts_agent_definition_for_declared_role() {
+    let (_dir, mut db) = setup();
+    let mut pool = resource("herdr_preset", "herdr_seat", 1000);
+    pool.framework = "herdr".into();
+    pool.model = "herdr".into();
+    pool.provider = Some("herdr".into());
+    pool.reasoning = None;
+    pool.roles = vec![role().into()];
+    pool.runtime_plugin = Some(RuntimePluginIdentity {
+        plugin_id: "example.runtime".into(),
+        adapter_id: "herdr".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "b".repeat(64),
+    });
+    let identity = HarnessPluginIdentity {
+        plugin_id: "example.harness".into(),
+        harness_id: "herdr-existing".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "b".repeat(64),
+    };
+    pool.harness_plugin = Some(identity.clone());
+    db.put_plugin_runtime_qualification(&PluginRuntimeQualification {
+        plugin_id: "example.runtime".into(),
+        adapter_id: "herdr".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "b".repeat(64),
+        framework: "herdr".into(),
+        model: "herdr".into(),
+        provider: "herdr".into(),
+        reasoning: None,
+        roles: vec![role().into()],
+        evidence_digest: "c".repeat(64),
+        qualified_at: 1,
+        evidence: json!({"passed":true}),
+    })
+    .unwrap();
+    db.put_resource(&pool).unwrap();
+
+    let stored = db.resource_configuration(&pool.id()).unwrap();
+    assert!(stored.published);
+    assert!(stored.provisionable());
+    assert_eq!(stored.roles, vec![role().to_owned()]);
+    assert!(
+        stored
+            .ceiling
+            .as_ref()
+            .and_then(|value| value.tokens)
+            .is_some()
+    );
+    assert_eq!(
+        stored
+            .harness_plugin
+            .as_ref()
+            .map(|value| value.harness_id.as_str()),
+        Some("herdr-existing")
+    );
+    let saved = db
+        .edit_agent_definition(
+            &pool.id(),
+            None,
+            Some(&definition(json!({
+                "name": "nara-agent",
+                "role": role(),
+                "harnessTemplate": harness_template(&identity, "nara-agent")
+            }))),
+            1000,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.name, "nara-agent");
+    assert_eq!(saved.harness_template.unwrap().harness_id, "herdr-existing");
+}
+#[test]
+fn harness_template_changes_are_refused_in_use_and_snapshot_at_allocation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut db = DomainRepository::open(&root.path().join("state")).unwrap();
+    db.register(&registration()).unwrap();
+    let identity = HarnessPluginIdentity {
+        plugin_id: "example.harness".into(),
+        harness_id: "managed".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "b".repeat(64),
+    };
+    let mut pool = resource("template_pool", "template_seat", 1000);
+    pool.harness_plugin = Some(identity.clone());
+    db.put_resource(&pool).unwrap();
+    let old = harness_template(&identity, "old-target");
+    let changed = harness_template(&identity, "new-target");
+    db.edit_agent_definition(
+        &pool.id(),
+        None,
+        Some(&definition(
+            json!({"name":"in_use","role":"coding","harnessTemplate":old}),
+        )),
+        1000,
+    )
+    .unwrap();
+    let pending = proof(&request("template_pending", "in_use", &pool, 100));
+    db.admit(&pending, 1001).unwrap();
+    let in_use_id = db.agent_definitions(&pool.id()).unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(matches!(
+        db.edit_agent_definition(
+            &pool.id(),
+            Some(&in_use_id),
+            Some(&definition(json!({"harnessTemplate":changed}))),
+            1002,
+        ),
+        Err(Error::Conflict)
+    ));
+
+    db.edit_agent_definition(
+        &pool.id(),
+        None,
+        Some(&definition(
+            json!({"name":"frozen","role":"coding","harnessTemplate":old}),
+        )),
+        1003,
+    )
+    .unwrap();
+    let approved = proof(&request("template_approved", "frozen", &pool, 100));
+    db.admit(&approved, 1004).unwrap();
+    db.approve("template_approval", &approved, 1005).unwrap();
+    let effect = db.claim_effect().unwrap().unwrap();
+    assert_eq!(
+        effect.payload["harnessTemplate"]["values"]["target"],
+        json!("old-target")
+    );
+
+    let frozen_id = db
+        .agent_definitions(&pool.id())
+        .unwrap()
+        .into_iter()
+        .find(|row| row["name"] == json!("frozen"))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let connection = rusqlite::Connection::open(root.path().join("state/domain.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_definitions SET harness_template=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_string(&changed).unwrap(), frozen_id],
+        )
+        .unwrap();
+    drop(connection);
+    drop(db);
+    let db = DomainRepository::open(&root.path().join("state")).unwrap();
+    assert_eq!(
+        db.effect(&effect.id).unwrap().payload["harnessTemplate"]["values"]["target"],
+        json!("old-target")
+    );
 }
 
 #[test]

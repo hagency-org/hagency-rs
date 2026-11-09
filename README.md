@@ -92,6 +92,49 @@ Palpo homeserver  <── outbound HTTPS ──  hagency start (127.0.0.1:13300)
 
 The [code walkthrough](docs/architecture-walkthrough.md) follows each flow through the code, with diagrams.
 
+### Plugin architecture
+
+The plugin boundary is generic and implementation-language-neutral:
+
+```text
+Rinx (user interaction) → Palpo (homeserver/fleet transport) → Hagency
+                                                        ├─ PluginService
+                                                        │  ├─ registry + leases
+                                                        │  ├─ scheduler + guardian
+                                                        │  ├─ invocations/events
+                                                        │  └─ runtime/harness sessions
+                                                        └─ built-in fleet/execution
+```
+
+Rinx and Palpo never become plugin authorities. Hagency alone owns plugin
+lifecycle, task state, owner approval, workspace custody, usage, canonical
+results, process cleanup, and settlement. Plugins receive no Matrix, App
+Service, operator, provider, or runner credential. Plugin executables remain
+trusted OS-user processes with filesystem/network access; the manifest and
+guardian are not a sandbox.
+
+| Capability | Host-owned contract |
+| --- | --- |
+| `startup.v1` | One-shot after listener readiness and after an exact revision becomes active |
+| `action.v1` | Asynchronous idempotent invocation with durable polling |
+| `event.v1` | Post-commit redacted lossy observation only |
+| `tool.v1` | Existing owner approval, retained workspace, one guardian launch |
+| `runtime.v1` | Qualified runner protocol; Hagency settles the turn |
+| `harness.v1` | Redacted agent view; host-owned `stop_attempt`/`open_console`; template-bound prepare/release only |
+| `pane.v1` | Declarative metadata delivered to its named harness; no plugin UI/PTY |
+
+Install, enable, disable, update, uninstall, action, and qualification are
+service-owned operations. `hagency plugin` is an authenticated loopback client;
+it does not open a registry or domain database. The management flow is preview →
+explicit trust confirmation → isolated exact-commit build → reparse/re-hash →
+atomic immutable revision switch. Qualification runs the active revision through
+the normal guardian/session boundary. Runtime adapters execute agent turns.
+Harness adapters provide constrained views, host-owned controls, and template-
+bound prepare/release; managed mode may start/stop its configured agent. A
+harness does not submit turns or own their results. Optional Herdr adapters are
+maintained in `hagency-plugin-examples`.
+
+
 ## Set up Hagency
 
 You need:

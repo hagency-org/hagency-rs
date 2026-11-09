@@ -9,10 +9,11 @@ use crate::{
 };
 use hagency_core::{
     allocation::{Ceiling, Tokens},
+    project::{HarnessPluginIdentity, RuntimePluginIdentity},
     qualification,
 };
 use palpo_hagency_contract as contract;
-use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -22,6 +23,14 @@ pub enum ProfileChange {
     Preserve {},
     Select {
         model: String,
+        reasoning: Option<String>,
+    },
+    SelectPlugin {
+        runtime_plugin: RuntimePluginIdentity,
+        harness_plugin: Option<HarnessPluginIdentity>,
+        framework: String,
+        model: String,
+        provider: String,
         reasoning: Option<String>,
     },
 }
@@ -101,10 +110,46 @@ impl ResourceConfigurationAccess {
         ceiling: CeilingChange,
         deadline: Instant,
     ) -> Result<ResourceConfigurationCommand, Error> {
-        if let ProfileChange::Select { model, reasoning } = &profile
-            && (model.len() > 256 || reasoning.as_ref().is_some_and(|v| v.len() > 128))
-        {
-            return Err(hagency_core::InvalidInput("configuration field too long").into());
+        match &profile {
+            ProfileChange::Select { model, reasoning } => {
+                if model.len() > 256
+                    || model.chars().any(char::is_control)
+                    || reasoning
+                        .as_ref()
+                        .is_some_and(|v| v.len() > 128 || v.chars().any(char::is_control))
+                {
+                    return Err(hagency_core::InvalidInput("configuration field too long").into());
+                }
+            }
+            ProfileChange::SelectPlugin {
+                runtime_plugin,
+                harness_plugin,
+                framework,
+                model,
+                provider,
+                reasoning,
+            } => {
+                runtime_plugin.validate()?;
+                if let Some(harness) = harness_plugin {
+                    harness.validate()?;
+                }
+                if framework.is_empty()
+                    || framework.len() > 64
+                    || model.is_empty()
+                    || model.len() > 256
+                    || provider.is_empty()
+                    || provider.len() > 128
+                    || framework.chars().any(char::is_control)
+                    || model.chars().any(char::is_control)
+                    || provider.chars().any(char::is_control)
+                    || reasoning
+                        .as_ref()
+                        .is_some_and(|v| v.len() > 128 || v.chars().any(char::is_control))
+                {
+                    return Err(hagency_core::InvalidInput("configuration field too long").into());
+                }
+            }
+            ProfileChange::Preserve {} => {}
         }
         let gate = self.0.prepare(resource, revision, false, deadline)?;
         let preset = if create {
@@ -186,22 +231,62 @@ impl DomainRepository {
             return Err(Error::Conflict);
         }
         let create = command.preset.is_some();
-        if let ProfileChange::Select { model, reasoning } = command.profile {
-            if !qualification::configuration_choices(&resource.profile())?
-                .iter()
-                .any(|c| c.model == model && c.reasoning == reasoning)
-            {
-                return Err(hagency_core::InvalidInput(
-                    "profile is not a selectable configuration",
-                )
-                .into());
+        let plugin_profile = match command.profile {
+            ProfileChange::Select { model, reasoning } => {
+                if !qualification::configuration_choices(&resource.profile())?
+                    .iter()
+                    .any(|c| c.model == model && c.reasoning == reasoning)
+                {
+                    return Err(hagency_core::InvalidInput(
+                        "profile is not a selectable configuration",
+                    )
+                    .into());
+                }
+                resource.model = model;
+                resource.reasoning = reasoning;
+                false
             }
-            resource.model = model;
-            resource.reasoning = reasoning;
-        }
+            ProfileChange::SelectPlugin {
+                runtime_plugin,
+                harness_plugin,
+                framework,
+                model,
+                provider,
+                reasoning,
+            } => {
+                let roles: String = tx
+                    .query_row(
+                        "SELECT roles FROM plugin_runtime_qualifications WHERE plugin_id=?1 AND adapter_id=?2 AND package_sha256=?3 AND settings_sha256=?4 AND framework=?5 AND model=?6 AND provider=?7 AND reasoning IS ?8",
+                        params![
+                            runtime_plugin.plugin_id,
+                            runtime_plugin.adapter_id,
+                            runtime_plugin.package_sha256,
+                            runtime_plugin.settings_sha256,
+                            framework,
+                            model,
+                            provider,
+                            reasoning,
+                        ],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or(Error::Unqualified)?;
+                resource.framework = framework;
+                resource.model = model;
+                resource.provider = Some(provider);
+                resource.reasoning = reasoning;
+                resource.octos_profile = None;
+                resource.runtime_plugin = Some(runtime_plugin);
+                resource.harness_plugin = harness_plugin;
+                resource.roles = serde_json::from_str(&roles)?;
+                true
+            }
+            ProfileChange::Preserve {} => false,
+        };
         // A new configuration must use a supported framework and qualified pair.
         // Existing unsupported configurations can preserve their exact profile.
         if create
+            && !plugin_profile
             && !qualification::configuration_choices(&resource.profile())?
                 .iter()
                 .any(|c| c.model == resource.model && c.reasoning == resource.reasoning)

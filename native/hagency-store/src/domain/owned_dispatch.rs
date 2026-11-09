@@ -8,6 +8,7 @@ use hagency_core::{
     project::Resource,
     tasks::{DispatchInput, RunnerCapability, Task, TaskState, clock},
 };
+use hagency_plugin::HarnessTemplateDocument;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::json;
@@ -219,6 +220,8 @@ pub struct OwnedDispatchScope {
     pub(super) account: Option<super::accounts::Association>,
     fingerprint: String,
     engagement_id: String,
+    allocation_id: String,
+    agent_name: String,
     /// The session's Matrix thread root (`SessionBinding.thread_root`), carried
     /// through so a worktree-mode dispatch can resolve its per-thread worktree.
     /// `None` for a non-threaded (top-level) session, which keeps the shared
@@ -232,6 +235,7 @@ pub struct OwnedDispatchScope {
     workspace_mode: String,
     worktrees_dir: Option<String>,
     worktree_bootstrap: Vec<String>,
+    harness_template: Option<HarnessTemplateDocument>,
     started: Option<(String, u64, String)>,
 }
 impl OwnedDispatchScope {
@@ -245,10 +249,13 @@ impl OwnedDispatchScope {
             &self.account,
             &self.fingerprint,
             &self.engagement_id,
+            &self.allocation_id,
+            &self.agent_name,
             &self.thread_root,
             &self.workspace_mode,
             &self.worktrees_dir,
             &self.worktree_bootstrap,
+            &self.harness_template,
             &self.started,
         )
     }
@@ -278,8 +285,17 @@ impl OwnedDispatchScope {
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
+    pub fn allocation_id(&self) -> &str {
+        &self.allocation_id
+    }
+    pub fn agent_name(&self) -> &str {
+        &self.agent_name
+    }
     pub fn engagement_id(&self) -> &str {
         &self.engagement_id
+    }
+    pub fn harness_template(&self) -> Option<&HarnessTemplateDocument> {
+        self.harness_template.as_ref()
     }
     /// The session's Matrix thread root, if any. A worktree-mode dispatch uses
     /// this to resolve its per-thread worktree; `None` keeps the engagement
@@ -392,6 +408,26 @@ fn project_dispatch(
         [session.engagement_id()], |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let effect: serde_json::Value = serde_json::from_str(&effect)?;
+    let harness_template: Option<HarnessTemplateDocument> = effect
+        .get("harnessTemplate")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
+    let allocation_id = effect
+        .get("request")
+        .and_then(|request| request.get("resourceAllocationId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        // Older native engagements have no separate allocation row. They have
+        // no harness target to authorize, so the engagement id is the stable
+        // scope key retained for those dispatches.
+        .or_else(|| (!harness_template.is_some()).then(|| engagement.id.clone()))
+        .ok_or(Error::RunnerAuthority)?;
+    let agent_name = engagement.agent_name.as_str().to_owned();
+    if harness_template != engagement.harness_template {
+        return Err(Error::RunnerAuthority);
+    }
     let resource: Resource =
         serde_json::from_value(effect.get("resource").cloned().ok_or(Error::Schema)?)?;
     resource.validate()?;
@@ -441,15 +477,19 @@ fn project_dispatch(
     let fingerprint = canonical::payload_digest(&json!({
         "input":input,"task_id":task.id,"task_epoch":completed_epoch.unwrap_or(task.execution_epoch),
         "session":session,"engagement":engagement.id,"generation":generation,
-        "resource":resource,"runtime_name":engagement.runtime_name,"account":account,
+        "allocation_id":allocation_id,"agent_name":agent_name,
+        "resource":resource,"harness_template":harness_template,"runtime_name":engagement.runtime_name,"account":account,
     }))?;
     Ok(OwnedDispatchScope {
         input,
         task,
         resource,
         account,
+        harness_template,
         fingerprint,
         engagement_id: engagement.id,
+        allocation_id,
+        agent_name,
         thread_root,
         // Every stored workspace setting came from a request (board #78),
         // which can no longer carry one: an agent admitted before that keeps

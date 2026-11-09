@@ -230,8 +230,12 @@ pub fn restore(state: &Path, from: &Path) -> Result<Manifest, Error> {
     for entry in &manifest.entries {
         let bytes = fs::read(from.join(&entry.path)).map_err(|_| Error::Schema)?;
         let destination = state.join(&entry.path);
-        if let Some(parent) = destination.parent() {
-            private::directory(parent)?;
+        if let Some((parents, _)) = entry.path.rsplit_once('/') {
+            let mut parent = state.to_path_buf();
+            for component in parents.split('/') {
+                parent.push(component);
+                private::directory(&parent)?;
+            }
         }
         private::write_new(&destination, &bytes)?;
     }
@@ -312,5 +316,28 @@ mod tests {
             "ok"
         );
         assert!(!out.join("domain.sqlite3-wal").exists());
+    }
+    #[test]
+    fn native_restore_creates_nested_private_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        private::directory(&source).unwrap();
+        let mut nested = source.clone();
+        for component in ["runtime-home", ".tmp", "plugins"] {
+            nested.push(component);
+            private::create_directory_new(&nested).unwrap();
+        }
+        private::write_new(&nested.join("marker"), b"nested-state").unwrap();
+
+        let snapshot_dir = temporary.path().join("snapshot");
+        snapshot(&source, &snapshot_dir, 1_700_000_000_000).unwrap();
+        let restored = temporary.path().join("restored");
+        restore(&restored, &snapshot_dir).unwrap();
+
+        private::directory(&restored.join("runtime-home/.tmp/plugins")).unwrap();
+        assert_eq!(
+            fs::read(restored.join("runtime-home/.tmp/plugins/marker")).unwrap(),
+            b"nested-state"
+        );
     }
 }

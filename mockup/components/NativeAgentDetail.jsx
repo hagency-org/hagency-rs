@@ -37,7 +37,7 @@ function LaunchEnv({ name }) {
     <tr>
       <th>{label}</th>
       <td className="dim">
-        {value === null ? '—' : `${value.framework} · ${value.model}${value.reasoning ? ` · ${value.reasoning}` : ''}`}
+        {value === null ? '—' : <>{`${value.framework} · ${value.model}${value.reasoning ? ` · ${value.reasoning}` : ''}`}{value.runtimePlugin && <><br /><span className="mono-s">runtime: {value.runtimePlugin.pluginId}/{value.runtimePlugin.adapterId}</span></>}{value.harnessPlugin && <><br /><span className="mono-s">harness: {value.harnessPlugin.pluginId}/{value.harnessPlugin.harnessId}</span></>}</>}
       </td>
     </tr>
   );

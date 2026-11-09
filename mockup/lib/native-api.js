@@ -109,7 +109,7 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (!response.ok) {
       if (value?.code === 'console_busy' && response.status === 429) throw new Error('busy');
-      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, invalid_engagement_id: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503 };
+      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, invalid_engagement_id: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503, plugin_unavailable: 503, plugin_not_found: 404, plugin_disabled: 409, plugin_incompatible: 409, plugin_untrusted: 403, plugin_busy: 409, plugin_outcome_unknown: 504, plugin_capacity: 413, plugin_build_failed: 422, plugin_invalid: 400, plugin_git_unavailable: 400, plugin_configuration_required: 409, plugin_settings_invalid: 400, plugin_settings_conflict: 409 };
       if (known[value?.code] === response.status || RECOVERY_ERRORS[value?.code] === response.status) {
         // ADR-186 §A2: a refusal may carry the store's human explanation of
         // the binding limit beside its code; it rides the error as `detail`.
@@ -121,7 +121,7 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     }
     return value;
   } catch (error) {
-    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'invalid_engagement_id', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
+    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'invalid_engagement_id', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', 'plugin_unavailable', 'plugin_not_found', 'plugin_disabled', 'plugin_incompatible', 'plugin_untrusted', 'plugin_busy', 'plugin_outcome_unknown', 'plugin_capacity', 'plugin_build_failed', 'plugin_invalid', 'plugin_git_unavailable', 'plugin_configuration_required', 'plugin_settings_invalid', 'plugin_settings_conflict', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
     if (options.method === 'DELETE') throw new Error('logout_unknown');
     if (['POST', 'PATCH'].includes(options.method) && (path.startsWith('/api/resources') || path.startsWith('/api/accounts') || path.startsWith('/api/agents/') || path.startsWith('/api/engagements/'))) throw new Error('outcome_unknown');
     throw new Error('native_unavailable');
@@ -355,10 +355,21 @@ export async function fetchAgentDetail(name) {
  * rendered as unknown, never invented. A role carries framework/provider/model/
  * reasoning only: extraArgs, apiBaseUrl and apiKey have no native source and
  * are refused by exact-key checking rather than silently dropped. */
-const runtimeRole = (v) => object(v, ['framework', 'provider', 'model', 'reasoning'])
+const runtimePlugin = (v) => object(v, ['pluginId', 'adapterId', 'packageSha256', 'settingsSha256'])
+  && text(v.pluginId, 128) && text(v.adapterId, 128) && pluginDigest(v.packageSha256) && pluginDigest(v.settingsSha256);
+const harnessPlugin = (v) => object(v, ['pluginId', 'harnessId', 'packageSha256', 'settingsSha256'])
+  && text(v.pluginId, 128) && text(v.harnessId, 128) && pluginDigest(v.packageSha256) && pluginDigest(v.settingsSha256);
+const runtimeRole = (v) => [
+  ['framework', 'provider', 'model', 'reasoning'],
+  ['framework', 'provider', 'model', 'reasoning', 'runtimePlugin'],
+  ['framework', 'provider', 'model', 'reasoning', 'harnessPlugin'],
+  ['framework', 'provider', 'model', 'reasoning', 'runtimePlugin', 'harnessPlugin'],
+].some(keys => object(v, keys))
   && text(v.framework, 64) && text(v.model, 256)
   && (v.provider === null || text(v.provider, 64))
-  && (v.reasoning === null || text(v.reasoning, 64));
+  && (v.reasoning === null || text(v.reasoning, 64))
+  && (!Object.hasOwn(v, 'runtimePlugin') || v.runtimePlugin === null || runtimePlugin(v.runtimePlugin))
+  && (!Object.hasOwn(v, 'harnessPlugin') || v.harnessPlugin === null || harnessPlugin(v.harnessPlugin));
 export function validateLaunchEnv(v) {
   if (!object(v, ['runtimeProfile'])) throw new Error('invalid_native_response');
   const p = v.runtimeProfile;
@@ -805,8 +816,9 @@ const validResourceBindings = (bindings, resourceId) => Array.isArray(bindings) 
   && id(g.id) && id(g.serverEngagementId) && g.resourceId === resourceId && number(g.revision) && g.revision >= 1
   && number(g.allocatedTokens) && Array.isArray(g.eligibleManagers) && g.eligibleManagers.length <= 64
   && g.eligibleManagers.every(m => text(m, 255)));
-const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'published', 'roles', 'revision', 'engagementResources'])
+const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'runtimePlugin', 'harnessPlugin', 'published', 'roles', 'revision', 'engagementResources'])
       || !id(r.id) || !text(r.framework, 64) || !text(r.model, 256) || !optionalText(r.provider, 128) || !optionalText(r.reasoning, 128)
+      || !(r.runtimePlugin === null || runtimePlugin(r.runtimePlugin)) || !(r.harnessPlugin === null || harnessPlugin(r.harnessPlugin))
       || !validResourceBindings(r.engagementResources, r.id) || !ceiling(r.ceiling) || typeof r.published !== 'boolean' || !Array.isArray(r.roles) || r.roles.length > 64 || !r.roles.every((v) => text(v, 64)) || !revision(r.revision));
 export function validateResources(value) {
   if (!object(value, ['resources', 'roles', 'next_after', 'permissions']) || !Array.isArray(value.resources) || value.resources.length > 16
@@ -1205,7 +1217,8 @@ async function setupCall(path, method) {
     try { value = await response.json(); } catch { /* not JSON: handled below */ }
     if (response.status === 401) throw new Error('console_access_required');
     if (!response.ok || value?.ok !== true) throw new Error(typeof value?.code === 'string' ? value.code : 'native_unavailable');
-    if (!Array.isArray(value.agents)) throw new Error('invalid_native_response');
+    if (!Array.isArray(value.agents) || !Array.isArray(value.pluginRuntimes) || typeof value.pluginRuntimeReady !== 'boolean'
+      || value.pluginRuntimes.length > 128 || value.pluginRuntimes.some((row) => !pluginRuntimeRow(row))) throw new Error('invalid_native_response');
     return value;
   } catch (error) {
     if (error.name === 'AbortError') throw new Error('outcome_unknown');
@@ -1214,6 +1227,7 @@ async function setupCall(path, method) {
     clearTimeout(timer);
   }
 }
+
 export function fetchSetup() { return setupCall('setup', 'GET'); }
 export function checkSetup() { return setupCall('setup/check', 'POST'); }
 // ADR-193: an Octos source also names the profile it runs; no other source does.
@@ -1300,4 +1314,138 @@ export async function startAssociation(input) {
   const value = await request('/api/palpo/associations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
   if (!object(value, ['id']) || !/^hf_[a-f0-9]{32}$/.test(value.id)) throw new Error('invalid_native_response');
   return value;
+}
+const pluginId = (value) => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value);
+const entryId = (value) => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(value);
+const pluginDigest = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const pluginResponse = (value) => {
+  if (!Array.isArray(value) && (value === null || typeof value !== 'object')) throw new Error('invalid_native_response');
+  return value;
+};
+const utf8Bytes = (value) => new TextEncoder().encode(value).length;
+const settingText = (value, max, multiline = false) => typeof value === 'string' && utf8Bytes(value) <= max
+  && [...value].every((character) => !/\p{C}/u.test(character) || multiline && ['\n', '\r', '\t'].includes(character));
+const settingValue = (setting, value) => {
+  if (setting.kind === 'text') return settingText(value, 4096);
+  if (setting.kind === 'textarea') return settingText(value, setting.maxLength, true);
+  if (setting.kind === 'integer') return Number.isSafeInteger(value) && (setting.min === null || value >= setting.min) && (setting.max === null || value <= setting.max);
+  if (setting.kind === 'boolean') return typeof value === 'boolean';
+  return typeof value === 'string' && setting.options.includes(value);
+};
+const settingSpec = (setting) => object(setting, ['id', 'label', 'description', 'kind', 'required', 'default', 'options', 'min', 'max', 'maxLength'])
+  && entryId(setting.id) && settingText(setting.label, 128) && settingText(setting.description, 512)
+  && ['text', 'textarea', 'integer', 'boolean', 'select'].includes(setting.kind) && typeof setting.required === 'boolean'
+  && Array.isArray(setting.options) && setting.options.length <= 32 && setting.options.every((option) => settingText(option, 128))
+  && new Set(setting.options).size === setting.options.length && (setting.min === null || Number.isSafeInteger(setting.min))
+  && (setting.max === null || Number.isSafeInteger(setting.max)) && (setting.min === null || setting.max === null || setting.min <= setting.max)
+  && (setting.maxLength === null || Number.isSafeInteger(setting.maxLength))
+  && (setting.kind === 'text' && setting.maxLength === null && setting.options.length === 0 && setting.min === null && setting.max === null
+    || setting.kind === 'textarea' && setting.maxLength >= 1 && setting.maxLength <= 32768 && setting.options.length === 0 && setting.min === null && setting.max === null
+    || setting.kind === 'integer' && setting.maxLength === null && setting.options.length === 0
+    || setting.kind === 'boolean' && setting.maxLength === null && setting.options.length === 0 && setting.min === null && setting.max === null
+    || setting.kind === 'select' && setting.maxLength === null && setting.options.length > 0 && setting.min === null && setting.max === null)
+  && (setting.default === null || settingValue(setting, setting.default));
+const settingList = (values, max) => Array.isArray(values) && values.length <= max && values.every(settingSpec)
+  && new Set(values.map((setting) => setting.id)).size === values.length;
+const pluginRuntimeQualification = (value) => object(value, ['model', 'provider', 'reasoning', 'roles'])
+  && text(value.model, 256) && text(value.provider, 128) && (value.reasoning === null || text(value.reasoning, 128))
+  && Array.isArray(value.roles) && value.roles.length <= 6 && value.roles.every((role) => text(role, 64));
+const pluginRuntimeRow = (value) => object(value, ['pluginId', 'pluginName', 'adapterId', 'framework', 'state', 'qualifications'])
+  && pluginId(value.pluginId) && text(value.pluginName, 256) && (value.adapterId === null || entryId(value.adapterId))
+  && (value.framework === null || text(value.framework, 64))
+  && ['unavailable', 'disabled', 'stale', 'restart_required', 'configuration_required', 'unqualified', 'ready'].includes(value.state)
+  && Array.isArray(value.qualifications) && value.qualifications.length <= 64 && value.qualifications.every(pluginRuntimeQualification);
+const pluginManifest = (v) => object(v, ['schema', 'id', 'name', 'version', 'minHagencyVersion', 'platforms', 'builds', 'startup', 'actions', 'events', 'tools', 'runtimes', 'harnesses', 'panes', 'settings'])
+  && v.schema === 'hagency.plugin/v1' && pluginId(v.id) && text(v.name, 256) && text(v.version, 64) && text(v.minHagencyVersion, 64)
+  && Array.isArray(v.platforms) && v.platforms.length <= 16 && v.platforms.every((x) => text(x, 64))
+  && Array.isArray(v.builds) && Array.isArray(v.startup) && Array.isArray(v.actions) && Array.isArray(v.events) && Array.isArray(v.tools) && Array.isArray(v.panes)
+  && settingList(v.settings, 32)
+  && Array.isArray(v.runtimes) && v.runtimes.length <= 64 && v.runtimes.every((x) => object(x, ['id', 'framework', 'command', 'protocol']) && entryId(x.id) && text(x.framework, 64) && Array.isArray(x.command) && x.command.length > 0 && x.command.every((a) => text(a, 4096)) && x.protocol === 'hagency.runtime/v1')
+  && Array.isArray(v.harnesses) && v.harnesses.length <= 64 && v.harnesses.every((x) => object(x, ['id', 'command', 'protocol', 'configuration']) && entryId(x.id) && Array.isArray(x.command) && x.command.length > 0 && x.command.every((a) => text(a, 4096)) && x.protocol === 'hagency.harness/v1' && settingList(x.configuration, 32));
+const pluginChoice = (v) => object(v, ['pluginId', 'adapterId', 'packageSha256', 'settingsSha256', 'framework', 'model', 'provider', 'reasoning', 'roles'])
+  && pluginId(v.pluginId) && entryId(v.adapterId) && pluginDigest(v.packageSha256) && pluginDigest(v.settingsSha256) && text(v.framework, 64) && text(v.model, 256) && text(v.provider, 128)
+  && (v.reasoning === null || text(v.reasoning, 128)) && Array.isArray(v.roles) && v.roles.length <= 6 && v.roles.every((role) => text(role, 64));
+const pluginSettings = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  && settingList(v.definitions, 32)
+  && v.document && typeof v.document === 'object' && v.document.schema === 'hagency.plugin.settings/v1' && pluginId(v.document.pluginId) && pluginDigest(v.document.packageSha256) && pluginDigest(v.document.settingsSha256) && Number.isSafeInteger(v.document.revision) && v.document.revision >= 0 && v.document.values && typeof v.document.values === 'object' && !Array.isArray(v.document.values)
+  && Object.entries(v.document.values).every(([id, value]) => { const setting = v.definitions.find((candidate) => candidate.id === id); return setting && settingValue(setting, value); })
+  && typeof v.settingsReady === 'boolean' && Array.isArray(v.missingRequired) && v.missingRequired.every((id) => typeof id === 'string');
+
+export async function fetchPluginSettings(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/settings`);
+  if (!pluginSettings(value) || value.document.pluginId !== id) throw new Error('invalid_native_response');
+  return value;
+}
+export async function updatePluginSettings(id, expectedRevision, values) {
+  if (!pluginId(id) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || values === null || typeof values !== 'object' || Array.isArray(values)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision, values }) });
+  if (!pluginSettings(value) || value.document.pluginId !== id) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPlugins() {
+  const value = await request('/api/plugins');
+  if (!Array.isArray(value) || value.length > 128 || value.some((row) => !pluginId(row.id))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPluginManifest(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/manifest`);
+  if (!pluginManifest(value) || value.id !== id) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPluginTools(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/tools`);
+  if (!Array.isArray(value) || value.length > 128 || value.some((tool) =>
+    !object(tool, ['name', 'pluginId', 'toolId', 'title', 'description', 'inputSchema', 'packageSha256'])
+    || tool.pluginId !== id || !pluginId(tool.toolId) || !text(tool.name, 256)
+    || !text(tool.title, 256) || !text(tool.description, 4096) || tool.inputSchema === null
+    || typeof tool.inputSchema !== 'object' || Array.isArray(tool.inputSchema) || !pluginDigest(tool.packageSha256))) {
+    throw new Error('invalid_native_response');
+  }
+  return value;
+}
+export async function fetchPluginQualifications(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/qualifications`);
+  if (!Array.isArray(value) || value.length > 256 || value.some((choice) => !pluginChoice(choice) || choice.pluginId !== id)) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPluginLogs(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/logs`);
+  if (!Array.isArray(value) || value.length > 512 || value.some((row) => !object(row, ['atMs', 'invocationId', 'stream', 'text']) || !number(row.atMs) || !text(row.invocationId, 128) || !['stdout', 'stderr'].includes(row.stream) || !text(row.text, 256 * 1024))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function invokePluginAction(id, actionId, input = {}) {
+  if (!pluginId(id) || !pluginId(actionId) || input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('invalid_selection');
+  const accepted = pluginResponse(await request(`/api/plugins/${encodeURIComponent(id)}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actionId, input, idempotencyKey: `ui:${actionId}:${JSON.stringify(input)}` }) }));
+  if (!accepted.invocationId) return accepted;
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const value = pluginResponse(await request(`/api/plugins/invocations/${encodeURIComponent(accepted.invocationId)}`));
+    if (['succeeded', 'failed', 'outcome_unknown'].includes(value.state)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('plugin_action_poll_timeout');
+}
+export async function previewPlugin(source) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('invalid_selection');
+  return pluginResponse(await request('/api/plugins/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }) }));
+}
+export async function installPlugin(previewId, trustDigest) {
+  if (typeof previewId !== 'string' || typeof trustDigest !== 'string') throw new Error('invalid_selection');
+  return pluginResponse(await request('/api/plugins/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ previewId, trustDigest }) }));
+}
+export async function linkPlugin(path) {
+  if (typeof path !== 'string' || path.length === 0 || path.length > 4096) throw new Error('invalid_selection');
+  return pluginResponse(await request('/api/plugins/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) }));
+}
+export async function setPluginEnabled(id, enabled) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  return pluginResponse(await request(`/api/plugins/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+}
+export async function uninstallPlugin(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  return pluginResponse(await request(`/api/plugins/${encodeURIComponent(id)}/uninstall`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
 }

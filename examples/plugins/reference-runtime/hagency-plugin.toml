@@ -1,0 +1,32 @@
+schema = "hagency.plugin/v1"
+id = "reference.runtime"
+name = "Reference Runtime"
+version = "1.0.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[startup]]
+id = "ready"
+command = ["python3", "reference_runtime.py", "startup"]
+
+[[actions]]
+id = "ping"
+title = "Reference runtime ping"
+command = ["python3", "reference_runtime.py", "action"]
+
+[[events]]
+on = "dispatch.completed"
+command = ["python3", "reference_runtime.py", "event"]
+
+[[tools]]
+id = "echo"
+title = "Echo"
+description = "Return the bounded JSON input as text."
+input_schema = { type = "object" }
+command = ["python3", "reference_runtime.py", "tool"]
+
+[[runtimes]]
+id = "reference"
+framework = "reference"
+command = ["python3", "reference_runtime.py", "runtime"]
+protocol = "hagency.runtime/v1"

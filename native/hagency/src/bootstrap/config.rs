@@ -769,6 +769,16 @@ impl Prepared {
                     fix: "the dispatch constraint must apply to the claim profile",
                 })?;
         }
+        let plugin_service = if config.factory_service.is_some() {
+            Some(
+                hagency_plugin::PluginService::open(state).map_err(|_| Failure::Config {
+                    field: "state-dir plugins",
+                    fix: "the plugin registry must open before factory hosts are prepared",
+                })?,
+            )
+        } else {
+            None
+        };
         let mut host = Host::new(
             own.clone(),
             config.executable.clone(),
@@ -781,6 +791,14 @@ impl Prepared {
             field: "agent-driver.json: executable/workspaces/file_limit",
             fix: "the execution host must construct from the executable, workspaces and file limit",
         })?;
+        if let Some(service) = plugin_service.clone() {
+            host = host
+                .with_plugin_service(service)
+                .map_err(|_| Failure::Config {
+                    field: "agent-driver.json: factory_service",
+                    fix: "the execution host must accept the qualified plugin service",
+                })?;
+        }
         let uses_local_codex = config.local_codex.is_some();
         if let Some(local) = config.local_codex {
             claim = claim
@@ -1211,20 +1229,28 @@ impl Prepared {
                     idle_ms: factory.idle_ms,
                 },
             )
-            .and_then(|plan| {
-                plan.with_file_access(config.file_limit, config.send_file, config.receive_file)
-            })
-            .map(|plan| {
-                if config.coordination_tools {
-                    plan.with_coordination_tools()
-                } else {
-                    plan
-                }
-            })
             .map_err(|_| Failure::Config {
                 field: "agent-driver.json: factory_service plan",
-                fix: "the warm plan must apply the file, coordination and receive capabilities",
+                fix: "the warm plan must construct from the executable and limits",
             })?;
+            warm = warm
+                .with_plugin_service(plugin_service.clone().ok_or(Failure::Config {
+                    field: "state-dir plugins",
+                    fix: "the factory plan requires the opened plugin service",
+                })?)
+                .map_err(|_| Failure::Config {
+                    field: "agent-driver.json: factory_service plan",
+                    fix: "the warm plan must accept the qualified plugin service",
+                })?;
+            warm = warm
+                .with_file_access(config.file_limit, config.send_file, config.receive_file)
+                .map_err(|_| Failure::Config {
+                    field: "agent-driver.json: factory_service plan",
+                    fix: "the warm plan must apply the file and receive capabilities",
+                })?;
+            if config.coordination_tools {
+                warm = warm.with_coordination_tools();
+            }
             if uses_local_codex {
                 warm = warm
                     .with_local_codex_from_host(&host)

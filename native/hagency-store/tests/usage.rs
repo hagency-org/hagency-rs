@@ -560,6 +560,8 @@ INSERT INTO usage_sources_68 SELECT * FROM usage_sources;
 DROP TABLE usage_sources;
 ALTER TABLE usage_sources_68 RENAME TO usage_sources;
 CREATE INDEX usage_sources_engagement ON usage_sources(engagement_id);
+DROP TABLE plugin_tool_calls; DROP TABLE plugin_invocations; DROP TABLE plugin_runtime_qualifications;
+ALTER TABLE agent_definitions DROP COLUMN harness_template;
 PRAGMA user_version=68;",
     )
     .unwrap();

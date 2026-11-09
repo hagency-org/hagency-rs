@@ -142,7 +142,7 @@ pub(crate) fn router() -> Router {
                 .push(accounts::router())
                 .push(matrix_diag::router())
                 .push(resource_configuration::router())
-                // Task #46: the operator-facing capability and framework reads
+                .push(crate::plugins::router())
                 // (GET /api/capability, /api/frameworks, /api/frameworks/detect)
                 // are session-scoped reads, mounted under the console API so
                 // the native console reaches them without an operator bearer.

@@ -61,7 +61,7 @@ mod graphs;
 mod matrix_routes;
 mod messages;
 pub use engagement_retention::{ENDED_LIMIT, EngagementPruneOutcome, EngagementRetentionStatus};
-pub use engagement_terms::{AgentDefinition, RoleOffer, WhitelistEntry};
+pub use engagement_terms::{AgentDefinition, AgentDefinitionInput, RoleOffer, WhitelistEntry};
 pub use execution::{
     EXECUTION_RETENTION_BATCH, EXECUTION_RETENTION_DISPATCHES, EXECUTION_RETENTION_ROWS,
     ExecutionPruneOutcome,
@@ -134,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 69;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 73;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -423,6 +423,72 @@ pub struct RuntimeProfileRole {
     pub provider: Option<String>,
     pub model: String,
     pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_plugin: Option<hagency_core::project::RuntimePluginIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness_plugin: Option<hagency_core::project::HarnessPluginIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntimeQualification {
+    pub plugin_id: String,
+    pub adapter_id: String,
+    pub package_sha256: String,
+    pub settings_sha256: String,
+    pub framework: String,
+    pub model: String,
+    pub provider: String,
+    pub reasoning: Option<String>,
+    pub roles: Vec<String>,
+    pub evidence_digest: String,
+    pub qualified_at: i64,
+    pub evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntimeChoice {
+    pub plugin_id: String,
+    pub adapter_id: String,
+    pub package_sha256: String,
+    pub settings_sha256: String,
+    pub framework: String,
+    pub model: String,
+    pub provider: String,
+    pub reasoning: Option<String>,
+    pub roles: Vec<String>,
+}
+
+impl PluginRuntimeQualification {
+    fn validate(&self) -> Result<(), InvalidInput> {
+        project::RuntimePluginIdentity {
+            plugin_id: self.plugin_id.clone(),
+            adapter_id: self.adapter_id.clone(),
+            package_sha256: self.package_sha256.clone(),
+            settings_sha256: self.settings_sha256.clone(),
+        }
+        .validate()?;
+        if self.framework.is_empty()
+            || self.framework.len() > 64
+            || self.model.is_empty()
+            || self.model.len() > 256
+            || self.provider.is_empty()
+            || self.provider.len() > 128
+            || self.roles.len() > 64
+            || self.evidence_digest.len() != 64
+            || !self
+                .evidence_digest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(InvalidInput("invalid plugin runtime qualification"));
+        }
+        for role in &self.roles {
+            qualification::check_role(role)?;
+        }
+        Ok(())
+    }
 }
 /// The launch runtime profile (board #49, TS `normalizeRuntimeProfile`,
 /// `backend-v2.js:864-876`): `{primary, supervisor}`. The port stores no
@@ -900,6 +966,156 @@ fn check_grant_within(
 }
 
 impl DomainRepository {
+    pub fn put_plugin_runtime_qualification(
+        &mut self,
+        qualification: &PluginRuntimeQualification,
+    ) -> Result<(), Error> {
+        qualification.validate()?;
+        let roles = serde_json::to_string(&qualification.roles)?;
+        let evidence = serde_json::to_string(&qualification.evidence)?;
+        self.db.execute(
+            "INSERT OR REPLACE INTO plugin_runtime_qualifications (plugin_id,adapter_id,package_sha256,settings_sha256,framework,model,provider,reasoning,roles,evidence_digest,qualified_at,evidence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                qualification.plugin_id,
+                qualification.adapter_id,
+                qualification.package_sha256,
+                qualification.settings_sha256,
+                qualification.framework,
+                qualification.model,
+                qualification.provider,
+                qualification.reasoning,
+                roles,
+                qualification.evidence_digest,
+                qualification.qualified_at,
+                evidence,
+            ],
+        )?;
+        Ok(())
+    }
+    pub fn revoke_plugin_runtime_qualifications(&mut self, plugin_id: &str) -> Result<(), Error> {
+        if plugin_id.is_empty() || plugin_id.len() > 128 {
+            return Err(Error::Invalid(InvalidInput("invalid plugin id")));
+        }
+        self.db.execute(
+            "DELETE FROM plugin_runtime_qualifications WHERE plugin_id=?1",
+            [plugin_id],
+        )?;
+        Ok(())
+    }
+    pub fn plugin_runtime_choices(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Vec<PluginRuntimeChoice>, Error> {
+        if plugin_id.is_empty() || plugin_id.len() > 128 {
+            return Err(Error::Invalid(InvalidInput("invalid plugin id")));
+        }
+        let mut stmt = self.db.prepare(
+            "SELECT plugin_id,adapter_id,package_sha256,settings_sha256,framework,model,provider,reasoning,roles FROM plugin_runtime_qualifications WHERE plugin_id=?1 ORDER BY framework,model,provider,reasoning,adapter_id",
+        )?;
+        let rows = stmt.query_map([plugin_id], |row| {
+            let roles: String = row.get(8)?;
+            Ok(PluginRuntimeChoice {
+                plugin_id: row.get(0)?,
+                adapter_id: row.get(1)?,
+                package_sha256: row.get(2)?,
+                settings_sha256: row.get(3)?,
+                framework: row.get(4)?,
+                model: row.get(5)?,
+                provider: row.get(6)?,
+                reasoning: row.get(7)?,
+                roles: serde_json::from_str(&roles).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    }
+    pub fn plugin_runtime_choices_all(&self) -> Result<Vec<PluginRuntimeChoice>, Error> {
+        let mut stmt = self.db.prepare(
+            "SELECT plugin_id,adapter_id,package_sha256,settings_sha256,framework,model,provider,reasoning,roles \
+             FROM plugin_runtime_qualifications ORDER BY plugin_id,adapter_id,framework,model,provider,reasoning",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let roles: String = row.get(8)?;
+            Ok(PluginRuntimeChoice {
+                plugin_id: row.get(0)?,
+                adapter_id: row.get(1)?,
+                package_sha256: row.get(2)?,
+                settings_sha256: row.get(3)?,
+                framework: row.get(4)?,
+                model: row.get(5)?,
+                provider: row.get(6)?,
+                reasoning: row.get(7)?,
+                roles: serde_json::from_str(&roles).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    }
+    pub fn plugin_runtime_qualification(
+        &self,
+        runtime: &project::RuntimePluginIdentity,
+        framework: &str,
+        model: &str,
+        provider: &str,
+        reasoning: Option<&str>,
+    ) -> Result<Option<PluginRuntimeQualification>, Error> {
+        self.db
+            .query_row(
+                "SELECT roles,evidence_digest,qualified_at,evidence FROM plugin_runtime_qualifications WHERE plugin_id=?1 AND adapter_id=?2 AND package_sha256=?3 AND settings_sha256=?4 AND framework=?5 AND model=?6 AND provider=?7 AND reasoning IS ?8",
+                params![
+                    runtime.plugin_id,
+                    runtime.adapter_id,
+                    runtime.package_sha256,
+                    runtime.settings_sha256,
+                    framework,
+                    model,
+                    provider,
+                    reasoning,
+                ],
+                |row| {
+                    let roles: String = row.get(0)?;
+                    let evidence: String = row.get(3)?;
+                    Ok(PluginRuntimeQualification {
+                        plugin_id: runtime.plugin_id.clone(),
+                        adapter_id: runtime.adapter_id.clone(),
+                        package_sha256: runtime.package_sha256.clone(),
+                        settings_sha256: runtime.settings_sha256.clone(),
+                        framework: framework.into(),
+                        model: model.into(),
+                        provider: provider.into(),
+                        reasoning: reasoning.map(str::to_owned),
+                        roles: serde_json::from_str(&roles).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        evidence_digest: row.get(1)?,
+                        qualified_at: row.get(2)?,
+                        evidence: serde_json::from_str(&evidence).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Error::from)
+    }
     pub fn set_role_publication(&mut self, role: &str, published: bool) -> Result<(), Error> {
         qualification::check_role(role)?;
         self.db.execute("INSERT INTO role_publications(role,published) VALUES(?1,?2) ON CONFLICT(role) DO UPDATE SET published=excluded.published",params![role,published])?;
@@ -1152,6 +1368,21 @@ impl DomainRepository {
                     // ADR-193: no board number; the file carries its list
                     // version.
                     (69, include_str!("migrations/069-octos-usage-sources.sql")),
+                    // ADR-195: exact enabled plugin runtime qualifications.
+                    (
+                        70,
+                        include_str!("migrations/076-plugin-runtime-qualifications.sql"),
+                    ),
+                    // ADR-195: durable action idempotency and tool custody.
+                    (71, include_str!("migrations/077-plugin-invocations.sql")),
+                    (
+                        72,
+                        include_str!("migrations/078-plugin-qualification-settings.sql"),
+                    ),
+                    (
+                        73,
+                        include_str!("migrations/079-agent-harness-templates.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
@@ -1159,12 +1390,16 @@ impl DomainRepository {
                     "SELECT id,engagement_id,project_id,digest,command,result FROM coordinator_project_setup_attempts LIMIT 0",
                     "SELECT engagement_id,project_id,attempt_id,observation FROM coordinator_project_setup LIMIT 0",
                     "SELECT id,digest,command,definition,state,reason,agent_id,received_at,updated_at FROM coordinator_deliveries LIMIT 0",
+                    "SELECT plugin_id,adapter_id,package_sha256,settings_sha256,framework,model,provider,reasoning,roles,evidence_digest,qualified_at,evidence FROM plugin_runtime_qualifications LIMIT 0",
+                    "SELECT invocation_id,plugin_id,package_sha256,capability,entrypoint_id,idempotency_key,state,input_digest,input,result,cleanup,created_at,updated_at FROM plugin_invocations LIMIT 0",
+                    "SELECT dispatch_id,call_id,plugin_id,tool_id,package_sha256,input_digest,result,outcome,created_at,updated_at FROM plugin_tool_calls LIMIT 0",
                     "SELECT engagement_id,revision,digest,change,authority,accepted_at FROM coordinator_delegations LIMIT 0",
                     "SELECT id,engagement_id,digest,receipt,refused_at FROM coordinator_refusals LIMIT 0",
                     "SELECT agent_id,command_id,digest,receipt,accepted_at FROM coordinator_settlements LIMIT 0",
                     "SELECT agent_id,command_id,desired_name,confirmed_name,last_error,updated_at,observed_at FROM coordinator_agent_profiles LIMIT 0",
                     "SELECT allocated_tokens FROM engagements LIMIT 0",
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
+                    "SELECT id,resource_id,name,role,enabled,created_at,harness_template FROM agent_definitions LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
                     "SELECT engagement_id,room_id,state,joined_at,updated_at,notice_at FROM joined_rooms LIMIT 0",
                     "SELECT fleet_id,allocated_tokens,updated_at FROM side_allocations LIMIT 0",
@@ -2088,6 +2323,8 @@ impl DomainRepository {
                 provider: resource.provider,
                 model: resource.model,
                 reasoning: resource.reasoning,
+                runtime_plugin: resource.runtime_plugin,
+                harness_plugin: resource.harness_plugin,
             }),
             supervisor: None,
         }))
@@ -2159,6 +2396,21 @@ impl DomainRepository {
         if collision {
             return Err(Error::Conflict);
         }
+        let harness_template = tx
+            .query_row(
+                "SELECT harness_template FROM agent_definitions \
+                 WHERE resource_id=?1 AND name=?2 AND role=?3 AND enabled=1",
+                params![
+                    request.agent_definition.resource_id,
+                    request.agent_definition.name.as_str(),
+                    request.role,
+                ],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
         /*
          * Task #19 TS parity (lib/engagement-store.js:546-566): the routing
          * verdict is RECORDED, never used to refuse — TS stores the request
@@ -2219,6 +2471,7 @@ impl DomainRepository {
             route: Some(route.to_owned()),
             auto_joined,
             allocated_tokens: None,
+            harness_template,
             id,
             request_id: request.request_id.clone(),
             project_id: request.target_project_id.clone(),
@@ -2368,7 +2621,7 @@ impl DomainRepository {
             "UPDATE engagements SET preset_id=?2,seat_id=?3 WHERE id=?1",
             params![id, resource.preset_id, resource.seat_id],
         )?;
-        let payload = json!({"request":request,"registrationGeneration":generation,"runtimeName":value.runtime_name,"resource":resource,"approvalEvidence":proof.audit()});
+        let payload = json!({"request":request,"registrationGeneration":generation,"runtimeName":value.runtime_name,"resource":resource,"harnessTemplate":value.harness_template,"approvalEvidence":proof.audit()});
         tx.execute("INSERT INTO effects(id,engagement_id,kind,state,payload) VALUES(?1,?2,'provision','pending',?3)", params![format!("provision_{id}"),id,serialize(&payload)?])?;
         record_decision(
             &tx,
@@ -2930,14 +3183,38 @@ fn prepare_resource_write(
             || old.model != resource.model
             || old.provider != resource.provider
             || old.reasoning != resource.reasoning
-            || old.octos_profile != resource.octos_profile)
+            || old.octos_profile != resource.octos_profile
+            || old.runtime_plugin != resource.runtime_plugin
+            || old.harness_plugin != resource.harness_plugin)
     {
         let count:i64=tx.query_row("SELECT COUNT(*) FROM engagements WHERE resource_id=?1 AND state IN ('reserved','active')",[resource.id()],|r|r.get(0))?;
         if count != 0 {
             return Err(Error::State);
         }
     }
-    resource.roles = resource.eligible_roles();
+    if let Some(runtime) = &resource.runtime_plugin {
+        let roles: Option<String> = tx
+            .query_row(
+                "SELECT roles FROM plugin_runtime_qualifications WHERE plugin_id=?1 AND adapter_id=?2 AND package_sha256=?3 AND framework=?4 AND model=?5 AND provider IS ?6 AND reasoning IS ?7",
+                params![
+                    runtime.plugin_id,
+                    runtime.adapter_id,
+                    runtime.package_sha256,
+                    resource.framework,
+                    resource.model,
+                    resource.provider,
+                    resource.reasoning,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(roles) = roles else {
+            return Err(Error::Unqualified);
+        };
+        resource.roles = serde_json::from_str(&roles)?;
+    } else {
+        resource.roles = resource.eligible_roles();
+    }
     Ok(resource)
 }
 fn write_resource_configuration(

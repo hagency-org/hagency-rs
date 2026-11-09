@@ -32,6 +32,17 @@ function AgentCard({ agent }) {
   </article>;
 }
 
+function PluginRuntimeCard({ runtime }) {
+  const t = useT();
+  const state = runtime.state.replaceAll('_', ' ');
+  return <article className="setup-agent">
+    <h3>{runtime.pluginName} · {runtime.adapterId ?? 'runtime'}</h3>
+    <p>{t('st.pluginRuntimeState', { state })}</p>
+    {runtime.framework && <p className="dim">{runtime.framework}</p>}
+    {runtime.qualifications.length > 0 && <ul className="setup-profiles">{runtime.qualifications.map((choice) => <li key={`${choice.model}:${choice.reasoning ?? ''}`}><code>{choice.model}</code>{choice.reasoning ? ` · ${choice.reasoning}` : ''} · {choice.roles.join(', ')}</li>)}</ul>}
+  </article>;
+}
+
 export default function SetupPage() {
   const t = useT(), data = useData();
   const [setup, setSetup] = useState(null), [step, setStep] = useState(0);
@@ -41,7 +52,9 @@ export default function SetupPage() {
   const loaded = useRef(false), autoCheck = useRef(false);
   const selected = connections.find(row => row.id === selectedId);
   const verified = selected?.phase === 'connected';
-  const runtimeReady = !!setup?.runtimeConfigured && setup.agents?.some(agent => agent.found && agent.signedIn);
+  const localRuntimeReady = !!setup?.runtimeConfigured && setup.agents?.some(agent => agent.found && agent.signedIn);
+  const pluginRuntimeReady = setup?.pluginRuntimeReady === true;
+  const runtimeReady = localRuntimeReady || pluginRuntimeReady;
   const sourceReady = (setup?.offer?.sourceResources ?? setup?.offer?.resources ?? 0) > 0;
   // A coding agent configured after the first source (ADR-192: Claude Code
   // beside Codex) still gets its own offer: only agents with a source drop out.
@@ -110,10 +123,10 @@ export default function SetupPage() {
     <div className={`setup-workspace${selected ? '' : ' without-context'}`}>
       <div>
         {step === 0 && <section className="panel setup-stage" aria-labelledby="runtime-title">
-          <h2 id="runtime-title">{t('guided.runtimeTitle')}</h2><p>{t('guided.runtimeHelp')}</p>
-          {setup === null ? <p role="status">{t('st.loading')}</p> : (setup.agents ?? []).map(agent => <AgentCard key={agent.kind} agent={agent} />)}
-          <p role="status">{t(setup?.runtimeConfigured ? 'st.runtimeReady' : setup?.runtimeStale ? 'st.runtimeStale' : 'st.runtimeWaiting')}</p>
-          {setup?.applicable === false && <p className="note">{t('st.notFleet')}</p>}
+          <h2 id="runtime-title">{t('guided.runtimeTitle')}</h2><p>{t(pluginRuntimeReady ? 'guided.runtimeHelpCombined' : 'guided.runtimeHelp')}</p>
+          {setup === null ? <p role="status">{t('st.loading')}</p> : <>{(setup.agents ?? []).map(agent => <AgentCard key={agent.kind} agent={agent} />)}{(setup.pluginRuntimes ?? []).map((runtime) => <PluginRuntimeCard key={`${runtime.pluginId}:${runtime.adapterId ?? 'runtime'}`} runtime={runtime} />)}</>}
+          <p role="status">{t(pluginRuntimeReady || setup?.runtimeConfigured ? 'st.runtimeReady' : setup?.runtimeStale ? 'st.runtimeStale' : 'st.runtimeWaiting')}</p>
+          {pluginRuntimeReady && <p className="note">{t('st.pluginRuntimeReady')}</p>}
           <div className="btn-row"><button type="button" className="btn" disabled={busy} onClick={check}>{t(busy ? 'st.checking' : 'st.checkAgain')}</button><button type="button" className="btn primary" onClick={() => move(1)}>{t('guided.toConnection')}</button></div>
         </section>}
         {/* Keep polling the backend's association state when viewing another step. */}
@@ -125,7 +138,7 @@ export default function SetupPage() {
           <h2 id="resource-title">{t('guided.resourceTitle')}</h2><p>{t('guided.resourceHelp')}</p>
           {!verified && <p className="note">{t('guided.connectionRequired')}</p>}
           {choices.length > 0 && <form className="setup-source-form" onSubmit={prepareSource}>
-            <p>{t('guided.sourceHelp')}</p>
+            <p>{t(pluginRuntimeReady ? 'guided.sourceHelpCombined' : 'guided.sourceHelp')}</p>
             <label>{t('guided.model')}<select value={choiceAt} onChange={e => setChoiceIndex(Number(e.target.value))} disabled={busy}>
               {choices.map((c, i) => <option key={`${c.framework}:${c.profile ?? ''}:${c.model}:${c.reasoning}`} value={i}>{AGENT_NAMES[c.framework] ?? 'Codex'}{c.profile ? ` · ${c.profile}` : ''} · {c.model}{c.reasoning ? ` · ${c.reasoning}` : ''}</option>)}
             </select></label>
