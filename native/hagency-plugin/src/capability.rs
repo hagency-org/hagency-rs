@@ -140,7 +140,6 @@ pub fn parse_tool_result(bytes: &[u8]) -> Result<PluginToolResult, ToolResultErr
     Ok(result)
 }
 
-
 pub fn sha256_json(value: &Value) -> Result<String, PluginError> {
     let bytes = serde_json::to_vec(value)?;
     Ok(crate::digest_bytes(&bytes))

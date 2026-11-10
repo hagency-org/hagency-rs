@@ -128,7 +128,7 @@ struct PreviewInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InstallInput {
-    preview_id: String,
+    source: PluginSource,
     trust_digest: String,
 }
 
@@ -332,7 +332,7 @@ async fn install(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(input) = resources::body::<InstallInput>(req, depot, res).await else {
         return;
     };
-    match manager.apply_install(&input.preview_id, &input.trust_digest) {
+    match manager.apply_install(input.source, &input.trust_digest) {
         Ok(value) => match store
             .revoke_plugin_runtime_qualifications(value.id.clone())
             .await

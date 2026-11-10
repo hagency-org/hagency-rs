@@ -117,3 +117,9 @@ Scenario: Harness control is a redacted view
 None for v1. Plugins remain trusted user-level executables with the OS user's
 filesystem/network access. The manifest and guardian are lifecycle and authority
 controls, not a sandbox; OS confinement requires a separately approved design.
+ 
+## 2026 trust-flow amendment
+
+Remote plugin sources are GitHub-only and may use canonical HTTPS or SSH transport. They require an exact lowercase 40-hex commit and optional safe relative subdirectory. The service normalizes and validates decomposed source fields at every HTTP boundary; it does not accept arbitrary repository URLs, redirects, credentials, branches, tags, archives, submodules, or symlinks.
+
+Preview is read-only and stateless. It returns the normalized source, source digest, manifest digest, and a trust digest over source identity and content. Install resubmits the source and trust digest, performs a fresh isolated checkout, verifies the complete trust contract before build or registry mutation, and preserves the active record or enters explicit `NotReady` on failed recovery. SSH uses only the existing service agent and `known_hosts`.

@@ -1,10 +1,10 @@
 use hagency_plugin::{
-    ApprovalDecision, CommandEnvironment, CommandRequest, EventQueue, HarnessFrame,
-    HarnessNotification, HarnessPluginRef, HarnessRequest, HostRequest, MAX_EVENT_QUEUE,
-    Manifest, PluginCommand, PluginError, PluginService, PluginSource, PluginToolApproval,
-    RedactedEvent, RefusalCode, RestartNotice, RuntimeOutcome, RuntimePluginRef,
-    RuntimeQualification, RuntimeSession, Scheduler, ToolResultError, decode_frame,
-    decode_harness_frame, encode_harness_request, encode_request, parse_tool_result, run_command,
+    ApprovalDecision, CommandEnvironment, CommandRequest, EventQueue, GitTransport, HarnessFrame,
+    HarnessNotification, HarnessPluginRef, HarnessRequest, HostRequest, MAX_EVENT_QUEUE, Manifest,
+    PluginCommand, PluginError, PluginService, PluginSource, PluginToolApproval, RedactedEvent,
+    RefusalCode, RestartNotice, RuntimeOutcome, RuntimePluginRef, RuntimeQualification,
+    RuntimeSession, Scheduler, ToolResultError, decode_frame, decode_harness_frame,
+    encode_harness_request, encode_request, parse_tool_result, run_command,
 };
 use serde_json::json;
 use std::{ffi::OsStr, fs, path::Path, time::Duration};
@@ -58,10 +58,20 @@ fn native_plugin_manifest_accepts_closed_schema() {
 
 #[test]
 fn native_plugin_github_source_requires_full_commit() {
-    assert!(PluginSource::github("owner", "repo", None, &"a".repeat(39)).is_err());
-    assert!(PluginSource::github("owner", "repo", None, &"A".repeat(40)).is_err());
-    let source = PluginSource::github("owner", "repo", Some("examples/plugin"), &"a".repeat(40))
-        .expect("full pin");
+    assert!(
+        PluginSource::github("owner", "repo", None, &"a".repeat(39), GitTransport::Https).is_err()
+    );
+    assert!(
+        PluginSource::github("owner", "repo", None, &"A".repeat(40), GitTransport::Https).is_err()
+    );
+    let source = PluginSource::github(
+        "owner",
+        "repo",
+        Some("examples/plugin"),
+        &"a".repeat(40),
+        GitTransport::Https,
+    )
+    .expect("full pin");
     assert_eq!(source.commit(), Some("a".repeat(40).as_str()));
 }
 
@@ -82,7 +92,7 @@ fn native_plugin_registry_preserves_active_on_failed_apply() {
         .preview_install(PluginSource::linked(replacement.path()).expect("source"))
         .expect("preview");
     assert!(matches!(
-        manager.apply_install(&preview.preview_id, "wrong"),
+        manager.apply_install(preview.source.clone(), "wrong"),
         Err(PluginError::Untrusted)
     ));
     let active = manager.inspect("example.plugin").expect("active");
@@ -99,12 +109,12 @@ fn native_plugin_untrusted_preview_can_be_confirmed_later() {
         .preview_install(PluginSource::linked(dir.path()).expect("source"))
         .expect("preview");
     assert!(matches!(
-        manager.apply_install(&preview.preview_id, "wrong"),
+        manager.apply_install(preview.source.clone(), "wrong"),
         Err(PluginError::Untrusted)
     ));
     assert!(
         manager
-            .apply_install(&preview.preview_id, &preview.source_sha256)
+            .apply_install(preview.source.clone(), &preview.trust_sha256)
             .is_ok()
     );
 }
@@ -554,7 +564,6 @@ fn native_plugin_runtime_cleanup_unknown_refuses_settlement() {
     assert!(session.accept(frame).is_err());
 }
 
-
 #[test]
 fn native_plugin_cli_uses_operator_routes_and_exact_subcommands() {
     assert!(matches!(
@@ -577,7 +586,7 @@ fn native_plugin_install_requires_exact_trust_confirmation() {
         .preview_install(PluginSource::linked(dir.path()).expect("source"))
         .expect("preview");
     assert!(matches!(
-        manager.apply_install(&preview.preview_id, "different"),
+        manager.apply_install(preview.source, "different"),
         Err(PluginError::Untrusted)
     ));
 }

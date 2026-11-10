@@ -220,6 +220,57 @@ async fn await_admission(server: &mut tokio::process::Child, address: SocketAddr
 }
 
 #[tokio::test]
+async fn native_console_plugins_browser() {
+    let address = address();
+    let f = Fixture::new(address, Some(&built()));
+    hagency_store::private::write_new(
+        &f.root.path().join("state/operator.token"),
+        TOKEN.as_bytes(),
+    )
+    .unwrap();
+    let acceptor = TcpListener::new(address).try_bind().await.unwrap();
+    let server = Server::new(acceptor);
+    let handle = server.handle();
+    let serving = tokio::spawn(server.try_serve(f.app.clone().router()));
+    let url = hagency::console::client::access(&f.root.path().join("state"), address)
+        .await
+        .unwrap();
+    let mut child = Command::new(node())
+        .arg(script())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("actual browser tooling must exist");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"base":format!("http://{address}"),"url":url,"plugins":true})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
+        .await
+        .expect("real plugin browser deadline")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "real plugin browser assertions failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    handle.stop_graceful(Some(Duration::from_secs(2)));
+    serving.await.unwrap().unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
 async fn native_console_browser() {
     let address = address();
     let f = Fixture::new(address, Some(&built()));

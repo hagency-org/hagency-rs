@@ -115,6 +115,38 @@ async function tasksWalk(page) {
 
 const browser = await chromium.launch({ executablePath: process.env.HAGENCY_BROWSER_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true,
   args: ['--disable-background-networking', '--disable-component-update', '--no-default-browser-check'] });
+if (config.plugins) {
+  try {
+    const context = await browser.newContext({ serviceWorkers: 'block' });
+    const page = await context.newPage();
+    const failures = []; const urls = [];
+    page.on('pageerror', (error) => failures.push(error.message));
+    await context.route('**/*', async (route) => {
+      const url = new URL(route.request().url()); urls.push(url.toString());
+      if (url.origin !== config.base) { failures.push('unexpected external request'); await route.abort(); }
+      else await route.continue();
+    });
+    await page.goto(config.url);
+    await page.locator('[data-native-state="ready"]').first().waitFor();
+    await page.goto(`${config.base}/console/plugins/`);
+    await page.locator('[data-native-state="ready"]').first().waitFor();
+    assert.equal(await page.locator('.plugin-install').count(), 1, 'plugin install panel renders');
+    assert.equal(await page.locator('.plugin-source-grid input').count(), 4, 'remote source has owner, repo, subdir and commit fields');
+    assert.equal(await page.locator('.plugin-source-grid select').count(), 1, 'remote source exposes transport choice');
+    const preview = page.getByRole('button', { name: config.executable ? '预览源' : 'Preview source', exact: true });
+    assert.equal(await preview.isDisabled(), true, 'preview requires a pinned commit');
+    await page.locator('.plugin-source-grid input').nth(0).fill('example-owner');
+    await page.locator('.plugin-source-grid input').nth(1).fill('example-repo');
+    assert.equal(await preview.isDisabled(), true, 'owner and repo alone cannot preview a moving source');
+    await page.locator('.plugin-source-grid input').nth(3).fill('a'.repeat(40));
+    assert.equal(await preview.isDisabled(), false, 'a full lowercase commit enables preview');
+    assert(!/private_|operator\.token|\/Users\//.test(await page.locator('main').innerText()), 'no credential or host path renders');
+    assert(urls.every((url) => !url.includes('access=')), 'no ticket value in a request URL');
+    assert.deepEqual(failures, []);
+    console.log('PASS native plugin install browser invariants');
+  } finally { await browser.close(); }
+  process.exit(0);
+}
 if (config.roster) {
   // The roster-only lane (ADR-126 browser scenario): same read-only ticket
   // the usage walk exchanges, one page, no operator token in the browser.

@@ -559,7 +559,9 @@ async fn offer(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         return;
     };
     // Plugin runtime path: plugin_id + adapter_id identifies the runtime.
-    if let (Some(plugin_id), Some(adapter_id)) = (input.plugin_id.as_deref(), input.adapter_id.as_deref()) {
+    if let (Some(plugin_id), Some(adapter_id)) =
+        (input.plugin_id.as_deref(), input.adapter_id.as_deref())
+    {
         let package_sha256 = input.package_sha256.as_deref().unwrap_or_default();
         let settings_sha256 = input.settings_sha256.as_deref().unwrap_or_default();
         if package_sha256.len() != 64 || settings_sha256.len() != 64 {
@@ -570,8 +572,13 @@ async fn offer(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         let Some(plugins) = depot
             .get_typed::<crate::App>()
             .ok()
-            .and_then(|app| app.plugins()) else {
-            refusal(res, StatusCode::SERVICE_UNAVAILABLE, "setup_plugins_unavailable");
+            .and_then(|app| app.plugins())
+        else {
+            refusal(
+                res,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "setup_plugins_unavailable",
+            );
             return;
         };
         let plugin_runtimes = plugin_runtimes(Some(&plugins), Some(&store)).await;

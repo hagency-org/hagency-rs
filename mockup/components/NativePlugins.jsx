@@ -4,14 +4,17 @@ import { useEffect, useState } from 'react';
 import PageHead from '@/components/PageHead';
 import { useData } from '@/components/Data';
 import { useT } from '@/components/Prefs';
+import { errorText } from '@/lib/i18n';
 import { fetchPluginLogs, fetchPluginManifest, fetchPluginQualifications, fetchPluginSettings, fetchPluginTools, fetchPlugins, installPlugin, invokePluginAction, linkPlugin, previewPlugin, setPluginEnabled, uninstallPlugin, updatePluginSettings } from '@/lib/native-api';
+
+const emptySource = { owner: '', repo: '', subdir: '', commit: '', transport: 'https' };
 
 export default function NativePlugins() {
   const t = useT();
   const data = useData();
   const [plugins, setPlugins] = useState([]);
   const [path, setPath] = useState('');
-  const [source, setSource] = useState({ owner: '', repo: '', subdir: '', commit: '' });
+  const [source, setSource] = useState(emptySource);
   const [preview, setPreview] = useState(null);
   const [phase, setPhase] = useState('loading');
   const [error, setError] = useState(null);
@@ -38,8 +41,8 @@ export default function NativePlugins() {
 
   async function operation(key, fn) {
     setBusy(key); setError(null);
-    try { await fn(); setDetails(null); await load(); }
-    catch (cause) { setError(cause.message); }
+    try { await fn(); setDetails(null); await load(); return true; }
+    catch (cause) { setError(cause.message); return false; }
     finally { setBusy(null); }
   }
   async function inspectPlugin(id) {
@@ -77,53 +80,79 @@ export default function NativePlugins() {
     finally { setBusy(null); }
   }
   async function link() {
-    if (!path.trim()) return;
-    await operation('link', () => linkPlugin(path.trim()));
-    setPath('');
+    if (!path.trim().startsWith('/')) return;
+    await operation('link', async () => { await linkPlugin(path.trim()); setPath(''); });
   }
-  async function previewSource() {
+  async function previewSource(event) {
+    event.preventDefault();
     setBusy('preview'); setError(null);
     try {
-      const commit = source.commit.trim();
-      if (!/^[a-f0-9]{40}$/.test(commit) || !source.owner.trim() || !source.repo.trim()) throw new Error('owner, repo, and a lowercase 40-hex commit are required');
-      setPreview(await previewPlugin({ kind: 'github', owner: source.owner.trim(), repo: source.repo.trim(), subdir: source.subdir.trim() || null, commit }));
+      const next = {
+        kind: 'github',
+        owner: source.owner.trim(),
+        repo: source.repo.trim(),
+        subdir: source.subdir.trim() || null,
+        commit: source.commit.trim(),
+        transport: source.transport,
+      };
+      if (!/^[a-f0-9]{40}$/.test(next.commit) || !next.owner || !next.repo) throw new Error('invalid_selection');
+      setPreview(await previewPlugin(next));
     } catch (cause) { setError(cause.message); }
     finally { setBusy(null); }
   }
   async function install() {
     if (!preview) return;
-    await operation('install', () => installPlugin(preview.previewId, preview.sourceSha256));
-    setPreview(null);
+    if (await operation('install', () => installPlugin(preview.source, preview.trustSha256))) {
+      setPreview(null);
+      setSource(emptySource);
+    }
   }
-
+  const errorMessage = errorText(t, error);
+  const linkReady = path.trim().startsWith('/');
+  const remoteReady = /^[a-f0-9]{40}$/.test(source.commit.trim());
   return <>
     <PageHead title={t('pl.title')} sub={t('pl.sub')} />
-    <section className="panel" aria-labelledby="plugin-link">
-      <h2 id="plugin-link" className="sec">{t('pl.link')}</h2>
-      <div className="btn-row">
-        <label className="grow">{t('pl.path')} <input value={path} onChange={(event) => setPath(event.target.value)} /></label>
-        <button className="btn primary" disabled={!path.trim() || busy !== null} onClick={link}>{busy === 'link' ? '…' : t('pl.link')}</button>
+    <section className="panel plugin-install" aria-labelledby="plugin-link">
+      <h2 id="plugin-link" className="sec">{t('pl.installTitle')}</h2>
+      <p className="dim">{t('pl.installHelp')}</p>
+      <div className="plugin-link-row">
+        <label className="grow">{t('pl.path')}<input value={path} onChange={(event) => setPath(event.target.value)} placeholder={t('pl.pathPlaceholder')} /></label>
+        <button className="btn" disabled={!linkReady || busy !== null} onClick={link}>{busy === 'link' ? '…' : t('pl.link')}</button>
       </div>
-      <p className="dim">{t('pl.previewHelp')}</p>
-      <div className="btn-row">
-        {['owner', 'repo', 'subdir', 'commit'].map((field) => <label key={field} className="grow">{field}<input value={source[field]} onChange={(event) => setSource((old) => ({ ...old, [field]: event.target.value }))} /></label>)}
-      </div>
-      <button className="btn" disabled={!source.owner.trim() || !source.repo.trim() || busy !== null} onClick={previewSource}>{busy === 'preview' ? '…' : t('pl.preview')}</button>
-      {preview && <div className="notice" role="status">
-        <p><b>{preview.manifest?.name ?? preview.manifest?.id}</b></p>
-        <p className="mono-s">{t('pl.digest')}: {preview.sourceSha256}</p>
+      <form className="plugin-remote-form" onSubmit={previewSource}>
+        <fieldset className="plugin-source-grid">
+          <legend>{t('pl.remoteTitle')}</legend>
+          <p className="dim plugin-source-help">{t('pl.remoteHelp')}</p>
+          <label>{t('pl.owner')}<input value={source.owner} onChange={(event) => setSource((old) => ({ ...old, owner: event.target.value }))} autoComplete="off" /></label>
+          <label>{t('pl.repo')}<input value={source.repo} onChange={(event) => setSource((old) => ({ ...old, repo: event.target.value }))} autoComplete="off" /></label>
+          <label>{t('pl.subdir')}<input value={source.subdir} onChange={(event) => setSource((old) => ({ ...old, subdir: event.target.value }))} placeholder={t('pl.subdirOptional')} autoComplete="off" /></label>
+          <label>{t('pl.commit')}<input className="mono-s" value={source.commit} onChange={(event) => setSource((old) => ({ ...old, commit: event.target.value }))} placeholder={t('pl.commitPlaceholder')} autoComplete="off" /></label>
+          <label>{t('pl.transport')}<select value={source.transport} onChange={(event) => setSource((old) => ({ ...old, transport: event.target.value }))}><option value="https">HTTPS</option><option value="ssh">SSH</option></select></label>
+          <button className="btn primary" type="submit" disabled={!source.owner.trim() || !source.repo.trim() || !remoteReady || busy !== null}>{busy === 'preview' ? '…' : t('pl.preview')}</button>
+        </fieldset>
+      </form>
+      {preview && <div className="notice plugin-preview" role="status" data-plugin-preview>
+        <div className="plugin-preview-head"><div><b>{preview.manifest.name}</b><span className="dim"> · {preview.manifest.id} · {preview.manifest.version}</span></div><span className="plugin-source-badge">{preview.source.transport.toUpperCase()}</span></div>
+        <dl className="plugin-digests">
+          <div><dt>{t('pl.sourceDigest')}</dt><dd className="mono-s">{preview.sourceSha256}</dd></div>
+          <div><dt>{t('pl.manifestDigest')}</dt><dd className="mono-s">{preview.manifestSha256}</dd></div>
+          <div><dt>{t('pl.trustDigest')}</dt><dd className="mono-s">{preview.trustSha256}</dd></div>
+        </dl>
+        <p className="dim">{t('pl.previewSummary', { files: preview.files.length, builds: preview.buildArgv.length })}</p>
+        {preview.buildArgv.length > 0 && <details className="plugin-builds"><summary>{t('pl.buildCommands')}</summary><ul>{preview.buildArgv.map((argv, index) => <li key={index}><code>{argv.join(' ')}</code></li>)}</ul></details>}
+        <p className="plugin-trust-note">{t('pl.trustHelp')}</p>
         <button className="btn primary" disabled={busy !== null} onClick={install}>{busy === 'install' ? '…' : t('pl.install')}</button>
       </div>}
     </section>
     <section aria-labelledby="plugin-list">
       <h2 id="plugin-list" className="sec">{t('pl.title')}</h2>
       {phase === 'loading' && <p role="status">{t('nr.loading')}</p>}
-      {error && <p className="notice bad" role="alert">{t('pl.failed', { error })}</p>}
+      {error && <p className="notice bad" role="alert">{t('pl.failed', { error: errorMessage })}</p>}
       {phase === 'ready' && plugins.length === 0 && <p className="empty">{t('pl.empty')}</p>}
-      {plugins.length > 0 && <div className="tbl-wrap"><table className="tbl"><thead><tr><th>ID</th><th>Version</th><th>Status</th><th>Revision / leases</th><th>{t('pl.digest')}</th><th /></tr></thead><tbody>{plugins.map((plugin) => <tr key={plugin.id}>
-        <td className="mono-s">{plugin.id}</td><td>{plugin.manifestVersion}</td><td>{plugin.readiness}{plugin.stale ? ' · stale' : ''}{plugin.restartRequired ? ' · restart required' : ''}</td><td>{Object.keys(plugin.revisions ?? {}).length} / {plugin.activeLeases ?? 0}</td><td className="mono-s">{plugin.activePackageSha256 ?? plugin.packageSha256}</td>
+      {plugins.length > 0 && <div className="tbl-wrap"><table className="tbl"><thead><tr><th>{t('pl.id')}</th><th>{t('col.version')}</th><th>{t('pl.status')}</th><th>{t('pl.revisions')}</th><th>{t('pl.digest')}</th><th /></tr></thead><tbody>{plugins.map((plugin) => <tr key={plugin.id}>
+        <td className="mono-s" data-token={plugin.id}>{plugin.id}</td><td>{plugin.manifestVersion}</td><td>{plugin.readiness}{plugin.stale ? ` · ${t('pl.stale')}` : ''}{plugin.restartRequired ? ` · ${t('pl.restart')}` : ''}</td><td>{Object.keys(plugin.revisions ?? {}).length} / {plugin.activeLeases ?? 0}</td><td className="mono-s" data-token={plugin.activePackageSha256}>{plugin.activePackageSha256}</td>
         <td className="btn-row">
-          <button className="btn" disabled={busy !== null} onClick={() => inspectPlugin(plugin.id)}>{busy === `inspect:${plugin.id}` ? '…' : 'Inspect'}</button>
+          <button className="btn" disabled={busy !== null} onClick={() => inspectPlugin(plugin.id)}>{busy === `inspect:${plugin.id}` ? '…' : t('pl.inspect')}</button>
           {plugin.enabled
             ? <button className="btn" disabled={busy !== null} onClick={() => operation(plugin.id, () => setPluginEnabled(plugin.id, false))}>{t('pl.disable')}</button>
             : <button className="btn primary" disabled={busy !== null} onClick={() => operation(plugin.id, () => setPluginEnabled(plugin.id, true))}>{t('pl.enable')}</button>}
@@ -131,34 +160,34 @@ export default function NativePlugins() {
         </td>
       </tr>)}</tbody></table></div>}
     </section>
-    {details && <section className="panel" aria-label="Plugin execution details">
-      <div className="btn-row"><h2 className="sec grow" style={{ marginTop: 0 }}>{details.manifest.name} · {details.id}</h2><button className="btn" disabled={busy !== null} onClick={refreshLogs}>{busy === `logs:${details.id}` ? '…' : 'Refresh activity'}</button></div>
-      <p className="mono-s">package {plugins.find((plugin) => plugin.id === details.id)?.packageSha256}</p>
-      <h3>Approval-gated tools</h3>
-      {details.tools.length === 0 ? <p className="dim">None</p> : <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Tool</th><th>Description</th><th>Input schema</th><th>Package</th></tr></thead><tbody>{details.tools.map((tool) => <tr key={tool.toolId}><td><code>{tool.name}</code></td><td>{tool.description}</td><td><pre className="cmd">{JSON.stringify(tool.inputSchema)}</pre></td><td className="mono-s">{tool.packageSha256}</td></tr>)}</tbody></table></div>}
-      <h3>Runtime adapters</h3>
-      {details.manifest.runtimes.length === 0 ? <p className="dim">None</p> : <ul>{details.manifest.runtimes.map((runtime) => <li key={runtime.id}><code>{runtime.id}</code> · {runtime.framework} · {runtime.protocol}</li>)}</ul>}
-      <h3>Harness adapters</h3>
-      {details.manifest.harnesses.length === 0 ? <p className="dim">None</p> : <ul>{details.manifest.harnesses.map((harness) => <li key={harness.id}><code>{harness.id}</code> · {harness.protocol}</li>)}</ul>}
-      <h3>Qualified runtime choices</h3>
-      {details.qualifications.length === 0 ? <p className="dim">No qualified runtime choice. Qualify this exact package before selecting it for a resource.</p> : <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Framework</th><th>Model</th><th>Provider</th><th>Reasoning</th><th>Roles</th></tr></thead><tbody>{details.qualifications.map((choice) => <tr key={`${choice.adapterId}-${choice.framework}-${choice.model}-${choice.reasoning ?? ''}`}><td>{choice.framework}</td><td className="mono-s">{choice.model}</td><td>{choice.provider}</td><td>{choice.reasoning ?? 'default'}</td><td>{choice.roles.join(', ')}</td></tr>)}</tbody></table></div>}
-      <h3>Execution activity</h3>
-      {details.logs.length === 0 ? <p className="dim">No plugin process invocation has been recorded.</p> : <pre className="cmd">{details.logs.map((entry) => `[${new Date(entry.atMs).toISOString()}] ${entry.stream}\n${entry.text}`).join('\n')}</pre>}
-      <h3>Plugin settings</h3>
-      <p className="dim">Revision {details.settings.document.revision} · {details.settings.settingsReady ? 'ready' : `missing: ${details.settings.missingRequired.join(', ')}`}</p>
-      {details.settings.definitions.length === 0 ? <p className="dim">This plugin has no settings.</p> : <div className="form-grid">{details.settings.definitions.map((setting) => {
+    {details && <section className="panel plugin-details" aria-label={t('pl.details')}>
+      <div className="btn-row plugin-detail-head"><h2 className="sec grow plugin-detail-title">{details.manifest.name} · {details.id}</h2><button className="btn" disabled={busy !== null} onClick={refreshLogs}>{busy === `logs:${details.id}` ? '…' : t('pl.refresh')}</button></div>
+      <p className="mono-s">{t('pl.package')} {plugins.find((plugin) => plugin.id === details.id)?.packageSha256}</p>
+      <h3>{t('pl.tools')}</h3>
+      {details.tools.length === 0 ? <p className="dim">{t('pl.none')}</p> : <div className="tbl-wrap"><table className="tbl"><thead><tr><th>{t('pl.tool')}</th><th>{t('pl.description')}</th><th>{t('pl.inputSchema')}</th><th>{t('pl.package')}</th></tr></thead><tbody>{details.tools.map((tool) => <tr key={tool.toolId}><td><code>{tool.name}</code></td><td>{tool.description}</td><td><pre className="cmd">{JSON.stringify(tool.inputSchema)}</pre></td><td className="mono-s">{tool.packageSha256}</td></tr>)}</tbody></table></div>}
+      <h3>{t('pl.runtimeAdapters')}</h3>
+      {details.manifest.runtimes.length === 0 ? <p className="dim">{t('pl.none')}</p> : <ul>{details.manifest.runtimes.map((runtime) => <li key={runtime.id}><code>{runtime.id}</code> · {runtime.framework} · {runtime.protocol}</li>)}</ul>}
+      <h3>{t('pl.harnessAdapters')}</h3>
+      {details.manifest.harnesses.length === 0 ? <p className="dim">{t('pl.none')}</p> : <ul>{details.manifest.harnesses.map((harness) => <li key={harness.id}><code>{harness.id}</code> · {harness.protocol}</li>)}</ul>}
+      <h3>{t('pl.qualifiedChoices')}</h3>
+      {details.qualifications.length === 0 ? <p className="dim">{t('pl.noQualified')}</p> : <div className="tbl-wrap"><table className="tbl"><thead><tr><th>{t('pl.framework')}</th><th>{t('pl.model')}</th><th>{t('pl.provider')}</th><th>{t('pl.reasoning')}</th><th>{t('pl.roles')}</th></tr></thead><tbody>{details.qualifications.map((choice) => <tr key={`${choice.adapterId}-${choice.framework}-${choice.model}-${choice.reasoning ?? ''}`}><td>{choice.framework}</td><td className="mono-s">{choice.model}</td><td>{choice.provider}</td><td>{choice.reasoning ?? t('pl.default')}</td><td>{choice.roles.join(', ')}</td></tr>)}</tbody></table></div>}
+      <h3>{t('pl.activity')}</h3>
+      {details.logs.length === 0 ? <p className="dim">{t('pl.noActivity')}</p> : <pre className="cmd">{details.logs.map((entry) => `[${new Date(entry.atMs).toISOString()}] ${entry.stream}\n${entry.text}`).join('\n')}</pre>}
+      <h3>{t('pl.settings')}</h3>
+      <p className="dim">{t('pl.revisionState', { revision: details.settings.document.revision, state: details.settings.settingsReady ? t('pl.ready') : t('pl.missing', { values: details.settings.missingRequired.join(', ') }) })}</p>
+      {details.settings.definitions.length === 0 ? <p className="dim">{t('pl.noSettings')}</p> : <div className="plugin-settings-grid">{details.settings.definitions.map((setting) => {
         const value = Object.hasOwn(draftSettings, setting.id) ? draftSettings[setting.id] : (details.settings.document.values[setting.id] ?? setting.default ?? (setting.kind === 'boolean' ? false : ''));
         const update = (next) => setDraftSettings((old) => ({ ...old, [setting.id]: next }));
-        return <label key={setting.id} className="grow">{setting.label}{setting.required ? ' *' : ''}<small className="dim">{setting.description}</small>{setting.kind === 'boolean'
-          ? <input type="checkbox" checked={value === true} onChange={(event) => update(event.target.checked)} />
+        return <label key={setting.id} className="plugin-setting"><span>{setting.label}{setting.required ? ' *' : ''}</span><small className="dim">{setting.description}</small>{setting.kind === 'boolean'
+          ? <input className="plugin-setting-toggle" type="checkbox" checked={value === true} onChange={(event) => update(event.target.checked)} />
           : setting.kind === 'select'
-            ? <select value={String(value)} onChange={(event) => update(event.target.value)}><option value="">Select…</option>{setting.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>
+            ? <select value={String(value)} onChange={(event) => update(event.target.value)}><option value="">{t('pl.select')}</option>{setting.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>
             : setting.kind === 'textarea'
               ? <textarea rows={3} maxLength={setting.maxLength ?? undefined} value={value} onChange={(event) => update(event.target.value)} />
               : <input type={setting.kind === 'integer' ? 'number' : 'text'} min={setting.min ?? undefined} max={setting.max ?? undefined} value={value} onChange={(event) => update(setting.kind === 'integer' ? Number(event.target.value) : event.target.value)} />}</label>;
       })}</div>}
-      <button className="btn primary" disabled={busy !== null || details.settings.definitions.length === 0} onClick={saveSettings}>{busy === `settings:${details.id}` ? '…' : 'Save settings'}</button>
-      {details.manifest.actions.length > 0 && <><h3>Actions</h3><div className="btn-row">{details.manifest.actions.map((action) => <button className="btn" key={action.id} disabled={busy !== null} onClick={() => invoke(details.id, action.id)}>{action.title}</button>)}</div></>}
+      <button className="btn primary" disabled={busy !== null || details.settings.definitions.length === 0} onClick={saveSettings}>{busy === `settings:${details.id}` ? '…' : t('pl.saveSettings')}</button>
+      {details.manifest.actions.length > 0 && <><h3>{t('pl.actions')}</h3><div className="btn-row plugin-action-row">{details.manifest.actions.map((action) => <button className="btn" key={action.id} disabled={busy !== null} onClick={() => invoke(details.id, action.id)}>{action.title}</button>)}</div></>}
     </section>}
   </>;
 }

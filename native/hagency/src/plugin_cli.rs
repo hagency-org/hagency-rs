@@ -14,7 +14,7 @@ pub enum Command {
         source: String,
     },
     Install {
-        preview_id: String,
+        source: String,
         trust_digest: String,
     },
     Link {
@@ -102,15 +102,19 @@ pub async fn run(
             .await
         }
         Command::Install {
-            preview_id,
+            source,
             trust_digest,
         } => {
+            let source = parse_source(&source)?;
             request(
                 state,
                 address,
                 Method::POST,
                 "/api/native/v1/plugins/install",
-                Some(serde_json::json!({"previewId": preview_id, "trustDigest": trust_digest})),
+                Some(serde_json::json!({
+                    "source": source,
+                    "trustDigest": trust_digest
+                })),
             )
             .await
         }
@@ -276,7 +280,7 @@ fn command_name(command: &Command) -> PluginCommand {
         Command::List => PluginCommand::List,
         Command::Inspect { id } => PluginCommand::Inspect(id.clone()),
         Command::Preview { source } => PluginCommand::Preview(source.clone()),
-        Command::Install { preview_id, .. } => PluginCommand::Install(preview_id.clone()),
+        Command::Install { source, .. } => PluginCommand::Install(source.clone()),
         Command::Link { path } => PluginCommand::Link(path.clone()),
         Command::Enable { id } => PluginCommand::Enable(id.clone()),
         Command::Disable { id } => PluginCommand::Disable(id.clone()),

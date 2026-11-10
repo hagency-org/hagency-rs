@@ -11,6 +11,14 @@ use url::Url;
 pub const COMMIT_LENGTH: usize = 40;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitTransport {
+    #[default]
+    Https,
+    Ssh,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PluginSource {
@@ -19,6 +27,8 @@ pub enum PluginSource {
         repo: String,
         subdir: Option<String>,
         commit: String,
+        #[serde(default)]
+        transport: GitTransport,
     },
     Linked {
         path: PathBuf,
@@ -30,29 +40,90 @@ impl PluginSource {
         repo: &str,
         subdir: Option<&str>,
         commit: &str,
+        transport: GitTransport,
     ) -> Result<Self, SourceError> {
-        validate_segment(owner, "owner")?;
-        validate_segment(repo, "repo")?;
-        let subdir = subdir.map(validate_subdir).transpose()?;
-        validate_commit(commit)?;
-        Ok(Self::Github {
+        Self::Github {
             owner: owner.into(),
             repo: repo.into(),
-            subdir,
+            subdir: subdir.map(str::to_owned),
             commit: commit.into(),
-        })
+            transport,
+        }
+        .normalize()
     }
     pub fn linked(path: impl Into<PathBuf>) -> Result<Self, SourceError> {
-        let path = path.into();
-        if !path.is_absolute() {
-            return Err(SourceError::Invalid("linked path must be absolute".into()));
+        Self::Linked { path: path.into() }.normalize()
+    }
+    pub fn normalize(self) -> Result<Self, SourceError> {
+        match self {
+            Self::Github {
+                owner,
+                repo,
+                subdir,
+                commit,
+                transport,
+            } => {
+                validate_segment(&owner, "owner")?;
+                validate_segment(&repo, "repo")?;
+                let subdir = subdir.map(|value| validate_subdir(&value)).transpose()?;
+                validate_commit(&commit)?;
+                let source = Self::Github {
+                    owner,
+                    repo,
+                    subdir,
+                    commit,
+                    transport,
+                };
+                source.canonical_repository_url()?;
+                Ok(source)
+            }
+            Self::Linked { path } => {
+                validate_linked_root(&path)?;
+                Ok(Self::Linked { path })
+            }
         }
-        if !path.is_dir() {
+    }
+    pub fn canonical_repository_url(&self) -> Result<String, SourceError> {
+        let Self::Github {
+            owner,
+            repo,
+            transport,
+            ..
+        } = self
+        else {
             return Err(SourceError::Invalid(
-                "linked path must be a directory".into(),
+                "linked sources do not have a repository URL".into(),
+            ));
+        };
+        validate_segment(owner, "owner")?;
+        validate_segment(repo, "repo")?;
+        let url = match transport {
+            GitTransport::Https => format!("https://github.com/{owner}/{repo}.git"),
+            GitTransport::Ssh => format!("ssh://git@github.com/{owner}/{repo}.git"),
+        };
+        let parsed = Url::parse(&url)
+            .map_err(|_| SourceError::Invalid("invalid GitHub repository URL".into()))?;
+        let valid = match transport {
+            GitTransport::Https => {
+                parsed.scheme() == "https"
+                    && parsed.host_str() == Some("github.com")
+                    && parsed.username().is_empty()
+                    && parsed.port().is_none()
+            }
+            GitTransport::Ssh => {
+                parsed.scheme() == "ssh"
+                    && parsed.host_str() == Some("github.com")
+                    && parsed.username() == "git"
+                    && parsed.port().is_none()
+            }
+        } && parsed.query().is_none()
+            && parsed.fragment().is_none();
+        if !valid {
+            return Err(SourceError::Invalid(
+                "GitHub source URL is not canonical".into(),
             ));
         }
-        Ok(Self::Linked { path })
+        Ok(url)
     }
     pub fn commit(&self) -> Option<&str> {
         match self {
@@ -67,11 +138,16 @@ impl PluginSource {
                 repo,
                 subdir,
                 commit,
+                transport,
             } => format!(
-                "{owner}/{repo}{}@{commit}",
+                "{}{}@{commit}",
+                match transport {
+                    GitTransport::Https => format!("https://github.com/{owner}/{repo}"),
+                    GitTransport::Ssh => format!("ssh://git@github.com/{owner}/{repo}"),
+                },
                 subdir
                     .as_deref()
-                    .map(|v| format!("/{v}"))
+                    .map(|value| format!("/{value}"))
                     .unwrap_or_default()
             ),
             Self::Linked { path } => format!("linked:{}", path.display()),
@@ -79,10 +155,28 @@ impl PluginSource {
     }
 }
 
+fn validate_linked_root(path: &Path) -> Result<(), SourceError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(SourceError::UnsafeTree(path.display().to_string()));
+    }
+    if !path.is_absolute() {
+        return Err(SourceError::Invalid("linked path must be absolute".into()));
+    }
+    if !metadata.is_dir() {
+        return Err(SourceError::Invalid(
+            "linked path must be a directory".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum SourceError {
     #[error("git is unavailable")]
     GitUnavailable,
+    #[error("git authentication is unavailable")]
+    SshAuthUnavailable,
     #[error("git checkout failed: {0}")]
     Git(String),
     #[error("invalid plugin source: {0}")]
@@ -166,87 +260,73 @@ pub fn package_manifest(root: &Path) -> Result<(Manifest, Vec<u8>, SourceSnapsho
 }
 
 pub fn checkout_github(source: &PluginSource, destination: &Path) -> Result<PathBuf, SourceError> {
+    let source = source.clone().normalize()?;
     let PluginSource::Github {
-        owner,
-        repo,
         subdir,
         commit,
-    } = source
+        transport,
+        ..
+    } = &source
     else {
         return Err(SourceError::Invalid(
             "checkout requires a GitHub source".into(),
         ));
     };
-    validate_commit(commit)?;
+    let url = source.canonical_repository_url()?;
     fs::create_dir_all(destination)?;
     let repo_dir = destination.join("repo");
-    let url = format!("https://github.com/{owner}/{repo}.git");
-    // Parsing the constructed URL prevents accidental alternate schemes/hosts if
-    // validation is ever relaxed; git still receives a fixed argv below.
-    let parsed = Url::parse(&url).map_err(|_| SourceError::Invalid("invalid GitHub URL".into()))?;
-    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") {
-        return Err(SourceError::Invalid(
-            "GitHub source must use https://github.com".into(),
-        ));
-    }
-    let mut command = std::process::Command::new("git");
-    command.args([
-        "-c",
-        "protocol.file.allow=never",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "init",
-        "--quiet",
-        repo_dir
-            .to_str()
-            .ok_or_else(|| SourceError::Invalid("non-UTF-8 checkout path".into()))?,
-    ]);
-    command.env_clear();
-    command.env("HOME", destination.join("home"));
-    command.env("XDG_CONFIG_HOME", destination.join("config"));
-    command.env("GIT_CONFIG_NOSYSTEM", "1");
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    command.env("PATH", std::env::var_os("PATH").unwrap_or_default());
-    let output = command.output().map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            SourceError::GitUnavailable
-        } else {
-            SourceError::Io(error)
-        }
-    })?;
-    if !output.status.success() {
-        return Err(SourceError::Git(
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
-    }
-    let run_git = |args: &[&str]| -> Result<(), SourceError> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&repo_dir)
-            .env_clear()
-            .env("HOME", destination.join("home"))
-            .env("XDG_CONFIG_HOME", destination.join("config"))
+    let home = destination.join("home");
+    let config = destination.join("config");
+    fs::create_dir_all(&home)?;
+    fs::create_dir_all(&config)?;
+    let global_config = config.join("global");
+    fs::File::create(&global_config)?.sync_all()?;
+    let ssh = if *transport == GitTransport::Ssh {
+        Some(prepare_ssh(destination)?)
+    } else {
+        None
+    };
+    let run_git = |cwd: &Path, args: &[&str]| -> Result<std::process::Output, SourceError> {
+        let mut command = std::process::Command::new("git");
+        command.args([
+            "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "http.followRedirects=false",
+        ]);
+        command.args(args).current_dir(cwd).env_clear();
+        command
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("GIT_CONFIG_GLOBAL", &global_config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .output()
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    SourceError::GitUnavailable
-                } else {
-                    SourceError::Io(error)
-                }
-            })?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(SourceError::Git(
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-            ))
+            .env("GIT_ASKPASS", "")
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        if let Some((socket, ssh_command)) = &ssh {
+            command
+                .env("SSH_AUTH_SOCK", socket)
+                .env("GIT_SSH_COMMAND", ssh_command);
         }
+        command.output().map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                SourceError::GitUnavailable
+            } else {
+                SourceError::Io(error)
+            }
+        })
     };
-    run_git(&["remote", "add", "origin", &url])?;
-    run_git(&[
+    let repo_text = repo_dir
+        .to_str()
+        .ok_or_else(|| SourceError::Invalid("non-UTF-8 checkout path".into()))?;
+    ensure_git_success(run_git(destination, &["init", "--quiet", repo_text])?)?;
+    let run_checked = |args: &[&str]| -> Result<(), SourceError> {
+        ensure_git_success(run_git(&repo_dir, args)?)
+    };
+    run_checked(&["remote", "add", "origin", &url])?;
+    run_checked(&[
         "fetch",
         "--depth",
         "1",
@@ -255,22 +335,19 @@ pub fn checkout_github(source: &PluginSource, destination: &Path) -> Result<Path
         "origin",
         commit,
     ])?;
-    run_git(&["checkout", "--detach", "--quiet", commit])?;
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&repo_dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .map_err(SourceError::Io)?;
+    run_checked(&["checkout", "--detach", "--quiet", commit])?;
+    let head = run_git(&repo_dir, &["rev-parse", "HEAD"])?;
+    ensure_git_success(head.clone())?;
     let observed = String::from_utf8_lossy(&head.stdout).trim().to_owned();
     if observed != commit.as_str() {
         return Err(SourceError::Git(
             "checked out HEAD does not match the requested commit".into(),
         ));
     }
-    if repo_dir.join(".gitmodules").exists() {
+    if fs::symlink_metadata(repo_dir.join(".gitmodules")).is_ok() {
         return Err(SourceError::UnsafeTree(".gitmodules".into()));
     }
+    fs::remove_dir_all(repo_dir.join(".git"))?;
     let root = if let Some(subdir) = subdir {
         repo_dir.join(subdir)
     } else {
@@ -283,6 +360,84 @@ pub fn checkout_github(source: &PluginSource, destination: &Path) -> Result<Path
     }
     snapshot_tree(&root)?;
     Ok(root)
+}
+
+fn ensure_git_success(output: std::process::Output) -> Result<(), SourceError> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(SourceError::Git(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+fn prepare_ssh(destination: &Path) -> Result<(std::ffi::OsString, String), SourceError> {
+    #[cfg(not(unix))]
+    {
+        let _ = destination;
+        return Err(SourceError::SshAuthUnavailable);
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::{fs::FileTypeExt, fs::PermissionsExt, net::UnixStream};
+        use std::time::Duration;
+        let socket = std::env::var_os("SSH_AUTH_SOCK").ok_or(SourceError::SshAuthUnavailable)?;
+        let socket_path = PathBuf::from(&socket);
+        let metadata =
+            fs::symlink_metadata(&socket_path).map_err(|_| SourceError::SshAuthUnavailable)?;
+        if !metadata.file_type().is_socket() {
+            return Err(SourceError::SshAuthUnavailable);
+        }
+        let stream =
+            UnixStream::connect(&socket_path).map_err(|_| SourceError::SshAuthUnavailable)?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .map_err(|_| SourceError::SshAuthUnavailable)?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(250)))
+            .map_err(|_| SourceError::SshAuthUnavailable)?;
+        drop(stream);
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(SourceError::SshAuthUnavailable)?;
+        let known_hosts = home.join(".ssh/known_hosts");
+        let metadata =
+            fs::symlink_metadata(&known_hosts).map_err(|_| SourceError::SshAuthUnavailable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(SourceError::SshAuthUnavailable);
+        }
+        let mut input =
+            fs::File::open(&known_hosts).map_err(|_| SourceError::SshAuthUnavailable)?;
+        let mut bytes = Vec::new();
+        input
+            .read_to_end(&mut bytes)
+            .map_err(|_| SourceError::SshAuthUnavailable)?;
+        let staged = destination.join("home/.ssh/known_hosts");
+        if let Some(parent) = staged.parent() {
+            fs::create_dir_all(parent).map_err(|_| SourceError::SshAuthUnavailable)?;
+        }
+        let mut output = fs::File::create(&staged).map_err(|_| SourceError::SshAuthUnavailable)?;
+        use std::io::Write;
+        output
+            .write_all(&bytes)
+            .and_then(|_| output.sync_all())
+            .map_err(|_| SourceError::SshAuthUnavailable)?;
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))
+            .map_err(|_| SourceError::SshAuthUnavailable)?;
+        let staged = staged
+            .to_str()
+            .ok_or(SourceError::SshAuthUnavailable)?
+            .replace('\'', "'\\''");
+        Ok((
+            socket,
+            format!(
+                "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='{}'",
+                staged
+            ),
+        ))
+    }
 }
 
 fn collect_tree(
@@ -379,7 +534,12 @@ fn validate_segment(value: &str, field: &str) -> Result<(), SourceError> {
 fn validate_subdir(value: &str) -> Result<String, SourceError> {
     let path = Path::new(value);
     if value.is_empty()
-        || path.is_absolute()
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains('\\')
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
         || path.components().any(|component| {
             matches!(
                 component,
@@ -391,5 +551,5 @@ fn validate_subdir(value: &str) -> Result<String, SourceError> {
             "subdir must stay below the repository root".into(),
         ));
     }
-    Ok(value.trim_matches('/').into())
+    Ok(value.into())
 }

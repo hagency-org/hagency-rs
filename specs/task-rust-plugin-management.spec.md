@@ -67,3 +67,11 @@ Scenario: Runtime changes request restart
 
 Runtime protocol, tools, harness control, and qualification execution are bound
 by the other plugin contracts.
+ 
+## 2026 stateless console amendment
+
+The HTTP install body is exactly `{source: PluginSource, trustDigest: string}`. Preview and install normalize the same decomposed source independently; preview IDs and process-local preview caches do not exist. CLI preview/install use source JSON or an absolute linked path, and GitHub JSON includes `transport`.
+
+The host-authored console offers one source-review flow for GitHub HTTPS/SSH or local linking, then keeps the selected plugin through settings readiness, enablement, and runtime qualification. Qualification receives package/settings digests from installed state, never user input, and exposes the Resources link only after the server-generated evidence digest is returned. Logs and tools may fail independently without hiding manifest, settings, or qualification state.
+
+Bound regression coverage includes service reopen between preview and install, changed-source refusal, route-level qualification, and the real keyboard/mobile browser lifecycle.

@@ -78,3 +78,11 @@ Scenario: Linked sources stay authoring-only
 
 Capability execution and runtime qualification are covered by the other plugin
 contracts.
+ 
+## 2026 stateless trust-flow amendment
+
+Remote source identity includes `transport` (`https` or `ssh`), owner, repository, exact lowercase commit, and optional safe relative subdirectory. HTTPS normalizes to `https://github.com/<owner>/<repo>.git`; SSH normalizes to `ssh://git@github.com/<owner>/<repo>.git`. Existing v2 records without transport deserialize as HTTPS.
+
+Preview returns normalized source, source digest, manifest digest, and a length-delimited trust digest. Install resubmits the normalized source and trust digest and prepares a fresh isolated checkout, so it remains valid after service reopen without a preview cache. Source mutation, digest mismatch, checkout redirect, unsafe tree, missing SSH agent/known-hosts, build, settings, registry rename, parent-sync, or restoration failure MUST preserve the old active record or mark the registry `NotReady`.
+
+Bound regression coverage includes root and subdirectory checkouts without `.git`, HTTPS/SSH normalization, linked-root symlink rejection, source-change refusal, and atomic recovery.

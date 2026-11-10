@@ -17,7 +17,6 @@ mod template;
 pub use capability::{
     ApprovalDecision, EVENT_KINDS, EventQueue, MAX_EVENT_QUEUE, PluginToolApproval,
     PluginToolContent, PluginToolResult, RedactedEvent, ToolResultError, parse_tool_result,
-
 };
 pub use command::{
     ACTION_TOOL_DEADLINE, BUILD_DEADLINE, CommandEnvironment, CommandError, CommandRequest,
@@ -46,8 +45,8 @@ pub use runtime::{
 };
 pub use settings::{PluginSettingsDocument, PluginSettingsState, SETTINGS_SCHEMA, SettingsError};
 pub use source::{
-    FileEntry, PluginSource, SourceError, SourceSnapshot, checkout_github, package_manifest,
-    snapshot_tree, validate_commit,
+    FileEntry, GitTransport, PluginSource, SourceError, SourceSnapshot, checkout_github,
+    package_manifest, snapshot_tree, validate_commit,
 };
 pub use template::{
     HARNESS_TEMPLATE_SCHEMA, HarnessTemplateDocument, digest as harness_template_digest,
@@ -134,7 +133,6 @@ pub enum PluginError {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginPreview {
-    pub preview_id: String,
     pub source: PluginSource,
     pub manifest: Manifest,
     pub files: Vec<FileEntry>,
@@ -142,12 +140,65 @@ pub struct PluginPreview {
     pub source_commit: Option<String>,
     pub source_sha256: String,
     pub manifest_sha256: String,
+    pub trust_sha256: String,
 }
-#[derive(Debug, Clone)]
-struct PreviewState {
-    preview: PluginPreview,
+
+struct PreparedSource {
     root: PathBuf,
-    source_owned: bool,
+    cleanup: Option<PathBuf>,
+}
+impl Drop for PreparedSource {
+    fn drop(&mut self) {
+        if let Some(path) = &self.cleanup {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+struct PreparedSettings {
+    root: PathBuf,
+    current: PathBuf,
+    previous_current: Option<Vec<u8>>,
+    revision_dir: PathBuf,
+    created_root: bool,
+    created_revision: bool,
+}
+impl PreparedSettings {
+    fn rollback(&self) -> io::Result<()> {
+        if self.created_revision && self.revision_dir.exists() {
+            fs::remove_dir_all(&self.revision_dir)?;
+        }
+        match &self.previous_current {
+            Some(bytes) => write_synced(&self.current, bytes)?,
+            None if self.current.exists() => {
+                fs::remove_file(&self.current)?;
+                sync_file_parent(&self.current)?;
+            }
+            None => {}
+        }
+        if self.created_root && self.root.exists() {
+            fs::remove_dir_all(&self.root)?;
+        }
+        Ok(())
+    }
+}
+
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temp = path.with_extension(format!("restore-{}-{}", std::process::id(), now_ms()));
+    {
+        use io::Write;
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&temp, path)?;
+    sync_file_parent(path)
+}
+
+fn sync_file_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -157,7 +208,6 @@ pub struct PluginService {
 struct ManagerState {
     registry: Registry,
     guardian: PathBuf,
-    previews: BTreeMap<String, PreviewState>,
     scheduler: Scheduler,
     leases: BTreeMap<(String, String), u32>,
     logs: BTreeMap<String, VecDeque<LogRecord>>,
@@ -456,7 +506,6 @@ impl PluginService {
             inner: Arc::new(Mutex::new(ManagerState {
                 registry,
                 guardian,
-                previews: BTreeMap::new(),
                 scheduler: Scheduler::new(),
                 leases: BTreeMap::new(),
                 logs: BTreeMap::new(),
@@ -591,203 +640,280 @@ impl PluginService {
         Manifest::parse(&fs::read(record.install_dir.join(MANIFEST_FILE))?)
             .map_err(PluginError::from)
     }
-    pub fn preview_install(&self, source: PluginSource) -> Result<PluginPreview, PluginError> {
-        let (root, source_owned) = match &source {
-            PluginSource::Linked { path } => (path.clone(), false),
+    fn prepare_source(
+        &self,
+        source: PluginSource,
+        label: &str,
+    ) -> Result<(PluginSource, PreparedSource), PluginError> {
+        let source = source.normalize()?;
+        let (root, cleanup) = match &source {
+            PluginSource::Linked { path } => (path.clone(), None),
             PluginSource::Github { .. } => {
-                let staging = self.staging_path("preview");
-                (checkout_github(&source, &staging)?, true)
+                let staging = self.staging_path(label)?;
+                let root = match checkout_github(&source, &staging) {
+                    Ok(root) => root,
+                    Err(error) => {
+                        let _ = fs::remove_dir_all(&staging);
+                        return Err(error.into());
+                    }
+                };
+                (root, Some(staging))
             }
         };
-        let (manifest, _manifest_bytes, snapshot) = package_manifest(&root)?;
+        Ok((source, PreparedSource { root, cleanup }))
+    }
+    fn prepare_settings(
+        &self,
+        id: &str,
+        package_sha256: &str,
+        manifest: &Manifest,
+    ) -> Result<(PluginSettingsState, PreparedSettings), PluginError> {
+        let root = self.settings_root(id)?;
+        let current = root.join("current.json");
+        let previous_current = match fs::read(&current) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let state = settings::evaluate(
+            id,
+            package_sha256,
+            1,
+            &manifest.settings,
+            &BTreeMap::new(),
+            false,
+        )
+        .map_err(map_template_settings_error)?;
+        let revision_dir = settings::revision_dir(&root, &state.document.settings_sha256);
+        let prepared = PreparedSettings {
+            root: root.clone(),
+            current,
+            previous_current,
+            revision_dir: revision_dir.clone(),
+            created_root: !root.exists(),
+            created_revision: !revision_dir.exists(),
+        };
+        if let Err(error) = settings::persist(&root, &state.document) {
+            let _ = prepared.rollback();
+            return Err(error.into());
+        }
+        Ok((state, prepared))
+    }
+    pub fn preview_install(&self, source: PluginSource) -> Result<PluginPreview, PluginError> {
+        let (source, prepared) = self.prepare_source(source, "preview")?;
+        let (manifest, manifest_bytes, snapshot) = package_manifest(&prepared.root)?;
         validate_compatibility(&manifest)?;
-        let manifest_sha256 = sha256(&fs::read(root.join(MANIFEST_FILE))?);
-        let preview = PluginPreview {
-            preview_id: format!("preview-{}-{}", std::process::id(), now_ms()),
-            source: source.clone(),
-            build_argv: manifest.builds.iter().map(|v| v.command.clone()).collect(),
+        let manifest_sha256 = sha256(&manifest_bytes);
+        let trust_sha256 = trust_digest(&source, &snapshot.digest, &manifest_sha256)?;
+        Ok(PluginPreview {
             source_commit: source.commit().map(str::to_owned),
-            source_sha256: snapshot.digest,
+            build_argv: manifest
+                .builds
+                .iter()
+                .map(|value| value.command.clone())
+                .collect(),
+            source,
             manifest,
             files: snapshot.files,
+            source_sha256: snapshot.digest,
             manifest_sha256,
-        };
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
-        state.previews.insert(
-            preview.preview_id.clone(),
-            PreviewState {
-                preview: preview.clone(),
-                root,
-                source_owned,
-            },
-        );
-        Ok(preview)
+            trust_sha256,
+        })
     }
     pub fn apply_install(
         &self,
-        preview_id: &str,
-        trust_digest: &str,
+        source: PluginSource,
+        trusted_digest: &str,
     ) -> Result<PluginRecord, PluginError> {
-        let preview_state = {
-            let state = self
-                .inner
-                .lock()
-                .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
-            state
-                .previews
-                .get(preview_id)
-                .cloned()
-                .ok_or_else(|| PluginError::NotFound(preview_id.into()))?
-        };
-        if trust_digest != preview_state.preview.source_sha256 {
+        let (source, prepared) = self.prepare_source(source, "install")?;
+        let source_owned = matches!(&source, PluginSource::Github { .. });
+        let (manifest, manifest_bytes, snapshot) = package_manifest(&prepared.root)?;
+        validate_compatibility(&manifest)?;
+        let source_sha256 = snapshot.digest.clone();
+        let manifest_sha256 = sha256(&manifest_bytes);
+        if trusted_digest != trust_digest(&source, &source_sha256, &manifest_sha256)? {
             return Err(PluginError::Untrusted);
         }
-        let preview_state = {
-            let mut state = self
-                .inner
-                .lock()
-                .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
-            state
-                .previews
-                .remove(preview_id)
-                .ok_or_else(|| PluginError::NotFound(preview_id.into()))?
-        };
-        let preview = &preview_state.preview;
-        if preview_state.source_owned {
-            for (index, build) in preview.manifest.builds.iter().enumerate() {
-                let env = self.environment(
-                    &preview.manifest.id,
-                    &preview_state.root,
+        if source_owned {
+            for (index, build) in manifest.builds.iter().enumerate() {
+                let environment = self.build_environment(
+                    &manifest.id,
+                    &prepared.root,
                     &format!("build-{index}"),
-                    None,
                 )?;
+                let mut argv = build.command.clone();
+                let executable = crate::command::resolve_executable(
+                    &argv[0],
+                    &prepared.root,
+                    environment.path.as_ref(),
+                )
+                .map_err(PluginError::Command)?;
+                argv[0] = executable.to_string_lossy().into_owned();
                 let request = CommandRequest {
-                    argv: build.command.clone(),
-                    cwd: preview_state.root.clone(),
+                    argv,
+                    cwd: prepared.root.clone(),
                     stdin: Vec::new(),
-                    environment: env,
+                    environment,
                     deadline: BUILD_DEADLINE,
                 };
-                if let Err(error) = self.run_bounded(&preview.manifest.id, request) {
+                if let Err(error) = self.run_bounded(&manifest.id, request) {
                     return Err(PluginError::BuildFailed(error.to_string()));
                 }
             }
         }
-        let manifest_bytes = fs::read(preview_state.root.join(MANIFEST_FILE))?;
-        if sha256(&manifest_bytes) != preview.manifest_sha256 {
+        let after_manifest_bytes = fs::read(prepared.root.join(MANIFEST_FILE))?;
+        if sha256(&after_manifest_bytes) != manifest_sha256 {
             return Err(PluginError::BuildFailed(
                 "manifest changed during build".into(),
             ));
         }
-        let (manifest, _, snapshot) = package_manifest(&preview_state.root)?;
-        if serde_json::to_vec(&manifest)? != serde_json::to_vec(&preview.manifest)? {
+        let (manifest, _, after_snapshot) = package_manifest(&prepared.root)?;
+        if sha256(&fs::read(prepared.root.join(MANIFEST_FILE))?) != manifest_sha256 {
             return Err(PluginError::BuildFailed(
                 "manifest changed during build".into(),
             ));
         }
-        let package_sha256 = snapshot.digest.clone();
-        let install_dir = if preview_state.source_owned {
-            let commit = preview.source_commit.as_deref().unwrap_or("linked");
+        let package_sha256 = after_snapshot.digest.clone();
+        let (install_dir, new_install) = if source_owned {
+            let commit = source.commit().unwrap_or("linked");
             let dir = self
                 .state_dir()?
                 .join("plugins/installs")
                 .join(&manifest.id)
                 .join(format!("{commit}-{package_sha256}"));
-            if let Some(parent) = dir.parent() {
-                fs::create_dir_all(parent)?;
+            let parent = dir
+                .parent()
+                .ok_or_else(|| PluginError::NotReady("install directory has no parent".into()))?;
+            fs::create_dir_all(parent)?;
+            if dir.exists() {
+                let (_, _, existing) = package_manifest(&dir)?;
+                if existing.digest != package_sha256 {
+                    return Err(PluginError::BuildFailed(
+                        "existing install digest does not match".into(),
+                    ));
+                }
+                (dir, false)
+            } else {
+                let temp = parent.join(format!(".install-{}-{}", std::process::id(), now_ms()));
+                let result = (|| -> Result<(), io::Error> {
+                    copy_tree(&prepared.root, &temp)?;
+                    sync_tree(&temp)?;
+                    fs::rename(&temp, &dir)?;
+                    sync_file_parent(&dir)
+                })();
+                if let Err(error) = result {
+                    let _ = fs::remove_dir_all(&temp);
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(error.into());
+                }
+                (dir, true)
             }
-            if !dir.exists() {
-                copy_tree(&preview_state.root, &dir)?;
-                sync_tree(&dir)?;
-            }
-            dir
         } else {
-            preview_state.root.clone()
+            (prepared.root.clone(), false)
         };
+        let (settings_state, prepared_settings) =
+            match self.prepare_settings(&manifest.id, &package_sha256, &manifest) {
+                Ok(value) => value,
+                Err(error) => {
+                    if new_install {
+                        let _ = fs::remove_dir_all(&install_dir);
+                    }
+                    return Err(error);
+                }
+            };
         let record = PluginRecord {
             id: manifest.id.clone(),
-            source: preview.source.clone(),
+            source,
             enabled: false,
             active_package_sha256: package_sha256.clone(),
             revisions: BTreeMap::new(),
             stale: false,
             restart_required: false,
             manifest_version: manifest.version.to_string(),
-            source_sha256: preview.source_sha256.clone(),
+            source_sha256,
             package_sha256,
-            install_dir,
+            install_dir: install_dir.clone(),
             capabilities: manifest.capabilities(),
             updated_at_ms: now_ms(),
             active_leases: 0,
             readiness: "disabled".into(),
-            settings_sha256: String::new(),
-            settings_revision: 0,
-            settings_ready: true,
-            missing_required: Vec::new(),
+            settings_sha256: settings_state.document.settings_sha256,
+            settings_revision: settings_state.document.revision,
+            settings_ready: settings_state.settings_ready,
+            missing_required: settings_state.missing_required,
         };
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
-        state.registry.insert(record.clone())?;
-        drop(state);
-        self.ensure_settings(&record.id)?;
-        self.inspect(&record.id)
-    }
-    pub fn link(&self, path: impl AsRef<Path>) -> Result<PluginRecord, PluginError> {
-        let source = PluginSource::linked(path.as_ref().to_path_buf())?;
-        let preview = self.preview_install(source)?;
-        self.apply_link(&preview.preview_id)
-    }
-    fn apply_link(&self, preview_id: &str) -> Result<PluginRecord, PluginError> {
-        let preview_state = {
+        let result = (|| -> Result<(), PluginError> {
             let mut state = self
                 .inner
                 .lock()
                 .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
-            state
-                .previews
-                .remove(preview_id)
-                .ok_or_else(|| PluginError::NotFound(preview_id.into()))?
-        };
-        if preview_state.source_owned {
+            state.registry.insert(record.clone())?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let rollback = prepared_settings.rollback();
+            if new_install {
+                let _ = fs::remove_dir_all(&install_dir);
+            }
+            if let Err(rollback_error) = rollback {
+                return Err(PluginError::NotReady(format!(
+                    "plugin install rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        self.inspect(&record.id)
+    }
+    pub fn link(&self, path: impl AsRef<Path>) -> Result<PluginRecord, PluginError> {
+        let source = PluginSource::linked(path.as_ref().to_path_buf())?;
+        let (source, prepared) = self.prepare_source(source, "link")?;
+        if !matches!(&source, PluginSource::Linked { .. }) {
             return Err(PluginError::BuildFailed(
                 "GitHub sources cannot be linked".into(),
             ));
         }
-        let (_, _, snapshot) = package_manifest(&preview_state.root)?;
-        let manifest = &preview_state.preview.manifest;
+        let (manifest, _, snapshot) = package_manifest(&prepared.root)?;
+        validate_compatibility(&manifest)?;
+        let package_sha256 = snapshot.digest;
+        let (settings_state, prepared_settings) =
+            self.prepare_settings(&manifest.id, &package_sha256, &manifest)?;
         let record = PluginRecord {
             id: manifest.id.clone(),
-            source: preview_state.preview.source.clone(),
+            source,
             enabled: false,
-            active_package_sha256: snapshot.digest.clone(),
+            active_package_sha256: package_sha256.clone(),
             revisions: BTreeMap::new(),
             stale: false,
             restart_required: false,
             manifest_version: manifest.version.to_string(),
-            source_sha256: snapshot.digest.clone(),
-            package_sha256: snapshot.digest,
-            install_dir: preview_state.root,
+            source_sha256: package_sha256.clone(),
+            package_sha256,
+            install_dir: prepared.root.clone(),
             capabilities: manifest.capabilities(),
             updated_at_ms: now_ms(),
             active_leases: 0,
-            settings_sha256: String::new(),
-            settings_revision: 0,
-            settings_ready: true,
-            missing_required: Vec::new(),
             readiness: "disabled".into(),
+            settings_sha256: settings_state.document.settings_sha256,
+            settings_revision: settings_state.document.revision,
+            settings_ready: settings_state.settings_ready,
+            missing_required: settings_state.missing_required,
         };
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
-        state.registry.insert(record.clone())?;
-        drop(state);
-        self.ensure_settings(&record.id)?;
+        let result = (|| -> Result<(), PluginError> {
+            let mut state = self
+                .inner
+                .lock()
+                .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
+            state.registry.insert(record.clone())?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if let Err(rollback_error) = prepared_settings.rollback() {
+                return Err(PluginError::NotReady(format!(
+                    "plugin link rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
         self.inspect(&record.id)
     }
     pub fn enable(&self, id: &str) -> Result<PluginRecord, PluginError> {
@@ -1606,6 +1732,27 @@ impl PluginService {
             &settings.document.package_sha256,
         )
     }
+
+    fn build_environment(
+        &self,
+        id: &str,
+        root: &Path,
+        entrypoint_id: &str,
+    ) -> Result<CommandEnvironment, PluginError> {
+        let state_dir = self.state_dir()?;
+        let plugin_state_dir = state_dir.join("plugins/state").join(id);
+        fs::create_dir_all(&plugin_state_dir)?;
+        Ok(CommandEnvironment {
+            plugin_id: id.into(),
+            plugin_root: root.to_path_buf(),
+            config_dir: self.settings_root(id)?,
+            state_dir: plugin_state_dir,
+            entrypoint_id: entrypoint_id.into(),
+            path: std::env::var_os("PATH"),
+            workspace: None,
+        })
+    }
+
     fn environment_with_settings(
         &self,
         id: &str,
@@ -1629,16 +1776,12 @@ impl PluginService {
             workspace,
         })
     }
-    fn staging_path(&self, label: &str) -> PathBuf {
-        let root = self
-            .inner
-            .lock()
-            .ok()
-            .map(|state| state.registry.state_dir().join("plugins/staging"))
-            .unwrap_or_else(|| std::env::temp_dir().join("hagency-plugin-staging"));
+    fn staging_path(&self, label: &str) -> Result<PathBuf, PluginError> {
+        let root = self.state_dir()?.join("plugins/staging");
+        fs::create_dir_all(&root)?;
         let path = root.join(format!("{label}-{}-{}", std::process::id(), now_ms()));
-        let _ = fs::create_dir_all(&path);
-        path
+        fs::create_dir(&path)?;
+        Ok(path)
     }
     fn validate_live_revision(&self, record: &PluginRecord) -> Result<(), PluginError> {
         if matches!(&record.source, PluginSource::Linked { .. }) {
@@ -1698,6 +1841,17 @@ fn current_platform() -> &'static str {
 fn sha256(bytes: &[u8]) -> String {
     digest_bytes(bytes)
 }
+fn trust_digest(
+    source: &PluginSource,
+    source_sha256: &str,
+    manifest_sha256: &str,
+) -> Result<String, PluginError> {
+    Ok(sha256(&serde_json::to_vec(&serde_json::json!({
+        "manifestSha256": manifest_sha256,
+        "source": source,
+        "sourceSha256": source_sha256,
+    }))?))
+}
 pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1740,4 +1894,27 @@ fn sync_tree(root: &Path) -> io::Result<()> {
         }
     }
     fs::File::open(root)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_environment_does_not_require_registered_plugin() {
+        let state = tempfile::tempdir().expect("state");
+        let root = tempfile::tempdir().expect("root");
+        let service = PluginService::open(state.path()).expect("service");
+
+        let environment = service
+            .build_environment("example.plugin", root.path(), "build-0")
+            .expect("build environment");
+
+        assert!(service.list().expect("list").is_empty());
+        assert_eq!(environment.plugin_root, root.path());
+        assert_eq!(
+            environment.config_dir,
+            state.path().join("plugins/config/example.plugin")
+        );
+    }
 }

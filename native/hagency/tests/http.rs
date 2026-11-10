@@ -1,5 +1,6 @@
 use hagency::App;
 use hagency_matrix::CancellationToken;
+use hagency_plugin::PluginService;
 use hagency_store::{DomainRepository, DomainStore, Repository, Store};
 use salvo::{
     prelude::*,
@@ -874,4 +875,76 @@ async fn fleet_views_capability_matches_ts_shape() {
     }
     domain.shutdown().await.unwrap();
     custody.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_plugin_install_route_is_stateless_and_rechecks_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let package = dir.path().join("package");
+    std::fs::create_dir(&package).unwrap();
+    std::fs::write(
+        package.join("hagency-plugin.toml"),
+        "schema = \"hagency.plugin/v1\"\nid = \"route.plugin\"\nname = \"Route Plugin\"\nversion = \"1.0.0\"\nmin_hagency_version = \"0.1.0\"\nplatforms = [\"linux-x86_64\"]\n",
+    )
+    .unwrap();
+    let custody = Store::start(Repository::open(&state).unwrap(), 16).unwrap();
+    let domain = DomainStore::start(DomainRepository::open(&state).unwrap(), 16).unwrap();
+    let plugins = PluginService::open(&state).unwrap();
+    let app = App::new(
+        custody.clone(),
+        TOKEN.as_bytes(),
+        "127.0.0.1:13300".parse().unwrap(),
+    )
+    .unwrap()
+    .with_domain(domain.clone())
+    .with_plugins(plugins);
+    let service = Service::new(app.router());
+    let source = json!({"kind":"linked","path":package});
+    let mut response = TestClient::post(format!("{BASE}/api/native/v1/plugins/preview"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":source}))
+        .send(&service)
+        .await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let preview = response.take_json::<Value>().await.unwrap();
+    assert!(preview["previewId"].is_null());
+    let trust_digest = preview["trustSha256"].as_str().unwrap().to_owned();
+    let source = preview["source"].clone();
+    let refused = TestClient::post(format!("{BASE}/api/native/v1/plugins/install"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":source,"trustDigest":"wrong"}))
+        .send(&service)
+        .await;
+    assert_eq!(refused.status_code, Some(StatusCode::FORBIDDEN));
+    std::fs::write(package.join("extra.txt"), "changed").unwrap();
+    let changed = TestClient::post(format!("{BASE}/api/native/v1/plugins/install"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":source,"trustDigest":trust_digest}))
+        .send(&service)
+        .await;
+    assert_eq!(changed.status_code, Some(StatusCode::FORBIDDEN));
+    let mut preview = TestClient::post(format!("{BASE}/api/native/v1/plugins/preview"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":{"kind":"linked","path":package}}))
+        .send(&service)
+        .await;
+    let preview = preview.take_json::<Value>().await.unwrap();
+    let mut installed = TestClient::post(format!("{BASE}/api/native/v1/plugins/install"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":preview["source"],"trustDigest":preview["trustSha256"]}))
+        .send(&service)
+        .await;
+    assert_eq!(installed.status_code, Some(StatusCode::OK));
+    assert_eq!(
+        installed.take_json::<Value>().await.unwrap()["id"],
+        "route.plugin"
+    );
+    custody.shutdown().await.unwrap();
+    domain.shutdown().await.unwrap();
 }

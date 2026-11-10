@@ -228,7 +228,8 @@ impl Registry {
     }
 
     pub fn insert(&mut self, mut record: PluginRecord) -> Result<(), RegistryError> {
-        if let Some(previous) = self.inner.records.get(&record.id).cloned() {
+        let mut inner = self.inner.clone();
+        if let Some(previous) = inner.records.get(&record.id).cloned() {
             let changed = previous.active_package_sha256 != record.package_sha256;
             record.enabled = previous.enabled;
             record.restart_required = previous.enabled && changed;
@@ -255,31 +256,37 @@ impl Registry {
                 active_leases: 0,
             });
         record.active_package_sha256 = record.package_sha256.clone();
-        self.inner.records.insert(record.id.clone(), record);
-        self.persist()
+        inner.records.insert(record.id.clone(), record);
+        persist_file(&self.path, &inner)?;
+        self.inner = inner;
+        Ok(())
     }
 
     pub fn remove(&mut self, id: &str) -> Result<Option<PluginRecord>, RegistryError> {
-        let removed = self.inner.records.remove(id);
-        self.persist()?;
+        let mut inner = self.inner.clone();
+        let removed = inner.records.remove(id);
+        persist_file(&self.path, &inner)?;
+        self.inner = inner;
         Ok(removed)
     }
 
     pub fn persist(&self) -> Result<(), RegistryError> {
-        let bytes = serde_json::to_vec_pretty(&self.inner)?;
-        let temp =
-            self.path
-                .with_extension(format!("json.tmp-{}-{}", std::process::id(), now_ms()));
-        {
-            let mut file = fs::File::create(&temp)?;
-            use std::io::Write;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-        }
-        fs::rename(&temp, &self.path)?;
-        sync_parent(&self.path)?;
-        Ok(())
+        persist_file(&self.path, &self.inner)
     }
+}
+
+fn persist_file(path: &Path, inner: &RegistryFile) -> Result<(), RegistryError> {
+    let bytes = serde_json::to_vec_pretty(inner)?;
+    let temp = path.with_extension(format!("json.tmp-{}-{}", std::process::id(), now_ms()));
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&temp, path)?;
+    sync_parent(path)?;
+    Ok(())
 }
 
 pub fn now_ms() -> u64 {

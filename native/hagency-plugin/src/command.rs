@@ -310,6 +310,61 @@ fn validate_request(request: &CommandRequest) -> Result<(), CommandError> {
     Ok(())
 }
 
+pub(crate) fn resolve_executable(
+    command: &str,
+    cwd: &Path,
+    path: Option<&OsString>,
+) -> Result<PathBuf, CommandError> {
+    let command_path = Path::new(command);
+    if command_path.is_absolute() {
+        return Ok(command_path.to_path_buf());
+    }
+    if command_path.components().count() > 1 {
+        return Ok(cwd.join(command_path));
+    }
+    let search_path = path
+        .cloned()
+        .or_else(|| std::env::var_os("PATH"))
+        .ok_or_else(|| {
+            CommandError::Spawn(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("plugin executable not found: {command}"),
+            ))
+        })?;
+    for directory in std::env::split_paths(&search_path) {
+        let candidate = if directory.as_os_str().is_empty() {
+            cwd.join(command_path)
+        } else {
+            directory.join(command_path)
+        };
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(CommandError::Spawn(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("plugin executable not found: {command}"),
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_executable_uses_command_path() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let executable = cwd.path().join("plugin-tool");
+        std::fs::write(&executable, b"tool").expect("executable");
+        let path = OsString::new();
+
+        assert_eq!(
+            resolve_executable("plugin-tool", cwd.path(), Some(&path)).expect("resolved"),
+            executable
+        );
+    }
+}
+
 #[cfg(windows)]
 fn run_supervised_windows(
     owner: SupervisedProcess,

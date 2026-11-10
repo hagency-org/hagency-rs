@@ -91,3 +91,13 @@ qualification matrix are bound by the six plugin task contracts. Built-in
 Codex/Claude/Octos resources remain independent and continue to work when a
 plugin is disabled, stale, or unavailable. No plugin receives a Matrix,
 App Service, operator, provider, or runner credential.
+ 
+## 2026 trust-flow amendment
+
+Remote sources remain GitHub-only but accept canonical HTTPS and SSH transports. Every remote source carries an exact lowercase 40-hex commit and an optional safe relative subdirectory; branches, tags, abbreviated commits, archives, submodules, file URLs, redirects to another host, embedded credentials, and arbitrary Git hosts remain refused.
+
+Preview is read-only and returns the normalized source plus source, manifest, and trust digests. Install resubmits that normalized source and trusted digest, prepares a fresh isolated checkout, verifies the digest before build or registry mutation, and has no preview ID or durable preview cache. The running Hagency service remains the sole registry writer; this removes request affinity, not the single-owner registry model.
+
+SSH uses only the service account's existing agent and readable `known_hosts`; no private-key value or path is accepted, persisted, or rendered. Authentication prerequisites have a stable unavailable refusal. The host-authored console owns the source-review-to-install-to-settings-to-enable-to-qualification flow and never renders plugin-authored UI.
+
+The package and management contracts bind exact source normalization, stateless install across `PluginService::open`, source-change refusal, atomic failure recovery, and the browser lifecycle flow.
