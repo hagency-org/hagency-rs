@@ -261,6 +261,8 @@ async fn plugin_runtimes(
                 "framework": runtime.framework,
                 "state": state,
                 "qualifications": qualifications,
+                "packageSha256": record.package_sha256,
+                "settingsSha256": record.settings_sha256,
             }));
         }
     }
@@ -508,6 +510,15 @@ struct Offer {
     /// The Octos profile the resource runs; Octos only.
     #[serde(default)]
     profile: Option<String>,
+    /// Plugin runtime identity; mutually exclusive with framework+profile.
+    #[serde(default)]
+    plugin_id: Option<String>,
+    #[serde(default)]
+    adapter_id: Option<String>,
+    #[serde(default)]
+    package_sha256: Option<String>,
+    #[serde(default)]
+    settings_sha256: Option<String>,
     /// Monthly token ceiling; 20 million when omitted.
     #[serde(default)]
     tokens: Option<u64>,
@@ -547,6 +558,87 @@ async fn offer(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         refusal(res, StatusCode::BAD_REQUEST, "invalid_domain_command");
         return;
     };
+    // Plugin runtime path: plugin_id + adapter_id identifies the runtime.
+    if let (Some(plugin_id), Some(adapter_id)) = (input.plugin_id.as_deref(), input.adapter_id.as_deref()) {
+        let package_sha256 = input.package_sha256.as_deref().unwrap_or_default();
+        let settings_sha256 = input.settings_sha256.as_deref().unwrap_or_default();
+        if package_sha256.len() != 64 || settings_sha256.len() != 64 {
+            refusal(res, StatusCode::BAD_REQUEST, "setup_invalid_plugin_digest");
+            return;
+        }
+        // Fetch plugin runtimes to validate qualification.
+        let Some(plugins) = depot
+            .get_typed::<crate::App>()
+            .ok()
+            .and_then(|app| app.plugins()) else {
+            refusal(res, StatusCode::SERVICE_UNAVAILABLE, "setup_plugins_unavailable");
+            return;
+        };
+        let plugin_runtimes = plugin_runtimes(Some(&plugins), Some(&store)).await;
+        let qualification = plugin_runtimes
+            .iter()
+            .find(|rt| {
+                rt["pluginId"].as_str() == Some(plugin_id)
+                    && rt["adapterId"].as_str() == Some(adapter_id)
+                    && rt["state"].as_str() == Some("ready")
+            })
+            .and_then(|rt| {
+                rt["qualifications"].as_array().and_then(|quals| {
+                    quals.iter().find(|q| {
+                        q["model"].as_str() == Some(&input.model)
+                            && q["reasoning"].as_str() == input.reasoning.as_deref()
+                    })
+                })
+            });
+        let Some(qual) = qualification else {
+            refusal(res, StatusCode::BAD_REQUEST, "setup_unqualified_model");
+            return;
+        };
+        let tokens = input.tokens.unwrap_or(20_000_000);
+        if tokens == 0 {
+            refusal(res, StatusCode::BAD_REQUEST, "setup_unqualified_model");
+            return;
+        }
+        let framework = qual["framework"].as_str().unwrap_or("plugin");
+        let preset = format!("{plugin_id}_{adapter_id}_{}", input.model.replace('/', "_"));
+        let seat = "plugin";
+        let provider = qual["provider"].as_str().unwrap_or("plugin");
+        let runtime_plugin = Some(json!({
+            "pluginId": plugin_id,
+            "adapterId": adapter_id,
+            "packageSha256": package_sha256,
+            "settingsSha256": settings_sha256,
+        }));
+        let resource = serde_json::from_value::<hagency_core::project::Resource>(json!({
+            "presetId": preset,
+            "seatId": seat,
+            "framework": framework,
+            "model": input.model,
+            "provider": provider,
+            "reasoning": input.reasoning,
+            "runtimePlugin": runtime_plugin,
+            "ceiling": {"tokens": tokens, "period": "monthly"},
+            "published": false,
+        }));
+        let Ok(resource) = resource else {
+            refusal(res, StatusCode::BAD_REQUEST, "invalid_domain_command");
+            return;
+        };
+        let result = store.create_resource_source(resource).await;
+        if let Err(error) = recheck(depot) {
+            failed(res, error);
+            return;
+        }
+        match result {
+            Ok(resource) => res.render(Json(json!({"ok": true, "resource": resource}))),
+            Err(hagency_store::Error::Conflict) => {
+                refusal(res, StatusCode::CONFLICT, "setup_source_exists")
+            }
+            Err(_) => refusal(res, StatusCode::BAD_REQUEST, "setup_resource_refused"),
+        }
+        return;
+    }
+    // Built-in framework path (codex, claude, octos).
     let framework = match input.framework.as_deref().unwrap_or("codex") {
         "codex" => "codex",
         "claude" => "claude",

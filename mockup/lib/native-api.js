@@ -1231,10 +1231,16 @@ async function setupCall(path, method) {
 export function fetchSetup() { return setupCall('setup', 'GET'); }
 export function checkSetup() { return setupCall('setup/check', 'POST'); }
 // ADR-193: an Octos source also names the profile it runs; no other source does.
-export async function offerResource(model, reasoning, tokens, framework = 'codex', profile = null) {
+// Plugin runtime sources provide pluginId, adapterId, packageSha256, settingsSha256.
+export async function offerResource(model, reasoning, tokens, framework = 'codex', profile = null, pluginRuntime = null) {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 20000);
-  const body = { framework, model, reasoning, tokens, ...(profile ? { profile } : {}) };
+  const body = { framework, model, reasoning, tokens, ...(profile ? { profile } : {}), ...(pluginRuntime ? {
+    plugin_id: pluginRuntime.pluginId,
+    adapter_id: pluginRuntime.adapterId,
+    package_sha256: pluginRuntime.packageSha256,
+    settings_sha256: pluginRuntime.settingsSha256,
+  } : {}) };
   try {
     const response = await fetch(`${ROOT}/api/setup/resource`, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: abort.signal,

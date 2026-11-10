@@ -59,8 +59,22 @@ export default function SetupPage() {
   // A coding agent configured after the first source (ADR-192: Claude Code
   // beside Codex) still gets its own offer: only agents with a source drop out.
   const sourceFrameworks = setup?.offer?.sourceFrameworks ?? [];
-  const choices = (setup?.offer?.choices ?? []).filter(c => !sourceFrameworks.includes(c.framework ?? 'codex'));
+  const builtinChoices = (setup?.offer?.choices ?? []).filter(c => !sourceFrameworks.includes(c.framework ?? 'codex'));
+  // Add plugin runtime qualifications to choices
+  const pluginChoices = (setup?.pluginRuntimes ?? [])
+    .filter(rt => rt.state === 'ready' && rt.qualifications?.length > 0)
+    .flatMap(rt => rt.qualifications.map(q => ({
+      ...q,
+      framework: rt.framework,
+      pluginId: rt.pluginId,
+      adapterId: rt.adapterId,
+      packageSha256: rt.packageSha256,
+      settingsSha256: rt.settingsSha256,
+      pluginName: rt.pluginName,
+    })));
+  const choices = [...builtinChoices, ...pluginChoices];
   const choiceAt = choiceIndex < choices.length ? choiceIndex : 0, choice = choices[choiceAt];
+  const isPluginChoice = choice?.pluginId != null;
   const load = useCallback(async () => {
     try {
       await data.ready;
@@ -100,7 +114,16 @@ export default function SetupPage() {
     event.preventDefault(); if (busy || !choice) return;
     setBusy(true); setNote(null);
     try {
-      await offerResource(choice.model, choice.reasoning, Number(tokens), choice.framework ?? 'codex', choice.profile ?? null);
+      if (isPluginChoice) {
+        await offerResource(choice.model, choice.reasoning, Number(tokens), choice.framework, null, {
+          pluginId: choice.pluginId,
+          adapterId: choice.adapterId,
+          packageSha256: choice.packageSha256,
+          settingsSha256: choice.settingsSha256,
+        });
+      } else {
+        await offerResource(choice.model, choice.reasoning, Number(tokens), choice.framework ?? 'codex', choice.profile ?? null);
+      }
       await load(); await data.refresh();
     } catch (error) {
       setNote(errorText(t, error.message));
@@ -140,7 +163,7 @@ export default function SetupPage() {
           {choices.length > 0 && <form className="setup-source-form" onSubmit={prepareSource}>
             <p>{t(pluginRuntimeReady ? 'guided.sourceHelpCombined' : 'guided.sourceHelp')}</p>
             <label>{t('guided.model')}<select value={choiceAt} onChange={e => setChoiceIndex(Number(e.target.value))} disabled={busy}>
-              {choices.map((c, i) => <option key={`${c.framework}:${c.profile ?? ''}:${c.model}:${c.reasoning}`} value={i}>{AGENT_NAMES[c.framework] ?? 'Codex'}{c.profile ? ` · ${c.profile}` : ''} · {c.model}{c.reasoning ? ` · ${c.reasoning}` : ''}</option>)}
+              {choices.map((c, i) => <option key={`${c.framework}:${c.pluginId ?? ''}:${c.profile ?? ''}:${c.model}:${c.reasoning}`} value={i}>{c.pluginName ? `${c.pluginName} · ` : ''}{AGENT_NAMES[c.framework] ?? 'Codex'}{c.profile ? ` · ${c.profile}` : ''} · {c.model}{c.reasoning ? ` · ${c.reasoning}` : ''}</option>)}
             </select></label>
             <label>{t('guided.ceiling')}<input type="number" min="1" max={Number.MAX_SAFE_INTEGER} step="1" required value={tokens} onChange={e => setTokens(e.target.value)} disabled={busy} /></label>
             <p className="dim">{t('guided.ceilingHelp')}</p>
