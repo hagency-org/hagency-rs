@@ -130,6 +130,7 @@ if (config.plugins) {
     await page.locator('[data-native-state="ready"]').first().waitFor();
     await page.goto(`${config.base}/console/plugins/`);
     await page.locator('[data-native-state="ready"]').first().waitFor();
+    assert.equal(await page.locator('[data-plugin-model]').count(), 1, 'plugin page explains platform, harness and runtime ownership');
     assert.equal(await page.locator('.plugin-install').count(), 1, 'plugin install panel renders');
     assert.equal(await page.locator('.plugin-source-grid input').count(), 4, 'remote source has owner, repo, subdir and commit fields');
     assert.equal(await page.locator('.plugin-source-grid select').count(), 1, 'remote source exposes transport choice');

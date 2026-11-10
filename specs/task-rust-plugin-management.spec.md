@@ -36,7 +36,7 @@ loopback CLI, operator routes, and a read-only host-authored console.
 Scenario: CLI mutations use service authority
   Test: native_plugin_cli_uses_operator_routes_and_exact_subcommands
   Given a running private service and its operator token
-  When list/inspect/preview/install/link/enable/disable/uninstall/config-dir are invoked
+  When list/inspect/preview/install/update/link/enable/disable/uninstall/config-dir are invoked
   Then requests use the token, the service owns the mutation, and an offline registry writer is not opened
 
 Scenario: Asynchronous actions are durable and pollable
@@ -62,6 +62,12 @@ Scenario: Runtime changes request restart
   Given a warm host using an enabled runtime adapter
   When the registry switches its active revision
   Then the response reports `restartNeeded` and built-in agents remain ready
+
+
+Scenario: Explicit update preserves the active service state
+  Given an installed plugin and a pinned preview of a replacement source
+  When the operator confirms the update through the console or CLI
+  Then the service rechecks the exact source and trust digest, switches one immutable revision atomically, preserves enablement and leased revisions, and revokes stale runtime qualifications
 
 ## Out of Scope
 

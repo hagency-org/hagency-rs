@@ -245,9 +245,11 @@ function WizardForm({ native = null }) {
         <TechnicalDetails><code>{base.id}</code></TechnicalDetails>
       </section>}
       {native && at === 'plugin' && (
-        <div className="panel">
-          <h3 className="sub">Runtime and harness plugins</h3>
-          <p>Select a qualified runtime package. The selection is pinned to its package digest; the configured harness is also shown in the resource and launch profile.</p>
+        <div className="panel" data-resource-plugin-model>
+          <h3 className="sub">{t('nc.pluginModelTitle')}</h3>
+          <p>{t('nc.pluginModelHelp')}</p>
+          <p className="notice">{t('nc.pluginTargetModel')}</p>
+          <p className="dim">{t('nc.pluginSelectionHelp')}</p>
           {pluginError && <p className="notice bad" role="alert">Plugin metadata unavailable: {pluginError}</p>}
           <button className={`btn${draft.profileKind === 'preserve' ? ' primary' : ''}`} onClick={() => setDraft((old) => ({ ...old, profileKind: 'preserve', runtimePlugin: null, harnessPlugin: null, framework: base.framework, provider: base.provider, model: base.model, reasoning: base.reasoning }))}>Keep source runtime</button>
           <h4>Qualified runtimes</h4>

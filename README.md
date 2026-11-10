@@ -131,8 +131,19 @@ atomic immutable revision switch. Qualification runs the active revision through
 the normal guardian/session boundary. Runtime adapters execute agent turns.
 Harness adapters provide constrained views, host-owned controls, and template-
 bound prepare/release; managed mode may start/stop its configured agent. A
-harness does not submit turns or own their results. Optional Herdr adapters are
-maintained in `hagency-plugin-examples`.
+harness does not submit turns or own their results. Optional agent runtime and harness plugins are maintained in `hagency-plugin-examples`.
+
+The console and CLI use the same update flow: preview the pinned replacement
+source, verify its source/manifest/trust digests, then choose **Update** (or
+`hagency plugin update`). Failed preview, trust, or build steps leave the active
+revision untouched; a successful replacement reports when a service restart is
+required.
+### Agent platform, runtime adapters and project workspaces
+
+Hagency is runtime-neutral: it is the agent platform that owns project and agent records, project workspaces, leases, approvals, dispatch, usage, results and cleanup. A harness adapter may map a project/agent context to a provider target and supervise that target. An agent runtime plugin is the provider-specific execution side; it is not the platform itself.
+
+The project room is Matrix conversation, the workspace is a host filesystem lease, and a pane/target is a provider-local runtime session. Installing or selecting a plugin does not itself create any of these objects. Provider-specific protocol and target documentation belongs in the separately versioned [Hagency plugin examples repository](https://github.com/nizarfadlan/hagency-agent-plugins/blob/main/README.md).
+
 
 
 ## Set up Hagency

@@ -126,8 +126,9 @@ plugin, adapter, package, framework, model, provider, and reasoning. Qualificati
 executes the active revision through the normal guardian/session seam; Hagency
 derives the evidence digest, and a stale/disabled/missing row cannot affect
 built-in resources. Runtime adapters execute agent turns. Harness adapters provide
-constrained views and template-bound prepare/release, not turn submission. Herdr
-runtime/harness adapters are optional companion examples.
+constrained views and template-bound prepare/release, not turn submission. These
+adapters are optional companion examples; provider-specific protocol and target
+documentation lives in the separately versioned plugin repository.
 
 | Path | Caller | Auth |
 | --- | --- | --- |

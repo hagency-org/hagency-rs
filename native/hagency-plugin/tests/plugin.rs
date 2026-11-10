@@ -574,6 +574,10 @@ fn native_plugin_cli_uses_operator_routes_and_exact_subcommands() {
         PluginCommand::parse(&["config-dir", "example.plugin"]).expect("config"),
         PluginCommand::ConfigDir(_)
     ));
+    assert!(matches!(
+        PluginCommand::parse(&["update", "example.plugin"]).expect("update"),
+        PluginCommand::Update(_)
+    ));
     assert!(PluginCommand::parse(&["unknown"]).is_err());
 }
 

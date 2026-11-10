@@ -65,7 +65,7 @@ and is it healthy" is not answerable from any single layer.
 | `/agents/[name]` | One agent: what it contributes, its ceiling, who it serves |
 | `/onboard` | Compatibility redirect to `/resources`; approved requests provision Agents |
 | `/alerts`, `/config` | Incidents; fleet-wide policy and the destructive things |
-| `/plugins` | Review, trust, install, qualify, inspect, enable and remove native capability plugins |
+| `/plugins` | Review, trust, install, update, qualify, inspect, enable and remove native capability plugins |
 
 The provider workflow is Resource configuration → request approval → automatic
 Agent provisioning → Agent management. Resource configurations can exist before

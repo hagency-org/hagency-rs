@@ -5,9 +5,12 @@ import PageHead from '@/components/PageHead';
 import { useData } from '@/components/Data';
 import { useT } from '@/components/Prefs';
 import { errorText } from '@/lib/i18n';
-import { fetchPluginLogs, fetchPluginManifest, fetchPluginQualifications, fetchPluginSettings, fetchPluginTools, fetchPlugins, installPlugin, invokePluginAction, linkPlugin, previewPlugin, setPluginEnabled, uninstallPlugin, updatePluginSettings } from '@/lib/native-api';
+import { fetchPluginLogs, fetchPluginManifest, fetchPluginQualifications, fetchPluginSettings, fetchPluginTools, fetchPlugins, installPlugin, invokePluginAction, linkPlugin, previewPlugin, setPluginEnabled, uninstallPlugin, updatePlugin, updatePluginSettings } from '@/lib/native-api';
 
 const emptySource = { owner: '', repo: '', subdir: '', commit: '', transport: 'https' };
+const sameSourceFamily = (installed, previewed) => installed?.kind === 'github' && previewed?.kind === 'github'
+  && installed.owner === previewed.owner && installed.repo === previewed.repo
+  && (installed.subdir ?? '') === (previewed.subdir ?? '') && installed.transport === previewed.transport;
 
 export default function NativePlugins() {
   const t = useT();
@@ -107,11 +110,30 @@ export default function NativePlugins() {
       setSource(emptySource);
     }
   }
+  async function update() {
+    if (!preview || !previewTarget) return;
+    if (await operation('update', () => updatePlugin(preview.source, preview.trustSha256))) {
+      setPreview(null);
+      setSource(emptySource);
+    }
+  }
   const errorMessage = errorText(t, error);
   const linkReady = path.trim().startsWith('/');
   const remoteReady = /^[a-f0-9]{40}$/.test(source.commit.trim());
+  const previewTarget = preview && plugins.find((plugin) => plugin.id === preview.manifest.id && sameSourceFamily(plugin.source, preview.source));
   return <>
     <PageHead title={t('pl.title')} sub={t('pl.sub')} />
+    <section className="panel plugin-model" aria-labelledby="plugin-model" data-plugin-model>
+      <h2 id="plugin-model" className="sec">{t('pl.modelTitle')}</h2>
+      <p className="dim">{t('pl.modelHelp')}</p>
+      <div className="rolegrid">
+        <article className="rolecard"><h3>{t('pl.platformTitle')}</h3><p>{t('pl.platformHelp')}</p></article>
+        <article className="rolecard"><h3>{t('pl.harnessTitle')}</h3><p>{t('pl.harnessHelp')}</p></article>
+        <article className="rolecard"><h3>{t('pl.runtimeTitle')}</h3><p>{t('pl.runtimeHelp')}</p></article>
+      </div>
+      <p className="notice">{t('pl.targetModel')}</p>
+      <p className="dim">{t('pl.modelStatus')}</p>
+    </section>
     <section className="panel plugin-install" aria-labelledby="plugin-link">
       <h2 id="plugin-link" className="sec">{t('pl.installTitle')}</h2>
       <p className="dim">{t('pl.installHelp')}</p>
@@ -140,8 +162,8 @@ export default function NativePlugins() {
         </dl>
         <p className="dim">{t('pl.previewSummary', { files: preview.files.length, builds: preview.buildArgv.length })}</p>
         {preview.buildArgv.length > 0 && <details className="plugin-builds"><summary>{t('pl.buildCommands')}</summary><ul>{preview.buildArgv.map((argv, index) => <li key={index}><code>{argv.join(' ')}</code></li>)}</ul></details>}
-        <p className="plugin-trust-note">{t('pl.trustHelp')}</p>
-        <button className="btn primary" disabled={busy !== null} onClick={install}>{busy === 'install' ? '…' : t('pl.install')}</button>
+        <p className="plugin-trust-note">{previewTarget ? t('pl.updateHelp', { id: previewTarget.id }) : t('pl.trustHelp')}</p>
+        <button className="btn primary" disabled={busy !== null} data-plugin-update={previewTarget ? 'true' : undefined} onClick={previewTarget ? update : install}>{busy === (previewTarget ? 'update' : 'install') ? '…' : previewTarget ? t('pl.update') : t('pl.install')}</button>
       </div>}
     </section>
     <section aria-labelledby="plugin-list">

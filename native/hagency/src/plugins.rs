@@ -13,6 +13,7 @@ pub(crate) fn router() -> Router {
         .get(list)
         .push(Router::with_path("preview").post(preview))
         .push(Router::with_path("install").post(install))
+        .push(Router::with_path("update").post(update))
         .push(Router::with_path("link").post(link))
         .push(Router::with_path("{id}/manifest").get(manifest))
         .push(
@@ -323,6 +324,15 @@ async fn qualifications(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 async fn install(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    apply_install(req, depot, res).await;
+}
+
+#[handler]
+async fn update(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    apply_install(req, depot, res).await;
+}
+
+async fn apply_install(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(manager) = manager(depot, res) else {
         return;
     };

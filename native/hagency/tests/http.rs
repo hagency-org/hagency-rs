@@ -945,6 +945,49 @@ async fn native_plugin_install_route_is_stateless_and_rechecks_source() {
         installed.take_json::<Value>().await.unwrap()["id"],
         "route.plugin"
     );
+    let mut current = TestClient::get(format!("{BASE}/api/native/v1/plugins/route.plugin"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .send(&service)
+        .await;
+    let old_digest = current.take_json::<Value>().await.unwrap()["activePackageSha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::write(package.join("update.txt"), "updated").unwrap();
+    let mut replacement_preview = TestClient::post(format!("{BASE}/api/native/v1/plugins/preview"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":{"kind":"linked","path":package}}))
+        .send(&service)
+        .await;
+    let replacement_preview = replacement_preview.take_json::<Value>().await.unwrap();
+    let refused_update = TestClient::post(format!("{BASE}/api/native/v1/plugins/update"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":replacement_preview["source"],"trustDigest":"wrong"}))
+        .send(&service)
+        .await;
+    assert_eq!(refused_update.status_code, Some(StatusCode::FORBIDDEN));
+    let mut current = TestClient::get(format!("{BASE}/api/native/v1/plugins/route.plugin"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .send(&service)
+        .await;
+    assert_eq!(
+        current.take_json::<Value>().await.unwrap()["activePackageSha256"],
+        old_digest
+    );
+    let mut updated = TestClient::post(format!("{BASE}/api/native/v1/plugins/update"))
+        .add_header("host", "127.0.0.1:13300", true)
+        .bearer_auth(TOKEN)
+        .json(&json!({"source":replacement_preview["source"],"trustDigest":replacement_preview["trustSha256"]}))
+        .send(&service)
+        .await;
+    assert_eq!(
+        updated.take_json::<Value>().await.unwrap()["id"],
+        "route.plugin"
+    );
     custody.shutdown().await.unwrap();
     domain.shutdown().await.unwrap();
 }

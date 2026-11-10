@@ -17,6 +17,10 @@ pub enum Command {
         source: String,
         trust_digest: String,
     },
+    Update {
+        source: String,
+        trust_digest: String,
+    },
     Link {
         path: String,
     },
@@ -111,6 +115,23 @@ pub async fn run(
                 address,
                 Method::POST,
                 "/api/native/v1/plugins/install",
+                Some(serde_json::json!({
+                    "source": source,
+                    "trustDigest": trust_digest
+                })),
+            )
+            .await
+        }
+        Command::Update {
+            source,
+            trust_digest,
+        } => {
+            let source = parse_source(&source)?;
+            request(
+                state,
+                address,
+                Method::POST,
+                "/api/native/v1/plugins/update",
                 Some(serde_json::json!({
                     "source": source,
                     "trustDigest": trust_digest
@@ -281,6 +302,7 @@ fn command_name(command: &Command) -> PluginCommand {
         Command::Inspect { id } => PluginCommand::Inspect(id.clone()),
         Command::Preview { source } => PluginCommand::Preview(source.clone()),
         Command::Install { source, .. } => PluginCommand::Install(source.clone()),
+        Command::Update { source, .. } => PluginCommand::Update(source.clone()),
         Command::Link { path } => PluginCommand::Link(path.clone()),
         Command::Enable { id } => PluginCommand::Enable(id.clone()),
         Command::Disable { id } => PluginCommand::Disable(id.clone()),
