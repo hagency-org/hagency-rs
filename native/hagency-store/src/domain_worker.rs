@@ -3504,6 +3504,18 @@ impl DomainStore {
     pub async fn console_entities(&self) -> Result<serde_json::Value, Error> {
         self.call(64, |db| db.console_entities()).await
     }
+    /// Choose the language of every notice the store words from now on
+    /// (presentation only; one writer job).
+    pub async fn set_notice_language(
+        &self,
+        language: hagency_core::notice::NoticeLanguage,
+    ) -> Result<(), Error> {
+        self.call(8, move |db| {
+            db.set_notice_language(language);
+            Ok(())
+        })
+        .await
+    }
     /// The read-only agent detail (board #22): one writer job, one bounded
     /// agent-keyed read — the projection is computed at the store, so the
     /// console route adds no second arithmetic path. `None` is the route's

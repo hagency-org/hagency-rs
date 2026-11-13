@@ -193,11 +193,18 @@ async fn supervise(
     if let (Some(probes), Some(service)) = (&probes, &running.service) {
         probes.attach_runtime(service.routes());
     }
+    // Notices this service queues from here on are worded in the operator's
+    // configured language.
+    domain
+        .set_notice_language(running.notice_language)
+        .await
+        .map_err(|_| Failure::OutcomeUnknown)?;
     stage.set("running");
     run(running, &state, &domain, &registration, &stage, &cancel).await
 }
 
 struct Running {
+    notice_language: hagency_core::notice::NoticeLanguage,
     host: Arc<TokenProvisioningHost>,
     service: Option<Service>,
     owner_notices: Arc<Mutex<BTreeMap<String, mpsc::Sender<hagency_execution::ApprovalRequests>>>>,
@@ -223,6 +230,7 @@ fn build(
             .trim_end_matches('/')
     );
     let runtime = config::load_fleet_runtime(runtime_state, address, &homeserver)?;
+    let notice_language = runtime.notice_language;
     let key: [u8; 32] = private::read_secret(&state.join("matrix.provisioning_key"))
         .map_err(|_| Failure::OutcomeUnknown)?
         .try_into()
@@ -271,6 +279,7 @@ fn build(
         runtime.setup,
     )?;
     Ok(Running {
+        notice_language,
         host,
         service: Some(service),
         owner_notices,

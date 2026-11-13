@@ -11,6 +11,7 @@ pub mod custody;
 pub mod execution;
 pub mod graphs;
 pub mod messages;
+pub mod notice;
 pub mod peers;
 pub mod project;
 pub mod qualification;

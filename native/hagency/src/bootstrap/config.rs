@@ -1364,6 +1364,10 @@ struct FleetRuntimeConfig {
     matrix_sdk_timeout_ms: Option<u64>,
     idle_ms: u64,
     home: HomeConfiguration,
+    /// The language of the notices agents post into rooms: `en` (default),
+    /// `id` or `zh`. Presentation only.
+    #[serde(default)]
+    notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// What the fleet service builds its provisioning host and agents from.
 pub(super) struct FleetRuntime {
@@ -1371,6 +1375,7 @@ pub(super) struct FleetRuntime {
     pub(super) homes: hagency_store::agent_home::ManagedHomePlan,
     pub(super) setup: super::fleet::Setup,
     pub(super) matrix_limits: hagency_matrix::Limits,
+    pub(super) notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// Whether this state directory configures an imported fleet's runtime.
 pub(super) fn fleet_runtime_configured(state: &Path) -> bool {
@@ -1646,6 +1651,7 @@ pub(super) fn load_fleet_runtime(
         fix: "the home root, task client and at most 16 projects must form a managed home plan",
     })?;
     Ok(FleetRuntime {
+        notice_language: config.notice_language,
         warm,
         homes,
         setup: super::fleet::Setup {
@@ -1723,6 +1729,40 @@ mod fleet_runtime_tests {
             "127.0.0.1:13300".parse().unwrap(),
             "https://matrix.example.test",
         )
+    }
+    #[test]
+    fn native_fleet_runtime_reads_its_notice_language() {
+        let f = fixture();
+        let (claude, digest) = executable(&f, "claude");
+        let mut document = document(&f);
+        document["claude"] = serde_json::json!({"executable": claude, "executable_sha256": digest});
+        let Ok(loaded) = load(&f, &document) else {
+            panic!("default document loads");
+        };
+        assert_eq!(
+            loaded.notice_language,
+            hagency_core::notice::NoticeLanguage::En,
+            "an existing file without the field keeps working, in English"
+        );
+        for (value, expected) in [
+            ("id", hagency_core::notice::NoticeLanguage::Id),
+            ("zh", hagency_core::notice::NoticeLanguage::Zh),
+            ("en", hagency_core::notice::NoticeLanguage::En),
+        ] {
+            document["notice_language"] = serde_json::json!(value);
+            let Ok(loaded) = load(&f, &document) else {
+                panic!("a known language loads");
+            };
+            assert_eq!(loaded.notice_language, expected);
+        }
+        for refused in [
+            serde_json::json!("fr"),
+            serde_json::json!("ID"),
+            serde_json::json!(1),
+        ] {
+            document["notice_language"] = refused;
+            assert!(load(&f, &document).is_err());
+        }
     }
     #[test]
     fn native_fleet_runtime_may_run_claude_only() {

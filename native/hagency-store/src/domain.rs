@@ -38,9 +38,10 @@ mod catalog_publication;
 pub use attachments::AttachmentTicket;
 pub use attempt_events::{
     AttemptClock, AttemptClockRow, AttemptEvent, AttemptEventRow, AttemptPhase,
-    OVER_BUDGET_NOTICE_KIND, OverBudgetNotice, over_budget_notice_body,
+    OVER_BUDGET_NOTICE_KIND, OverBudgetNotice,
 };
 pub use catalog_publication::{PublishedCatalog, publication_fingerprint};
+pub use notice_text::over_budget_notice_body;
 mod ceiling_alerts;
 pub use ceiling_alerts::{
     ALERT_STATUSES, AlertListFilter, AlertNote, AlertPatch, AlertStats, AlertTransition,
@@ -68,6 +69,7 @@ pub use execution::{
 };
 pub use messages::{CorpusSweepOutcome, MESSAGE_RETENTION_FLOOR, RetentionStatus};
 mod notice_custody;
+mod notice_text;
 mod operator_tasks;
 pub use operator_tasks::{
     MAX_TASK_COMMENTS, MAX_TASK_PAGE, OperatorTask, OperatorTaskComment, TASK_GRANULARITIES,
@@ -132,6 +134,8 @@ pub struct DomainRepository {
     _ownership: File,
     approval_owner: std::sync::Arc<()>,
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
+    /// The language of the notices this store words (presentation only).
+    notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// Current domain schema version (the last sequential migration).
 pub const DOMAIN_SCHEMA_VERSION: i32 = 74;
@@ -1506,7 +1510,18 @@ impl DomainRepository {
             _ownership: database.ownership,
             approval_owner: std::sync::Arc::new(()),
             warm_scopes: std::collections::BTreeMap::new(),
+            notice_language: hagency_core::notice::NoticeLanguage::default(),
         })
+    }
+    /// Choose the language of every notice this store words from now on.
+    /// Notices already queued keep their words. Recovery that runs while the
+    /// store opens, before the operator's configuration is read, uses the
+    /// default language.
+    pub fn set_notice_language(&mut self, language: hagency_core::notice::NoticeLanguage) {
+        self.notice_language = language;
+    }
+    pub fn notice_language(&self) -> hagency_core::notice::NoticeLanguage {
+        self.notice_language
     }
     pub fn register(&mut self, registration: &Registration) -> Result<(), Error> {
         let tx = self

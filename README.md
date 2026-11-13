@@ -507,6 +507,7 @@ To change a value, edit the file (keep mode 0600) and restart the service, or ru
 | `approval_owner_wait_ms` | No | How long a card waits for the owner before it is denied. Without the field the wait is 1000 ms; `hagency setup` writes 180000. With the 5000 ms reply reserve it must fit in 600,000 ms. |
 | `send_file`, `receive_file` | No | Enable the file tools. Default `false`. |
 | `coordination_tools` | No | Enable delegation and peer tools. The owner approves each call. Default `false`. |
+| `notice_language` | No | The language of the activity and over-budget notices agents post into task threads: `en` (default), `id` or `zh`. `zh` keeps the retained product's Chinese wording. Presentation only. Other task notices are still English; notices produced while the service opens, before this file is read, use English. |
 | `matrix_request_interval_ms`, `matrix_sdk_timeout_ms` | No | Matrix request pacing, and the SDK budget (10 to 60,000 ms) |
 | `home` | Yes | Agent homes, with three required sub-fields: `root`, an existing owner-private directory; `task_client`, the absolute path of the `hagency` binary; and `projects`, up to 16 entries with `project_id`, `source` and `mode` (`copy` or `symlink`). `projects` may be `[]`: a project with no entry gets a home without a source copy. |
 
