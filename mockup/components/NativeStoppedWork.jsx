@@ -81,10 +81,13 @@ export default function NativeStoppedWork({ agent, onHold }) {
       </>}
       {s && <div data-recovery-inspection style={{ marginTop: 16 }}>
         <h3>{s.task.title}</h3>
-        <p>{t('nrec.context', { task: s.task.id, state: s.task.status, workspace: s.observation.workspace })}</p>
+        <p>{s.fenced ? t('nrec.contextFenced', { task: s.task.id, state: s.task.status }) : t('nrec.context', { task: s.task.id, state: s.task.status, workspace: s.observation.workspace })}</p>
         <p>{t('nrec.receipt', { digest: s.receiptDigest })}</p>
         <p role={expired ? 'alert' : undefined}>{expired ? t('nrec.expired') : t('nrec.expires', { time: new Date(inspection.expiresAt).toISOString() })}</p>
-        <details open>
+        {s.fenced ? <details open data-recovery-evidence>
+          <summary>{t('nrec.evidence')}</summary>
+          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(s.observation, null, 2)}</pre>
+        </details> : <details open>
           <summary>{t('nrec.inventory', { count: s.observation.inventory.entries.length })}</summary>
           <div style={{ overflowX: 'auto' }}><table className="tbl">
             <thead><tr><th>{t('nrec.path')}</th><th>{t('nrec.kind')}</th><th>{t('nrec.bytes')}</th><th>{t('nrec.hash')}</th></tr></thead>
@@ -92,16 +95,16 @@ export default function NativeStoppedWork({ agent, onHold }) {
               <td>{entry.path}</td><td>{entry.kind}</td><td>{entry.bytes ?? '—'}</td><td><code>{entry.sha256 ?? entry.target ?? '—'}</code></td>
             </tr>)}</tbody>
           </table></div>
-        </details>
+        </details>}
         <label style={{ display: 'block', marginTop: 16 }}>{t('nrec.note')}
           <textarea data-recovery-note value={note} maxLength={2000} disabled={disabled || expired} onChange={(e) => setNote(e.target.value)} style={{ display: 'block', width: '100%', minHeight: 70 }} />
         </label>
-        <label style={{ display: 'block', marginTop: 12 }}>{t('nrec.instruction')}
+        {!s.fenced && <label style={{ display: 'block', marginTop: 12 }}>{t('nrec.instruction')}
           <textarea data-recovery-instruction value={instruction} maxLength={8192} disabled={disabled || expired} onChange={(e) => setInstruction(e.target.value)} style={{ display: 'block', width: '100%', minHeight: 70 }} />
-        </label>
-        <p className="note">{t('nrec.actionsHelp')}</p>
+        </label>}
+        <p className="note">{t(s.fenced ? 'nrec.actionsHelpFenced' : 'nrec.actionsHelp')}</p>
         <div className="btn-row" style={{ flexWrap: 'wrap' }}>
-          {['continue', 'accept_completed', 'keep_blocked'].map((action) => <button className="btn" key={action} data-recovery-action={action}
+          {(s.fenced ? ['accept_completed', 'keep_blocked'] : ['continue', 'accept_completed', 'keep_blocked']).map((action) => <button className="btn" key={action} data-recovery-action={action}
             disabled={disabled || expired || !note.trim() || (action === 'continue' && !instruction.trim())} onClick={() => decide(action)}>{t(`nrec.${action}`)}</button>)}
         </div>
       </div>}
