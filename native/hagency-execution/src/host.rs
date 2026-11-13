@@ -713,6 +713,59 @@ impl Host {
             .map_err(|_| super::Failure::Admission)
     }
 
+    /// The scoped task helper a dispatch's host tools run on (ADR-193
+    /// decision 5), shared by every runtime the host relays tools for: the
+    /// same tool set and the same capability environment as Octos. The helper
+    /// is Hagency's own child, so the capability never reaches the runtime.
+    /// Coordination tools are excluded: they need owner approval, which is
+    /// not routed for relayed runtimes.
+    fn host_task_tools(
+        &self,
+        scope: &OwnedDispatchScope,
+        capability: &RunnerCapability,
+    ) -> Result<
+        (
+            hagency_runtime::octos::task_tools::TaskTools,
+            crate::octos_tools::Spec,
+        ),
+        super::Failure,
+    > {
+        let (executable, address) = self.task_helper.as_ref().ok_or(super::Failure::Admission)?;
+        let mut task_tools = hagency_runtime::octos::task_tools::TaskTools::new(
+            executable.clone(),
+            scope.task().id.clone(),
+        )
+        .map_err(|_| super::Failure::Admission)?;
+        let encoded = serde_json::to_string(capability).map_err(|_| super::Failure::Admission)?;
+        if encoded.len() > 4096 {
+            return Err(super::Failure::Admission);
+        }
+        let mut helper_environment = BTreeMap::from([
+            (
+                OsString::from(TASK_MCP_ENV[0]),
+                OsString::from(address.to_string()),
+            ),
+            (OsString::from(TASK_MCP_ENV[1]), OsString::from(encoded)),
+            (
+                OsString::from(TASK_MCP_ENV[2]),
+                OsString::from(scope.task().id.clone()),
+            ),
+        ]);
+        if self.file_tools {
+            helper_environment.insert(TaskMcp::FILE_TOOLS_ENV.into(), "1".into());
+            task_tools = task_tools.with_file_tools();
+        }
+        if self.receive_tools {
+            helper_environment.insert(TaskMcp::RECEIVE_TOOLS_ENV.into(), "1".into());
+            task_tools = task_tools.with_receive_tools();
+        }
+        let spec = crate::octos_tools::Spec {
+            executable: executable.clone(),
+            environment: helper_environment,
+            tools: task_tools.tools(),
+        };
+        Ok((task_tools, spec))
+    }
     fn prepare_plugin(
         &self,
         scope: &OwnedDispatchScope,
@@ -758,7 +811,7 @@ impl Host {
         if harness_identity.is_none() && scope.harness_template().is_some() {
             return Err(super::Failure::Admission);
         }
-        let (harness, harness_template, harness_launch, harness_environment, harness_lease) =
+        let (harness_template, harness_launch, harness_environment, harness_lease) =
             if let Some(identity) = harness_identity.as_ref() {
                 let harness = hagency_plugin::HarnessPluginRef {
                     plugin_id: identity.plugin_id.clone(),
@@ -779,15 +832,21 @@ impl Host {
                     .claim_harness(&harness)
                     .map_err(|_| super::Failure::Admission)?;
                 (
-                    Some(harness),
                     Some(template),
                     Some(harness_launch),
                     Some(harness_environment),
                     Some(lease),
                 )
             } else {
-                (None, None, None, None, None)
+                (None, None, None, None)
             };
+        // The same host tools Octos gets, when this host serves them. They are
+        // started only if the runtime advertises the tool capability.
+        let tools = if self.task_helper.is_some() {
+            Some(self.host_task_tools(scope, capability)?.1)
+        } else {
+            None
+        };
         let runtime_lease = manager
             .claim_runtime_launch(&runtime_launch)
             .map_err(|_| super::Failure::Admission)?;
@@ -808,7 +867,7 @@ impl Host {
             },
             root,
             account: None,
-            runner: PreparedRunner::Plugin {
+            runner: PreparedRunner::Plugin(Box::new(PreparedPlugin {
                 runtime: runtime_launch,
                 environment,
                 prompt,
@@ -818,11 +877,11 @@ impl Host {
                 agent_name: scope.agent_name().to_owned(),
                 harness_template,
                 runtime_lease,
-                harness,
                 harness_launch,
                 harness_environment,
                 harness_lease,
-            },
+                tools,
+            })),
         })
     }
     /// ADR-192: the Claude half of `prepare_bound`, after the shared workspace
@@ -1002,44 +1061,11 @@ impl Host {
         // ADR-193 decision 5: the task tools are Hagency's host tools, served
         // by the same scoped helper as for Codex and Claude Code. The helper
         // is Hagency's own child: the capability never reaches Octos.
-        let (executable, address) = self.task_helper.as_ref().ok_or(super::Failure::Admission)?;
-        let mut task_tools = hagency_runtime::octos::task_tools::TaskTools::new(
-            executable.clone(),
-            scope.task().id.clone(),
-        )
-        .map_err(|_| super::Failure::Admission)?;
-        let encoded = serde_json::to_string(capability).map_err(|_| super::Failure::Admission)?;
-        if encoded.len() > 4096 {
-            return Err(super::Failure::Admission);
-        }
-        let mut helper_environment = BTreeMap::from([
-            (
-                OsString::from(TASK_MCP_ENV[0]),
-                OsString::from(address.to_string()),
-            ),
-            (OsString::from(TASK_MCP_ENV[1]), OsString::from(encoded)),
-            (
-                OsString::from(TASK_MCP_ENV[2]),
-                OsString::from(scope.task().id.clone()),
-            ),
-        ]);
-        if self.file_tools {
-            helper_environment.insert(TaskMcp::FILE_TOOLS_ENV.into(), "1".into());
-            task_tools = task_tools.with_file_tools();
-        }
-        if self.receive_tools {
-            helper_environment.insert(TaskMcp::RECEIVE_TOOLS_ENV.into(), "1".into());
-            task_tools = task_tools.with_receive_tools();
-        }
+        let (task_tools, tools) = self.host_task_tools(scope, capability)?;
         let prompt = task_tools.prompt(&prompt);
         if prompt.len() > hagency_runtime::octos::MAX_TEXT_BYTES {
             return Err(super::Failure::Admission);
         }
-        let tools = crate::octos_tools::Spec {
-            executable: executable.clone(),
-            environment: helper_environment,
-            tools: task_tools.tools(),
-        };
         let mut environment = self.environment.clone();
         environment.retain(|key, _| !provider_key(key));
         // First use would otherwise download a 334 MB embedding model.
@@ -1252,6 +1278,24 @@ pub(crate) struct Prepared {
     pub(crate) account: Option<hagency_store::ManagedLaunch>,
     pub(crate) runner: PreparedRunner,
 }
+/// A qualified plugin runtime launch, with its optional harness and the host
+/// task tools it may relay (ADR-195, decision 0002).
+pub(crate) struct PreparedPlugin {
+    pub(crate) runtime: hagency_plugin::RuntimeLaunch,
+    pub(crate) environment: BTreeMap<OsString, OsString>,
+    pub(crate) prompt: String,
+    pub(crate) dispatch_id: String,
+    pub(crate) turn_id: String,
+    pub(crate) allocation_id: String,
+    pub(crate) agent_name: String,
+    pub(crate) harness_template: Option<hagency_plugin::HarnessTemplateDocument>,
+    pub(crate) runtime_lease: hagency_plugin::PluginLease,
+    pub(crate) harness_launch: Option<hagency_plugin::HarnessLaunch>,
+    pub(crate) harness_environment: Option<BTreeMap<OsString, OsString>>,
+    pub(crate) harness_lease: Option<hagency_plugin::PluginLease>,
+    /// The host task tools this dispatch may relay (same as Octos).
+    pub(crate) tools: Option<crate::octos_tools::Spec>,
+}
 /// The runner-specific half of a prepared launch (ADR-192).
 pub(crate) enum PreparedRunner {
     Codex {
@@ -1259,21 +1303,8 @@ pub(crate) enum PreparedRunner {
         input: String,
         late_helper: Option<TaskMcp>,
     },
-    Plugin {
-        runtime: hagency_plugin::RuntimeLaunch,
-        environment: BTreeMap<OsString, OsString>,
-        prompt: String,
-        dispatch_id: String,
-        turn_id: String,
-        allocation_id: String,
-        agent_name: String,
-        harness_template: Option<hagency_plugin::HarnessTemplateDocument>,
-        runtime_lease: hagency_plugin::PluginLease,
-        harness: Option<hagency_plugin::HarnessPluginRef>,
-        harness_launch: Option<hagency_plugin::HarnessLaunch>,
-        harness_environment: Option<BTreeMap<OsString, OsString>>,
-        harness_lease: Option<hagency_plugin::PluginLease>,
-    },
+    /// Boxed: a plugin launch carries far more than the other runners.
+    Plugin(Box<PreparedPlugin>),
     /// The prompt is the dispatch payload. The scoped helper is bound after
     /// initialize (ADR-158), through the retained context when there is one.
     Claude {

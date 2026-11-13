@@ -4,6 +4,21 @@ use thiserror::Error;
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_PENDING_REQUESTS: usize = 64;
+/// The capability a runtime advertises in its `initialize` result when it can
+/// call host task tools with `tool/call`.
+pub const TOOL_CAPABILITY: &str = "tool";
+
+/// One host task tool offered to a runtime in `turn/start`. The same catalog
+/// entry (name, description, schema) that the built-in runners read from the
+/// task helper; the host executes every call.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDescriptor {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub read_only: bool,
+}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RuntimeProtocolError {
@@ -55,6 +70,9 @@ pub enum HostRequest {
         prompt: String,
         workspace: String,
         harness_context: Option<Value>,
+        /// Present only when the runtime advertised [`TOOL_CAPABILITY`] and
+        /// the host serves task tools for this dispatch.
+        tools: Option<Vec<ToolDescriptor>>,
     },
     #[serde(rename = "approval/respond")]
     ApprovalRespond {
@@ -370,8 +388,15 @@ fn request_params(request: &HostRequest) -> Value {
             prompt,
             workspace,
             harness_context,
+            tools,
         } => {
-            serde_json::json!({"dispatchId":dispatch_id,"turnId":turn_id,"prompt":prompt,"workspace":workspace,"harnessContext":harness_context})
+            let mut params = serde_json::json!({"dispatchId":dispatch_id,"turnId":turn_id,"prompt":prompt,"workspace":workspace,"harnessContext":harness_context});
+            // Omitted entirely for runtimes without the tool capability, so
+            // their `turn/start` frame is unchanged.
+            if let Some(tools) = tools {
+                params["tools"] = serde_json::to_value(tools).unwrap_or(Value::Null);
+            }
+            params
         }
         HostRequest::ApprovalRespond {
             dispatch_id,

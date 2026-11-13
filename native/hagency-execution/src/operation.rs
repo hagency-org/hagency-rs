@@ -346,6 +346,16 @@ fn settlement_failure(report: &mut Report, error: &hagency_store::Error) -> Fail
 /// unchanged and never consults custody. Generic over the drive's success
 /// payload (the early completion path drives `()`, the later one the
 /// `Report`).
+/// How long the host waits on a plugin runtime (`hagency.runtime/v1`): a
+/// request must be answered promptly, while a running turn may stay quiet up
+/// to `turn_idle` between frames (runtimes heartbeat with `progress`). The
+/// dispatch budget and deadline still bound the whole turn.
+const PLUGIN_TIMEOUTS: hagency_runtime::owned::PluginTimeouts =
+    hagency_runtime::owned::PluginTimeouts {
+        response: Duration::from_millis(2_000),
+        turn_idle: Duration::from_millis(60_000),
+    };
+
 fn observes_completion<T>(drive: &Result<T, Failure>) -> bool {
     !matches!(
         drive,
@@ -2303,6 +2313,7 @@ async fn release_harness_agent(
         )
         .await;
 }
+#[allow(clippy::too_many_arguments)]
 async fn run_plugin_turn(
     domain: &DomainStore,
     cap: &RunnerCapability,
@@ -2311,23 +2322,28 @@ async fn run_plugin_turn(
     cancel: &Arc<AtomicBool>,
     until: Instant,
     expected: &str,
-    runtime: hagency_plugin::RuntimeLaunch,
-    environment: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
-    allocation_id: String,
-    agent_name: String,
-    harness_template: Option<hagency_plugin::HarnessTemplateDocument>,
-    harness_launch: Option<hagency_plugin::HarnessLaunch>,
-    harness_environment: Option<std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>>,
-    prompt: String,
-    dispatch_id: String,
-    turn_id: String,
+    plugin: crate::host::PreparedPlugin,
     workspace: String,
-    leases: (
-        hagency_plugin::PluginLease,
-        Option<hagency_plugin::PluginLease>,
-    ),
     report: &mut Report,
 ) -> Result<(), Failure> {
+    let crate::host::PreparedPlugin {
+        runtime,
+        environment,
+        prompt,
+        dispatch_id,
+        turn_id,
+        allocation_id,
+        agent_name,
+        harness_template,
+        runtime_lease,
+        harness_launch,
+        harness_environment,
+        harness_lease,
+        tools,
+    } = plugin;
+    let leases = (runtime_lease, harness_lease);
+    // The same host task tools as Octos, started only if the runtime asks.
+    let mut plugin_tools = tools.map(crate::octos_tools::PluginTools::new);
     note(
         domain,
         cap,
@@ -2465,8 +2481,11 @@ async fn run_plugin_turn(
                 prompt,
                 workspace,
                 harness_context,
-                Duration::from_millis(2_000),
+                PLUGIN_TIMEOUTS,
                 Arc::clone(cancel),
+                plugin_tools
+                    .as_mut()
+                    .map(|tools| tools as &mut dyn hagency_runtime::owned::PluginToolHost),
             ),
             |_| Failure::Protocol,
             domain,
@@ -2675,7 +2694,7 @@ async fn execute(
     checkpoint(cancel, until)?;
     let binding = bounded(
         async {
-            if matches!(&runner, crate::host::PreparedRunner::Plugin { .. }) {
+            if matches!(&runner, crate::host::PreparedRunner::Plugin(_)) {
                 UsageRun::bind_unmetered(domain.clone(), cap.clone(), started.clone()).await
             } else {
                 UsageRun::bind(domain.clone(), cap.clone(), started.clone()).await
@@ -2719,7 +2738,7 @@ async fn execute(
         crate::host::PreparedRunner::Codex { settings, .. } => !settings.is_read_only(),
         crate::host::PreparedRunner::Claude { .. }
         | crate::host::PreparedRunner::Octos { .. }
-        | crate::host::PreparedRunner::Plugin { .. } => true,
+        | crate::host::PreparedRunner::Plugin(_) => true,
     };
     if let Some(live) = &mut report.live {
         live.possible();
@@ -2758,22 +2777,7 @@ async fn execute(
             expires_at: ceiling_expires_at,
         }),
     };
-    if let crate::host::PreparedRunner::Plugin {
-        runtime,
-        environment,
-        prompt,
-        dispatch_id,
-        turn_id,
-        allocation_id,
-        agent_name,
-        harness_template,
-        runtime_lease,
-        harness: _harness,
-        harness_launch,
-        harness_environment,
-        harness_lease,
-    } = runner
-    {
+    if let crate::host::PreparedRunner::Plugin(plugin) = runner {
         let drive = run_plugin_turn(
             domain,
             cap,
@@ -2782,18 +2786,8 @@ async fn execute(
             cancel,
             until,
             &expected,
-            runtime,
-            environment,
-            allocation_id,
-            agent_name,
-            harness_template,
-            harness_launch,
-            harness_environment,
-            prompt,
-            dispatch_id,
-            turn_id,
+            *plugin,
             launch.directory.to_string_lossy().into_owned(),
-            (runtime_lease, harness_lease),
             report,
         )
         .await;
@@ -2877,7 +2871,7 @@ async fn execute(
             )
             .await;
         }
-        crate::host::PreparedRunner::Plugin { .. } => unreachable!("plugin runner handled above"),
+        crate::host::PreparedRunner::Plugin(_) => unreachable!("plugin runner handled above"),
     };
     if report.owner.is_none() {
         note(

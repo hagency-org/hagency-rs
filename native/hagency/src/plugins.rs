@@ -165,6 +165,8 @@ struct ToolInvokeInput {
     #[serde(default)]
     input: Value,
     decision: String,
+    /// The call envelope's identity; a replay under it never launches twice.
+    call_id: String,
 }
 
 #[derive(Deserialize)]
@@ -283,7 +285,7 @@ async fn invoke_tool(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             return;
         }
     };
-    match manager.invoke_approved_tool(&input.approval, &input.input, decision) {
+    match manager.invoke_approved_tool(&input.approval, &input.input, decision, &input.call_id) {
         Ok(value) => res.render(Json(value)),
         Err(error) => failure(res, error),
     }

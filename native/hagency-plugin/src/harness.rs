@@ -79,9 +79,19 @@ pub enum HarnessRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HarnessFrame {
-    Response { id: String, result: Value },
-    Error { id: String, error: Value },
-    Request { id: String, request: HarnessRequest },
+    Response {
+        id: String,
+        result: Value,
+    },
+    Error {
+        id: String,
+        error: Value,
+    },
+    /// Boxed: a request is far larger than the other frames.
+    Request {
+        id: String,
+        request: Box<HarnessRequest>,
+    },
     Notification(HarnessNotification),
 }
 
@@ -181,7 +191,10 @@ pub fn decode_frame(line: &[u8]) -> Result<HarnessFrame, HarnessProtocolError> {
                     )));
                 }
             };
-            return Ok(HarnessFrame::Request { id, request });
+            return Ok(HarnessFrame::Request {
+                id,
+                request: Box::new(request),
+            });
         }
         if let Some(result) = object.get("result") {
             return Ok(HarnessFrame::Response {

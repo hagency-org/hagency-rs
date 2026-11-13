@@ -40,8 +40,8 @@ pub use qualification::{
 };
 pub use runtime::{
     HostRequest, MAX_FRAME_BYTES, MAX_PENDING_REQUESTS, PluginFrame, PluginNotification,
-    RuntimeOutcome, RuntimeProtocolError, RuntimeSession, RuntimeUsage, decode_frame,
-    encode_request,
+    RuntimeOutcome, RuntimeProtocolError, RuntimeSession, RuntimeUsage, TOOL_CAPABILITY,
+    ToolDescriptor, decode_frame, encode_request,
 };
 pub use settings::{PluginSettingsDocument, PluginSettingsState, SETTINGS_SCHEMA, SettingsError};
 pub use source::{
@@ -215,7 +215,56 @@ struct ManagerState {
     invocations: BTreeMap<String, PluginInvocation>,
     idempotency: BTreeMap<String, String>,
     invocation_path: PathBuf,
+    tool_calls: BTreeMap<String, PluginToolCall>,
+    tool_call_path: PathBuf,
     started: bool,
+}
+
+/// Durable custody of one approved (or denied) `tool.v1` call envelope,
+/// keyed by plugin, active package, tool and caller-supplied call ID. It is
+/// written before launch, so a replay or a restart never launches twice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolCall {
+    pub call_id: String,
+    pub approval: PluginToolApproval,
+    /// `denied`, `running`, `succeeded`, or `outcome_unknown`.
+    pub state: String,
+    pub result: Option<PluginToolResult>,
+    pub at_ms: u64,
+}
+
+fn tool_call_key(approval: &PluginToolApproval, call_id: &str) -> String {
+    format!(
+        "{}\0{}\0tool.v1\0{}\0{}",
+        approval.plugin_id, approval.package_sha256, approval.tool_id, call_id
+    )
+}
+
+fn denied_tool_result() -> PluginToolResult {
+    PluginToolResult {
+        content: vec![PluginToolContent {
+            content_type: "text".into(),
+            text: "plugin tool denied by owner".into(),
+        }],
+        is_error: true,
+    }
+}
+
+/// A retained call answers its replay without a launch: the same result, or
+/// unknown while it ran or after it was interrupted. A different envelope
+/// under the same call ID is refused.
+fn replay_tool_call(
+    call: &PluginToolCall,
+    approval: &PluginToolApproval,
+) -> Result<PluginToolResult, PluginError> {
+    if call.approval != *approval {
+        return Err(PluginError::Untrusted);
+    }
+    match (call.state.as_str(), &call.result) {
+        ("denied" | "succeeded", Some(result)) => Ok(result.clone()),
+        _ => Err(PluginError::OutcomeUnknown),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,7 +303,18 @@ fn persist_invocations(
     path: &Path,
     invocations: &BTreeMap<String, PluginInvocation>,
 ) -> Result<(), PluginError> {
-    let bytes = serde_json::to_vec_pretty(invocations)?;
+    persist_json(path, invocations)
+}
+
+fn load_tool_calls(path: &Path) -> Result<BTreeMap<String, PluginToolCall>, PluginError> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn persist_json(path: &Path, value: &impl Serialize) -> Result<(), PluginError> {
+    let bytes = serde_json::to_vec_pretty(value)?;
     let temp = path.with_extension(format!("json.tmp-{}-{}", std::process::id(), now_ms()));
     {
         use std::io::Write;
@@ -354,10 +414,10 @@ impl PluginService {
                     &record.package_sha256,
                     &manifest.settings,
                 )?;
-                if let Some(expected) = expected_revision {
-                    if expected != current.revision {
-                        return Err(PluginError::SettingsConflict(current.revision));
-                    }
+                if let Some(expected) = expected_revision
+                    && expected != current.revision
+                {
+                    return Err(PluginError::SettingsConflict(current.revision));
                 }
                 (
                     current.revision.saturating_add(1),
@@ -369,10 +429,10 @@ impl PluginService {
                 supplied.unwrap_or(current.values),
             ),
             None => {
-                if let Some(expected) = expected_revision {
-                    if expected != 0 {
-                        return Err(PluginError::SettingsConflict(0));
-                    }
+                if let Some(expected) = expected_revision
+                    && expected != 0
+                {
+                    return Err(PluginError::SettingsConflict(0));
                 }
                 (1, supplied.unwrap_or_default())
             }
@@ -482,8 +542,16 @@ impl PluginService {
         ))
     }
     pub fn open(state_dir: impl AsRef<Path>) -> Result<Self, PluginError> {
+        Self::open_with_guardian(state_dir, std::env::current_exe()?)
+    }
+    /// Open with an explicit guardian executable. The service binary is its
+    /// own guardian (`open`); a host that ships a separate guardian, or a
+    /// test that needs a real one, names it here.
+    pub fn open_with_guardian(
+        state_dir: impl AsRef<Path>,
+        guardian: PathBuf,
+    ) -> Result<Self, PluginError> {
         let registry = Registry::open(state_dir)?;
-        let guardian = std::env::current_exe()?;
         let invocation_path = registry.state_dir().join("plugins/invocations.json");
         let mut invocations = load_invocations(&invocation_path)?;
         let mut recovered = false;
@@ -502,6 +570,21 @@ impl PluginService {
             .values()
             .map(|invocation| (invocation_key(invocation), invocation.invocation_id.clone()))
             .collect();
+        // A tool call that was running when the service stopped may have had
+        // effects: it stays unknown and is never launched again.
+        let tool_call_path = registry.state_dir().join("plugins/tool-calls.json");
+        let mut tool_calls = load_tool_calls(&tool_call_path)?;
+        let mut interrupted = false;
+        for call in tool_calls.values_mut() {
+            if call.state == "running" {
+                call.state = "outcome_unknown".into();
+                call.at_ms = now_ms();
+                interrupted = true;
+            }
+        }
+        if interrupted {
+            persist_json(&tool_call_path, &tool_calls)?;
+        }
         let service = Self {
             inner: Arc::new(Mutex::new(ManagerState {
                 registry,
@@ -513,6 +596,8 @@ impl PluginService {
                 invocations,
                 idempotency,
                 invocation_path,
+                tool_calls,
+                tool_call_path,
                 started: false,
             })),
         };
@@ -1109,12 +1194,21 @@ impl PluginService {
         PluginToolApproval::new(framework, id, tool_id, &record.active_package_sha256, input)
     }
 
+    /// Run one approved `tool.v1` call at most once. `call_id` names the call
+    /// envelope (for a runner: its dispatch and call identity). Custody is
+    /// durable before launch: a replay of the same envelope returns the
+    /// retained result, a call that was running or interrupted stays unknown,
+    /// and a denial is retained without any process.
     pub fn invoke_approved_tool(
         &self,
         approval: &PluginToolApproval,
         input: &serde_json::Value,
         decision: ApprovalDecision,
+        call_id: &str,
     ) -> Result<PluginToolResult, PluginError> {
+        if call_id.is_empty() || call_id.len() > 128 || call_id.chars().any(char::is_control) {
+            return Err(PluginError::Incompatible);
+        }
         let expected = self.prepare_tool_approval(
             &approval.framework,
             &approval.plugin_id,
@@ -1124,14 +1218,23 @@ impl PluginService {
         if expected != *approval {
             return Err(PluginError::Untrusted);
         }
+        let key = tool_call_key(approval, call_id);
+        if let Some(call) = self.lock()?.tool_calls.get(&key) {
+            return replay_tool_call(call, approval);
+        }
         if decision == ApprovalDecision::Deny {
-            return Ok(PluginToolResult {
-                content: vec![PluginToolContent {
-                    content_type: "text".into(),
-                    text: "plugin tool denied by owner".into(),
-                }],
-                is_error: true,
-            });
+            let denied = denied_tool_result();
+            if let Some(retained) = self.retain_tool_call(
+                &key,
+                call_id,
+                approval,
+                "denied",
+                Some(denied.clone()),
+                true,
+            )? {
+                return retained;
+            }
+            return Ok(denied);
         }
         let record = self.inspect(&approval.plugin_id)?;
         let manifest = Manifest::parse(&fs::read(record.install_dir.join(MANIFEST_FILE))?)?;
@@ -1149,18 +1252,76 @@ impl PluginService {
             &approval.tool_id,
             None,
         )?;
-        let result = self.run_bounded(
-            &approval.plugin_id,
-            CommandRequest {
-                argv: tool.command.clone(),
-                cwd: record.install_dir,
-                stdin: serde_json::to_vec(input)?,
-                environment,
-                deadline: ACTION_TOOL_DEADLINE,
-            },
-        )?;
+        // Custody before launch; a concurrent identical envelope loses here.
+        if let Some(retained) =
+            self.retain_tool_call(&key, call_id, approval, "running", None, true)?
+        {
+            return retained;
+        }
+        let result = self
+            .run_bounded(
+                &approval.plugin_id,
+                CommandRequest {
+                    argv: tool.command.clone(),
+                    cwd: record.install_dir,
+                    stdin: serde_json::to_vec(input)?,
+                    environment,
+                    deadline: ACTION_TOOL_DEADLINE,
+                },
+            )
+            .ok()
+            .and_then(|result| parse_tool_result(&result.stdout).ok());
         drop(lease);
-        parse_tool_result(&result.stdout).map_err(|_| PluginError::OutcomeUnknown)
+        let state = if result.is_some() {
+            "succeeded"
+        } else {
+            "outcome_unknown"
+        };
+        self.retain_tool_call(&key, call_id, approval, state, result.clone(), false)?;
+        result.ok_or(PluginError::OutcomeUnknown)
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ManagerState>, PluginError> {
+        self.inner
+            .lock()
+            .map_err(|_| PluginError::NotReady("service lock poisoned".into()))
+    }
+
+    /// Record a tool call's state durably. With `create`, an existing record
+    /// wins and is answered as a replay (`Some`); a write that cannot be made
+    /// durable refuses before any launch.
+    fn retain_tool_call(
+        &self,
+        key: &str,
+        call_id: &str,
+        approval: &PluginToolApproval,
+        state: &str,
+        result: Option<PluginToolResult>,
+        create: bool,
+    ) -> Result<Option<Result<PluginToolResult, PluginError>>, PluginError> {
+        let mut guard = self.lock()?;
+        let manager = &mut *guard;
+        if create && let Some(call) = manager.tool_calls.get(key) {
+            return Ok(Some(replay_tool_call(call, approval)));
+        }
+        let previous = manager.tool_calls.insert(
+            key.to_owned(),
+            PluginToolCall {
+                call_id: call_id.to_owned(),
+                approval: approval.clone(),
+                state: state.to_owned(),
+                result,
+                at_ms: now_ms(),
+            },
+        );
+        if let Err(error) = persist_json(&manager.tool_call_path, &manager.tool_calls) {
+            match previous {
+                Some(previous) => manager.tool_calls.insert(key.to_owned(), previous),
+                None => manager.tool_calls.remove(key),
+            };
+            return Err(error);
+        }
+        Ok(None)
     }
 
     pub fn submit_action(
@@ -1749,6 +1910,7 @@ impl PluginService {
             state_dir: plugin_state_dir,
             entrypoint_id: entrypoint_id.into(),
             path: std::env::var_os("PATH"),
+            home: std::env::var_os("HOME"),
             workspace: None,
         })
     }
@@ -1773,6 +1935,7 @@ impl PluginService {
             state_dir: plugin_state_dir,
             entrypoint_id: entrypoint_id.into(),
             path: std::env::var_os("PATH"),
+            home: std::env::var_os("HOME"),
             workspace,
         })
     }

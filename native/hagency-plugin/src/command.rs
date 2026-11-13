@@ -41,6 +41,10 @@ pub struct CommandEnvironment {
     pub state_dir: PathBuf,
     pub entrypoint_id: String,
     pub path: Option<OsString>,
+    /// The service user's home. Not a secret: plugins already run as that
+    /// user, unsandboxed; many provider CLIs need it to find their own socket
+    /// and config.
+    pub home: Option<OsString>,
     pub workspace: Option<PathBuf>,
 }
 impl CommandEnvironment {
@@ -48,6 +52,9 @@ impl CommandEnvironment {
         let mut env = BTreeMap::new();
         if let Some(path) = &self.path {
             env.insert(OsString::from("PATH"), path.clone());
+        }
+        if let Some(home) = self.home.as_ref().filter(|home| !home.is_empty()) {
+            env.insert(OsString::from("HOME"), home.clone());
         }
         env.insert(
             OsString::from("HAGENCY_PLUGIN_ID"),
@@ -188,12 +195,14 @@ pub fn run_command(request: CommandRequest) -> Result<CommandResult, CommandErro
             let _ = stdin.write_all(&input);
         });
     }
-    let stdout = child.stdout.take().ok_or_else(|| {
-        CommandError::Spawn(io::Error::new(io::ErrorKind::Other, "missing stdout"))
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        CommandError::Spawn(io::Error::new(io::ErrorKind::Other, "missing stderr"))
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CommandError::Spawn(io::Error::other("missing stdout")))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CommandError::Spawn(io::Error::other("missing stderr")))?;
     let stdout_thread = thread::spawn(|| read_bounded(stdout));
     let stderr_thread = thread::spawn(|| read_bounded(stderr));
     let deadline = Instant::now() + request.deadline;
@@ -237,8 +246,16 @@ pub fn run_supervised_command(
     request: CommandRequest,
 ) -> Result<CommandResult, CommandError> {
     validate_request(&request)?;
+    // The guardian launches absolute executables only. Resolve a package-
+    // relative entrypoint against the package root and a bare name against
+    // the plugin's own PATH, exactly as the build step does.
+    let executable = resolve_executable(
+        &request.argv[0],
+        &request.cwd,
+        request.environment.path.as_ref(),
+    )?;
     let launch = Launch {
-        executable: PathBuf::from(&request.argv[0]),
+        executable,
         arguments: request.argv[1..].iter().map(OsString::from).collect(),
         directory: request.cwd.clone(),
         environment: request.environment.build(),
@@ -283,16 +300,16 @@ pub fn run_supervised_command(
         if !report.scope.whole_tree_stopped {
             return Err(CommandError::OutcomeUnknown);
         }
-        return Ok(CommandResult {
+        Ok(CommandResult {
             status: 0,
             stdout,
             stderr,
             whole_tree_stopped: true,
-        });
+        })
     }
     #[cfg(windows)]
     {
-        return run_supervised_windows(owner, pipes, request);
+        run_supervised_windows(owner, pipes, request)
     }
 }
 

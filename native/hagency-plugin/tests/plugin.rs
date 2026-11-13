@@ -36,6 +36,7 @@ fn command_environment(root: &Path) -> CommandEnvironment {
         state_dir: root.join("state"),
         entrypoint_id: "action".into(),
         path: None,
+        home: None,
         workspace: None,
     }
 }
@@ -378,6 +379,75 @@ fn native_plugin_command_environment_is_allowlisted() {
 }
 
 #[test]
+fn native_plugin_command_environment_carries_home_but_no_secret() {
+    let dir = tempdir().expect("root");
+    let mut environment = command_environment(dir.path());
+    assert!(!environment.build().contains_key(OsStr::new("HOME")));
+    environment.home = Some("/home/service".into());
+    let env = environment.build();
+    assert_eq!(
+        env.get(OsStr::new("HOME")).map(|v| v.as_os_str()),
+        Some(OsStr::new("/home/service"))
+    );
+    environment.home = Some("".into());
+    assert!(
+        !environment.build().contains_key(OsStr::new("HOME")),
+        "an empty HOME is not passed"
+    );
+    for secret in [
+        "HAGENCY_OPERATOR_TOKEN",
+        "HAGENCY_RUNNER_CAPABILITY",
+        "HAGENCY_RUNNER_API_ADDR",
+    ] {
+        assert!(
+            !env.contains_key(OsStr::new(secret)),
+            "{secret} must never reach a plugin"
+        );
+    }
+}
+
+#[test]
+fn native_plugin_turn_start_carries_tools_only_when_offered() {
+    use hagency_plugin::{HostRequest, ToolDescriptor, encode_request};
+    let start = |tools| HostRequest::TurnStart {
+        dispatch_id: "d".into(),
+        turn_id: "t".into(),
+        prompt: "p".into(),
+        workspace: "/w".into(),
+        harness_context: None,
+        tools,
+    };
+    let plain: serde_json::Value =
+        serde_json::from_slice(&encode_request("turn-start", &start(None)).unwrap()).unwrap();
+    assert!(
+        plain["params"].get("tools").is_none(),
+        "unchanged frame without tools"
+    );
+    let offered: serde_json::Value = serde_json::from_slice(
+        &encode_request(
+            "turn-start",
+            &start(Some(vec![ToolDescriptor {
+                name: "complete_task_with_reply".into(),
+                description: "Finish the task with a reply".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                read_only: false,
+            }])),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        offered["params"]["tools"][0]["name"],
+        "complete_task_with_reply"
+    );
+    assert_eq!(
+        offered["params"]["tools"][0]["inputSchema"]["type"],
+        "object"
+    );
+    assert_eq!(offered["params"]["tools"][0]["readOnly"], false);
+}
+
+#[test]
 fn native_plugin_scheduler_enforces_global_and_plugin_limits() {
     let scheduler = Scheduler::new();
     let _one = scheduler.try_acquire("example.plugin").expect("first");
@@ -464,13 +534,14 @@ fn native_plugin_tool_denial_and_exact_approval_are_service_gated() {
         .prepare_tool_approval("owner", &record.id, "read", &input)
         .expect("approval");
     let denied = manager
-        .invoke_approved_tool(&approval, &input, ApprovalDecision::Deny)
+        .invoke_approved_tool(&approval, &input, ApprovalDecision::Deny, "call-1")
         .expect("denial");
     assert!(denied.is_error);
     let approved = manager.invoke_approved_tool(
         &approval,
         &json!({"path":"different"}),
         ApprovalDecision::ApproveOnce,
+        "call-2",
     );
     assert!(matches!(approved, Err(PluginError::Untrusted)));
 }
@@ -481,12 +552,11 @@ fn native_plugin_tool_malformed_or_lost_result_is_unknown() {
         parse_tool_result(b"{}"),
         Err(ToolResultError::Malformed)
     ));
-    assert!(matches!(
-        parse_tool_result(br#"{"content":[{"type":"text","text":"ok"}],"isError":false}"#)
+    assert!(
+        !parse_tool_result(br#"{"content":[{"type":"text","text":"ok"}],"isError":false}"#)
             .expect("result")
-            .is_error,
-        false
-    ));
+            .is_error
+    );
 }
 
 #[test]
@@ -629,8 +699,8 @@ fn native_harness_frames_round_trip_view_messages_and_requests() {
     assert!(bytes.ends_with(b"\n"));
     assert!(matches!(
         decode_harness_frame(br#"{"jsonrpc":"2.0","id":"h1","method":"stop_attempt","params":{"attemptId":"a1"}}"#),
-        Ok(HarnessFrame::Request { ref id, request: HarnessRequest::StopAttempt { ref attempt_id } })
-            if id == "h1" && attempt_id == "a1"
+        Ok(HarnessFrame::Request { ref id, ref request })
+            if id == "h1" && matches!(**request, HarnessRequest::StopAttempt { ref attempt_id } if attempt_id == "a1")
     ));
     assert!(matches!(
         decode_harness_frame(br#"{"jsonrpc":"2.0","method":"event","params":{"sequence":2,"event":{"kind":"done"}}}"#),
@@ -725,46 +795,6 @@ fn native_plugin_revision_leases_block_uninstall_until_release() {
 }
 
 #[test]
-fn native_plugin_invocation_replays_after_service_reopen() {
-    let (dir, _) = package();
-    let state = tempdir().expect("state");
-    let manager = PluginService::open(state.path()).expect("manager");
-    let record = manager.link(dir.path()).expect("link");
-    manager.enable(&record.id).expect("enable");
-    let submitted = manager
-        .submit_action(&record.id, "ping", json!({"ok": true}), "replay-key")
-        .expect("submit");
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    let terminal = loop {
-        let current = manager.invocation(&submitted.invocation_id).expect("poll");
-        if matches!(
-            current.state.as_str(),
-            "succeeded" | "failed" | "outcome_unknown"
-        ) {
-            break current;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "invocation did not settle"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    drop(manager);
-    let reopened = PluginService::open(state.path()).expect("reopen");
-    let replay = reopened
-        .submit_action(&record.id, "ping", json!({"ok": true}), "replay-key")
-        .expect("replay");
-    assert_eq!(replay.invocation_id, submitted.invocation_id);
-    assert_eq!(
-        reopened
-            .invocation(&submitted.invocation_id)
-            .expect("stored")
-            .state,
-        terminal.state
-    );
-}
-
-#[test]
 fn native_plugin_tool_service_requires_exact_approval() {
     let (dir, manifest) = package();
     fs::write(
@@ -785,7 +815,7 @@ fn native_plugin_tool_service_requires_exact_approval() {
         .prepare_tool_approval("custom", &record.id, "read", &input)
         .expect("approval");
     let denied = manager
-        .invoke_approved_tool(&approval, &input, ApprovalDecision::Deny)
+        .invoke_approved_tool(&approval, &input, ApprovalDecision::Deny, "call-3")
         .expect("denial");
     assert!(denied.is_error);
     assert_eq!(

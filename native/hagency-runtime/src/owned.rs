@@ -12,7 +12,9 @@ pub use claude::OwnedClaudeSession;
 mod octos;
 pub use octos::OwnedOctosSession;
 mod plugin;
-pub use plugin::{OwnedPluginSession, PluginSessionError, PluginTurn};
+pub use plugin::{
+    OwnedPluginSession, PluginSessionError, PluginTimeouts, PluginToolHost, PluginTurn, ToolFuture,
+};
 
 /// Exact platform observations, deliberately distinct from upstream completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

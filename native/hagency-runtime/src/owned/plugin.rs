@@ -2,11 +2,14 @@ use super::{Cleanup, StartError};
 use hagency_platform::{Launch, SupervisedProcess};
 use hagency_plugin::{
     HostRequest, PluginFrame, PluginNotification, RuntimeLaunch, RuntimeOutcome, RuntimeSession,
-    decode_frame, encode_request,
+    TOOL_CAPABILITY, ToolDescriptor, decode_frame, encode_request,
 };
 use std::{
+    collections::BTreeSet,
+    future::Future,
     io,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -27,6 +30,43 @@ type Receiver = hagency_platform::WindowsPipe;
 type Sender = hagency_platform::WindowsPipe;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long the host waits on a runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginTimeouts {
+    /// For the answer to a host request (`initialize`, `turn/start`,
+    /// `shutdown`, ...): a runtime must acknowledge promptly.
+    pub response: Duration,
+    /// For the next frame while a turn runs. Runtimes should send `progress`
+    /// heartbeats; this bounds a runtime that has stopped responding, while
+    /// the dispatch budget still bounds the whole turn.
+    pub turn_idle: Duration,
+}
+
+/// Boxed future returned by [`PluginToolHost`] methods.
+pub type ToolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Host task tools for one dispatch, executed by the host with its own
+/// authority. The runtime only names a tool and its input; it never receives
+/// a runner capability.
+pub trait PluginToolHost: Send {
+    /// Starts the tools and returns the catalog offered to the runtime.
+    fn prepare(&mut self) -> ToolFuture<'_, Result<Vec<ToolDescriptor>, ()>>;
+    /// Runs one call: `Ok` is the tool output, `Err` its failure message.
+    fn call<'a>(
+        &'a mut self,
+        tool: &'a str,
+        input: serde_json::Value,
+    ) -> ToolFuture<'a, Result<serde_json::Value, String>>;
+}
+
+/// The `tool/result` payload for one call.
+fn tool_result(result: Result<serde_json::Value, String>) -> serde_json::Value {
+    match result {
+        Ok(output) => serde_json::json!({"ok": true, "output": output}),
+        Err(error) => serde_json::json!({"ok": false, "error": error}),
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PluginSessionError {
@@ -143,6 +183,7 @@ impl OwnedPluginSession {
         pipes.into_async_parts()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_turn(
         &mut self,
         dispatch_id: String,
@@ -150,25 +191,50 @@ impl OwnedPluginSession {
         prompt: String,
         workspace: String,
         harness_context: Option<serde_json::Value>,
-        response_timeout: Duration,
+        timeouts: PluginTimeouts,
         cancel: Arc<AtomicBool>,
+        mut tools: Option<&mut dyn PluginToolHost>,
     ) -> Result<PluginTurn, PluginSessionError> {
         self.dispatch_id = dispatch_id.clone();
         self.turn_id = turn_id.clone();
-        self.request(
-            "initialize",
-            HostRequest::Initialize {
-                protocol: "hagency.runtime/v1".into(),
-                capabilities: vec![
-                    "cancel".into(),
-                    "approval".into(),
-                    "tool".into(),
-                    "usage".into(),
-                ],
-            },
-            response_timeout,
-        )
-        .await?;
+        let initialized = self
+            .request(
+                "initialize",
+                HostRequest::Initialize {
+                    protocol: "hagency.runtime/v1".into(),
+                    capabilities: vec![
+                        "cancel".into(),
+                        "approval".into(),
+                        "tool".into(),
+                        "usage".into(),
+                    ],
+                },
+                timeouts.response,
+            )
+            .await?;
+        // Tools are offered only to a runtime that asked for them, and only
+        // when the host serves task tools for this dispatch.
+        let wants_tools = initialized
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == Some(TOOL_CAPABILITY))
+            });
+        let offered = match tools.as_deref_mut() {
+            Some(host) if wants_tools => Some(
+                host.prepare()
+                    .await
+                    .map_err(|()| PluginSessionError::Refused)?,
+            ),
+            _ => None,
+        };
+        let catalog: BTreeSet<String> = offered
+            .iter()
+            .flatten()
+            .map(|tool| tool.name.clone())
+            .collect();
         self.request(
             "turn-start",
             HostRequest::TurnStart {
@@ -177,13 +243,15 @@ impl OwnedPluginSession {
                 prompt,
                 workspace,
                 harness_context,
+                tools: offered,
             },
-            response_timeout,
+            timeouts.response,
         )
         .await?;
         let mut protocol = RuntimeSession::new(&dispatch_id, &turn_id)
             .map_err(|error| PluginSessionError::Protocol(error.to_string()))?;
         let mut last_usage = None;
+        let mut calls: BTreeSet<String> = BTreeSet::new();
         loop {
             if cancel.load(Ordering::Acquire) {
                 self.send_only(
@@ -194,11 +262,11 @@ impl OwnedPluginSession {
                     },
                 )
                 .await?;
-                self.request("shutdown", HostRequest::Shutdown, response_timeout)
+                self.request("shutdown", HostRequest::Shutdown, timeouts.response)
                     .await?;
                 return Err(PluginSessionError::Cancelled);
             }
-            match self.read_frame(response_timeout).await? {
+            match self.read_frame(timeouts.turn_idle).await? {
                 PluginFrame::Response { .. } => {}
                 PluginFrame::Error { error, .. } => {
                     return Err(PluginSessionError::Protocol(error.to_string()));
@@ -217,6 +285,8 @@ impl OwnedPluginSession {
                             input,
                             ..
                         } => {
+                            // Runtime-side approvals are not routed to the
+                            // owner yet: refuse rather than approve.
                             let _ = (tool, input);
                             self.send_only(
                                 &format!("approval-{approval_id}"),
@@ -229,17 +299,29 @@ impl OwnedPluginSession {
                             )
                             .await?;
                         }
-                        PluginNotification::ToolCall { call_id, .. } => {
+                        PluginNotification::ToolCall {
+                            call_id,
+                            tool,
+                            input,
+                            ..
+                        } => {
+                            let result = if !calls.insert(call_id.clone()) {
+                                // A repeated call_id is never executed twice.
+                                Err(format!("duplicate call_id {call_id}"))
+                            } else if !catalog.contains(&tool) {
+                                Err(format!("{tool} is not a Hagency task tool of this task"))
+                            } else if let Some(host) = tools.as_deref_mut() {
+                                host.call(&tool, input).await
+                            } else {
+                                Err("tool execution remains with Hagency host".into())
+                            };
                             self.send_only(
                                 &format!("tool-{call_id}"),
                                 &HostRequest::ToolResult {
                                     dispatch_id: dispatch_id.clone(),
                                     turn_id: turn_id.clone(),
                                     call_id,
-                                    result: serde_json::json!({
-                                        "ok": false,
-                                        "error": "tool execution remains with Hagency host"
-                                    }),
+                                    result: tool_result(result),
                                 },
                             )
                             .await?;
@@ -259,7 +341,7 @@ impl OwnedPluginSession {
                                 error,
                                 usage: usage.or(last_usage),
                             };
-                            self.request("shutdown", HostRequest::Shutdown, response_timeout)
+                            self.request("shutdown", HostRequest::Shutdown, timeouts.response)
                                 .await?;
                             return Ok(turn);
                         }
@@ -286,7 +368,9 @@ impl OwnedPluginSession {
             wait,
         )
         .await?;
-        self.request("shutdown", HostRequest::Shutdown, wait).await
+        self.request("shutdown", HostRequest::Shutdown, wait)
+            .await
+            .map(|_| ())
     }
 
     async fn request(
@@ -294,15 +378,16 @@ impl OwnedPluginSession {
         id: &str,
         request: HostRequest,
         response_timeout: Duration,
-    ) -> Result<(), PluginSessionError> {
+    ) -> Result<serde_json::Value, PluginSessionError> {
         let bytes = encode_request(id, &request)
             .map_err(|error| PluginSessionError::Protocol(error.to_string()))?;
         self.write(&bytes, response_timeout).await?;
         loop {
             match self.read_frame(response_timeout).await? {
                 PluginFrame::Response {
-                    id: response_id, ..
-                } if response_id == id => return Ok(()),
+                    id: response_id,
+                    result,
+                } if response_id == id => return Ok(result),
                 PluginFrame::Error {
                     id: response_id,
                     error,

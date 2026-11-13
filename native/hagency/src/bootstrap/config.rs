@@ -1525,6 +1525,11 @@ pub(super) fn load_fleet_runtime(
         idle_ms: config.idle_ms,
     };
     let approvals = approval_host(config.approval_owner_wait_ms, limits)?;
+    let plugin_service =
+        hagency_plugin::PluginService::open(state).map_err(|_| Failure::Config {
+            field: "state-dir plugins",
+            fix: "the plugin registry must open before fleet factory hosts are prepared",
+        })?;
     let plan = match codex {
         Some(executable) => hagency_execution::WarmHostPlan::new(
             own,
@@ -1556,6 +1561,12 @@ pub(super) fn load_fleet_runtime(
         .map_err(|_| Failure::Config {
             field: "fleet-runtime.json: plan",
             fix: "the warm plan must apply the file, coordination and receive capabilities",
+        })?;
+    warm = warm
+        .with_plugin_service(plugin_service)
+        .map_err(|_| Failure::Config {
+            field: "fleet-runtime.json: plugin service",
+            fix: "the warm plan must accept the opened plugin service",
         })?;
     if let Some(host) = &codex_host {
         warm = warm

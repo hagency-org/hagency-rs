@@ -63,7 +63,7 @@ fn runtime_plugin_identity_round_trips_and_rejects_stale_digest_shape() {
     resource.validate().unwrap();
     assert!(resource.provisionable());
     assert!(resource.qualifies("review"));
-    let mut stale = RuntimePluginIdentity {
+    let stale = RuntimePluginIdentity {
         package_sha256: "A".repeat(64),
         ..resource.runtime_plugin.take().unwrap()
     };
