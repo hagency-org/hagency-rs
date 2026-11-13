@@ -19,11 +19,23 @@ pub struct HostApprovalConfig {
     engagements: Vec<String>,
 }
 impl HostApprovalConfig {
+    fn validate_engagements(engagements: &[String]) -> Result<(), Error> {
+        if engagements.len() > 64 {
+            return Err(Error::Config);
+        }
+        let mut seen = BTreeSet::new();
+        for id in engagements {
+            identifier(id, 128).map_err(|_| Error::Config)?;
+            if !seen.insert(id) {
+                return Err(Error::Config);
+            }
+        }
+        Ok(())
+    }
     pub fn new(mut config: HostConfig, engagements: Vec<String>) -> Result<Self, Error> {
         if config.approval
             || config.enrollment.is_some()
             || engagements.is_empty()
-            || engagements.len() > 64
             || !engagements.contains(&config.identity.transport.engagement_id)
             || config
                 .rooms
@@ -32,13 +44,7 @@ impl HostApprovalConfig {
         {
             return Err(Error::Config);
         }
-        let mut seen = BTreeSet::new();
-        for id in &engagements {
-            identifier(id, 128).map_err(|_| Error::Config)?;
-            if !seen.insert(id) {
-                return Err(Error::Config);
-            }
-        }
+        Self::validate_engagements(&engagements)?;
         config.approval = true;
         Ok(Self {
             config,
@@ -48,7 +54,11 @@ impl HostApprovalConfig {
     /// ADR-187: an imported fleet's approval-bot device, anchored on the fleet.
     /// It serves the owners' approval rooms of the fleet's agents as they are
     /// admitted; it needs no engagement of its own.
-    pub fn for_fleet(mut config: HostConfig, anchor: FleetApprovalAnchor) -> Result<Self, Error> {
+    pub fn for_fleet(
+        mut config: HostConfig,
+        anchor: FleetApprovalAnchor,
+        engagements: Vec<String>,
+    ) -> Result<Self, Error> {
         let identity = &config.identity;
         if config.approval
             || config.enrollment.is_some()
@@ -63,11 +73,12 @@ impl HostApprovalConfig {
             return Err(Error::Config);
         }
         identifier(&anchor.fleet_id, 128).map_err(|_| Error::Config)?;
+        Self::validate_engagements(&engagements)?;
         config.approval = true;
         config.approval_fleet = Some(anchor.fleet_id);
         Ok(Self {
             config,
-            engagements: vec![],
+            engagements,
         })
     }
     /// Explicit approval-purpose fresh ordinary account. Peer masters come from

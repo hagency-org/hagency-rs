@@ -392,6 +392,7 @@ async fn prepare_owners(
             .await
             .unwrap_or_default(),
     );
+    let mut by_owner: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     for engagement in engagements {
         let Some((owner, room)) = domain
             .engagement_owner_room(engagement.clone())
@@ -400,6 +401,14 @@ async fn prepare_owners(
         else {
             continue;
         };
+        let entry = by_owner
+            .entry(owner)
+            .or_insert_with(|| (room.clone(), Vec::new()));
+        if !entry.1.contains(&engagement) {
+            entry.1.push(engagement);
+        }
+    }
+    for (owner, (room, engagements)) in by_owner {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -436,6 +445,7 @@ async fn prepare_owners(
             &owner,
             &anchor,
             &device,
+            &engagements,
         )?;
         running
             .host
@@ -458,6 +468,7 @@ async fn prepare_owners(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn owner_collector(
     running: &Running,
     state: &Path,
@@ -466,6 +477,7 @@ fn owner_collector(
     owner: &str,
     anchor: &str,
     device: &fleet_identity::OwnerApprovalDevice,
+    engagements: &[String],
 ) -> Result<Arc<ApprovalCollector>, Failure> {
     let refused = || Failure::Config {
         field: "owner approval device",
@@ -518,6 +530,7 @@ fn owner_collector(
             registration_generation: registration.generation,
             bot_mxid: registration.approval_bot_mxid.clone(),
         },
+        engagements.to_vec(),
     )
     .and_then(|approval| {
         approval.with_fresh_account_enrollment(vec![(owner.to_owned(), anchor.to_owned())])
