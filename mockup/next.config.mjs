@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 /** @type {import('next').NextConfig} */
 // PAGES=1 switches to a static export for GitHub Pages. Gated on an env var so
 // `npm run dev` and `npm start` keep their normal behaviour — a prototype that
@@ -6,6 +8,7 @@ const pages = process.env.PAGES === '1';
 const nativeConsole = process.env.NEXT_PUBLIC_HAGENCY_NATIVE_CONSOLE === '1';
 
 const nextConfig = {
+  turbopack: { root: path.resolve(process.cwd(), '..') },
   ...(process.env.HAGENCY_CONSOLE_DIST_DIR ? { distDir: process.env.HAGENCY_CONSOLE_DIST_DIR } : {}),
   // A prototype, not a product: no telemetry, no image optimisation server.
   images: { unoptimized: true },

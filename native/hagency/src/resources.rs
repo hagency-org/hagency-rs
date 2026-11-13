@@ -51,7 +51,7 @@ pub(super) fn domain(depot: &Depot, res: &mut Response) -> Option<DomainStore> {
     }
     store
 }
-fn failure(res: &mut Response, error: Error) {
+pub(super) fn failure(res: &mut Response, error: Error) {
     let (status, code) = match error {
         Error::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_domain_command"),
         Error::NotFound => (StatusCode::NOT_FOUND, "not_found"),
@@ -489,6 +489,41 @@ async fn definitions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentDefinitionWrite {
+    name: Option<String>,
+    role: Option<String>,
+    enabled: Option<bool>,
+    #[serde(default)]
+    harness_template_values: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
+    harness_id: Option<String>,
+}
+
+fn plugin_failure(res: &mut Response, error: hagency_plugin::PluginError) {
+    let (status, code) = match error {
+        hagency_plugin::PluginError::ConfigurationRequired(_) => {
+            (StatusCode::CONFLICT, "plugin_configuration_required")
+        }
+        hagency_plugin::PluginError::Untrusted => (StatusCode::FORBIDDEN, "plugin_untrusted"),
+        hagency_plugin::PluginError::SettingsInvalid(_)
+        | hagency_plugin::PluginError::Settings(_) => {
+            (StatusCode::BAD_REQUEST, "plugin_settings_invalid")
+        }
+        hagency_plugin::PluginError::Disabled(_) => (StatusCode::CONFLICT, "plugin_disabled"),
+        hagency_plugin::PluginError::Stale(_) => (StatusCode::CONFLICT, "plugin_stale"),
+        hagency_plugin::PluginError::RestartRequired(_) => {
+            (StatusCode::CONFLICT, "plugin_restart_required")
+        }
+        hagency_plugin::PluginError::NotFound(_) => (StatusCode::NOT_FOUND, "plugin_not_found"),
+        hagency_plugin::PluginError::Incompatible => (StatusCode::CONFLICT, "plugin_incompatible"),
+        hagency_plugin::PluginError::Capacity => (StatusCode::PAYLOAD_TOO_LARGE, "plugin_capacity"),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "plugin_unavailable"),
+    };
+    refusal(res, status, code);
+}
+
 /// TS mutateResourceAgentDefinition (backend-v2.js:15822-15833): POST creates,
 /// PUT updates, DELETE removes — one handler for all three.
 #[handler]
@@ -504,10 +539,67 @@ async fn edit_definition(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let input = if req.method() == salvo::http::Method::DELETE {
         None
     } else {
-        match body::<serde_json::Value>(req, depot, res).await {
-            Some(value) => Some(value),
-            None => return,
-        }
+        let Some(value) = body::<serde_json::Value>(req, depot, res).await else {
+            return;
+        };
+        let write = match serde_json::from_value::<AgentDefinitionWrite>(value) {
+            Ok(write) => write,
+            Err(_) => {
+                refusal(res, StatusCode::BAD_REQUEST, "invalid_domain_command");
+                return;
+            }
+        };
+        let resource = match store.resource_configuration(id.to_owned()).await {
+            Ok(resource) => resource,
+            Err(error) => {
+                failure(res, error);
+                return;
+            }
+        };
+        let template = match resource.harness_plugin.as_ref() {
+            Some(identity)
+                if definition_id.is_none()
+                    || write.harness_id.is_some()
+                    || write.harness_template_values.is_some() =>
+            {
+                let Some(manager) = depot.get_typed::<App>().ok().and_then(|app| app.plugins())
+                else {
+                    refusal(res, StatusCode::SERVICE_UNAVAILABLE, "plugin_unavailable");
+                    return;
+                };
+                let harness = hagency_plugin::HarnessPluginRef {
+                    plugin_id: identity.plugin_id.clone(),
+                    harness_id: write
+                        .harness_id
+                        .clone()
+                        .unwrap_or_else(|| identity.harness_id.clone()),
+                    package_sha256: identity.package_sha256.clone(),
+                    settings_sha256: identity.settings_sha256.clone(),
+                };
+                let values = write.harness_template_values.clone().unwrap_or_default();
+                match manager.resolve_harness_template(&harness, &values) {
+                    Ok(template) => Some(template),
+                    Err(error) => {
+                        plugin_failure(res, error);
+                        return;
+                    }
+                }
+            }
+            Some(_) => None,
+            None => {
+                if write.harness_id.is_some() || write.harness_template_values.is_some() {
+                    refusal(res, StatusCode::CONFLICT, "plugin_configuration_required");
+                    return;
+                }
+                None
+            }
+        };
+        Some(serde_json::json!({
+            "name": write.name,
+            "role": write.role,
+            "enabled": write.enabled,
+            "harnessTemplate": template,
+        }))
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

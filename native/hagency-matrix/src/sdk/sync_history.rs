@@ -232,7 +232,7 @@ impl Record {
                             .acknowledgements
                             .len()
                             .checked_add(receipt.filtered)
-                            .is_none_or(|n| n > crate::event_batch::MAX_TIMELINE)
+                            .is_none_or(|n| n > crate::event_batch::MAX_TOTAL_TIMELINE)
                     {
                         return Err(Error::Storage);
                     }

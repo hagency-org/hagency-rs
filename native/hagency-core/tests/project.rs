@@ -1,4 +1,4 @@
-use hagency_core::project::{AgentDefinition, public_resource_id};
+use hagency_core::project::{AgentDefinition, Resource, RuntimePluginIdentity, public_resource_id};
 use serde_json::Value;
 
 #[test]
@@ -35,4 +35,37 @@ fn project_identity_vectors_match_javascript() {
             "{vector}"
         );
     }
+}
+
+#[test]
+fn runtime_plugin_identity_round_trips_and_rejects_stale_digest_shape() {
+    let mut resource: Resource = serde_json::from_value(serde_json::json!({
+        "presetId":"plugin_preset",
+        "seatId":"plugin_seat",
+        "framework":"custom",
+        "model":"model",
+        "provider":"provider",
+        "reasoning":null,
+        "runtimePlugin":{"pluginId":"example.plugin","adapterId":"adapter","packageSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","settingsSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+        "ceiling":null
+    })).unwrap();
+    resource.validate().unwrap();
+    assert_eq!(
+        resource.runtime_plugin.as_ref().unwrap().adapter_id,
+        "adapter"
+    );
+    resource.roles = vec!["review".into()];
+    resource.ceiling = serde_json::from_value(serde_json::json!({
+        "tokens": 100,
+        "period": "monthly"
+    }))
+    .unwrap();
+    resource.validate().unwrap();
+    assert!(resource.provisionable());
+    assert!(resource.qualifies("review"));
+    let stale = RuntimePluginIdentity {
+        package_sha256: "A".repeat(64),
+        ..resource.runtime_plugin.take().unwrap()
+    };
+    assert!(stale.validate().is_err());
 }

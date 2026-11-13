@@ -181,14 +181,15 @@ fn native_activity_notice_first_send_then_edit_revision() {
     let cap = f.working(3004);
     let dispatch = cap.dispatch_id.clone();
 
-    // First observation: the started body, verbatim TS, revision 1.
+    // First observation: the started body in the default language (English),
+    // revision 1.
     f.observe(&cap, AttemptPhase::Initialized, 3005);
     let rows = f.activity_rows();
     assert_eq!(rows.len(), 1, "one notice for the first observation");
     assert_eq!(rows[0].0, format!("activity:{dispatch}:1"));
     assert_eq!(
         rows[0].1,
-        "⏳ 已开始处理，等待运行器的下一步事件\n已运行 0 秒 · 工具调用 0 次，已返回 0 次"
+        "⏳ Started; waiting for the runner's next event\nRunning for 0 s · 0 tool calls, 0 returned"
     );
     assert_eq!(rows[0].2, "pending");
 
@@ -225,7 +226,7 @@ fn native_activity_notice_first_send_then_edit_revision() {
     );
     assert_eq!(
         rows[1].1,
-        "⏳ 正在运行命令\n已运行 4 秒 · 工具调用 1 次，已返回 0 次"
+        "⏳ Now running a command\nRunning for 4 s · 1 tool calls, 0 returned"
     );
 
     // The terminal observation: revision 3 (still anchored), and nothing
@@ -244,7 +245,7 @@ fn native_activity_notice_first_send_then_edit_revision() {
     assert_eq!(rows.len(), 3);
     assert_eq!(
         rows[2].1,
-        "✅ 本轮处理已结束\n已运行 5 秒 · 工具调用 1 次，已返回 0 次"
+        "✅ This turn is finished\nRunning for 5 s · 1 tool calls, 0 returned"
     );
     // The anchor COALESCED onto the first delivered event, not the second.
     assert_eq!(
@@ -264,9 +265,11 @@ fn native_activity_notice_first_send_then_edit_revision() {
 
 /// Supersede only UNCLAIMED projections (store.ts:2777-2780): a pending
 /// revision is failed away when its successor queues; a claimed one stays.
+/// Worded in `zh`, which keeps the retained product's text verbatim.
 #[test]
 fn native_activity_supersede_touches_only_pending_rows() {
     let mut f = Fixture::new();
+    f.db.set_notice_language(hagency_core::notice::NoticeLanguage::Zh);
     f.admit("$request", 3000);
     let cap = f.working(3004);
     let dispatch = cap.dispatch_id.clone();
@@ -306,6 +309,45 @@ fn native_activity_supersede_touches_only_pending_rows() {
         rows[2].1,
         "⏳ 已收到审批决定，继续处理\n已运行 7 秒 · 工具调用 0 次，已返回 0 次"
     );
+}
+
+/// The operator's language words the notice; the language only changes the
+/// words, never the revision, routing or anchor.
+#[test]
+fn native_activity_notice_is_worded_in_the_configured_language() {
+    let mut f = Fixture::new();
+    f.db.set_notice_language(hagency_core::notice::NoticeLanguage::Id);
+    f.admit("$request", 3000);
+    let cap = f.working(3004);
+    let dispatch = cap.dispatch_id.clone();
+    f.observe(&cap, AttemptPhase::Initialized, 3005);
+    f.db.record_activity_event(
+        &dispatch,
+        &hagency_store::ActivityEvent::ToolStart {
+            kind: "files".into(),
+            event_id: "tool_1".into(),
+        },
+        5005,
+    )
+    .unwrap()
+    .unwrap();
+    let rows = f.activity_rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, format!("activity:{dispatch}:1"));
+    assert_eq!(
+        rows[0].1,
+        "⏳ Mulai diproses; menunggu langkah runner berikutnya\nBerjalan 0 detik · 0 panggilan tool, 0 selesai"
+    );
+    assert_eq!(
+        rows[1].1,
+        "⏳ Sedang membaca atau mengubah file\nBerjalan 2 detik · 1 panggilan tool, 0 selesai"
+    );
+    for (_, body, _) in &rows {
+        assert!(
+            !body.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "{body}"
+        );
+    }
 }
 
 fn params_json(value: &Value) -> String {

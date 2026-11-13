@@ -9,10 +9,21 @@
 //! refuse on caps either; they refuse only on malformed input, missing rows,
 //! or the two delete guards TS defined.
 use super::*;
+use hagency_plugin::{HARNESS_TEMPLATE_SCHEMA, HarnessTemplateDocument, harness_template_digest};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentDefinitionInput {
+    pub name: Option<String>,
+    pub role: Option<String>,
+    pub enabled: Option<bool>,
+    /// `None` preserves an existing override; a supplied document replaces it.
+    #[serde(default)]
+    pub harness_template: Option<HarnessTemplateDocument>,
+}
 /// TS lib/engagement-store.js:37-38.
 fn valid_room_id(room: &str) -> bool {
     let Some((local, server)) = room.split_once(':') else {
@@ -48,6 +59,44 @@ fn valid_agent_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
+}
+fn validate_harness_template(
+    resource: &Resource,
+    value: &HarnessTemplateDocument,
+) -> Result<HarnessTemplateDocument, Error> {
+    if value.schema != HARNESS_TEMPLATE_SCHEMA {
+        return Err(hagency_core::InvalidInput("invalid harness template").into());
+    }
+    let Some(identity) = resource.harness_plugin.as_ref() else {
+        return Err(Error::Unqualified);
+    };
+    if value.plugin_id != identity.plugin_id
+        || value.package_sha256 != identity.package_sha256
+        || value.settings_sha256 != identity.settings_sha256
+    {
+        return Err(Error::Conflict);
+    }
+    hagency_core::project::identifier(&value.harness_id, 128)?;
+    for digest in [
+        &value.package_sha256,
+        &value.settings_sha256,
+        &value.template_sha256,
+    ] {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(hagency_core::InvalidInput("invalid harness template digest").into());
+        }
+    }
+    if serde_json::to_vec(value)?.len() > 1024 * 1024 {
+        return Err(Error::Capacity);
+    }
+    if harness_template_digest(value)? != value.template_sha256 {
+        return Err(Error::Conflict);
+    }
+    Ok(value.clone())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +151,8 @@ pub struct AgentDefinition {
     pub role: String,
     pub enabled: bool,
     pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_template: Option<HarnessTemplateDocument>,
 }
 
 /// The TS routing decision (lib/engagement-store.js:178-232), ported 1:1.
@@ -410,15 +461,11 @@ impl DomainRepository {
         Ok(())
     }
 
-    /// TS qualifies (backend-v2.js:1760-1763): provisionable framework, a
-    /// known role, and the resource itself qualifying at the role's default
-    /// tier with a ceiling. Role PUBLICATION is deliberately not consulted —
-    /// TS's resourcesForRole does not either.
+    /// A definition requires a published, provisionable resource with a ceiling and
+    /// a role the resource has qualified. Built-in resources derive that role set from
+    /// the embedded model policy; plugin resources use their plugin qualification.
     fn definition_qualifies(resource: &Resource, role: &str) -> bool {
-        resource.provisionable()
-            && qualification::roles().any(|r| r == role)
-            && resource.ceiling.as_ref().and_then(|c| c.tokens).is_some()
-            && qualification::qualifies(&resource.profile(), role, None)
+        resource.qualifies(role)
     }
 
     /// TS resourceAgentDefinitions.edit, ported with its exact rules and
@@ -427,7 +474,7 @@ impl DomainRepository {
         &mut self,
         resource_id: &str,
         definition_id: Option<&str>,
-        input: Option<&Value>,
+        input: Option<&AgentDefinitionInput>,
         now: u64,
     ) -> Result<Option<AgentDefinition>, Error> {
         let tx = self
@@ -436,7 +483,7 @@ impl DomainRepository {
         let resource = read_resource(&tx, resource_id)?;
         let previous: Vec<AgentDefinition> = {
             let mut query = tx.prepare(
-                "SELECT id,resource_id,name,role,enabled,created_at FROM agent_definitions \
+                "SELECT id,resource_id,name,role,enabled,created_at,harness_template FROM agent_definitions \
                  WHERE resource_id=?1 ORDER BY created_at,id",
             )?;
             query
@@ -448,6 +495,17 @@ impl DomainRepository {
                         role: r.get(3)?,
                         enabled: r.get::<_, i64>(4)? == 1,
                         created_at: u64::try_from(r.get::<_, i64>(5)?).unwrap_or(0),
+                        harness_template: r
+                            .get::<_, Option<String>>(6)?
+                            .map(|value| serde_json::from_str(&value))
+                            .transpose()
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    6,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
                     })
                 })?
                 .collect::<Result<_, _>>()?
@@ -481,17 +539,19 @@ impl DomainRepository {
             Some(input) => {
                 let old = old.cloned();
                 let name = input
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| old.as_ref().map(|o| o.name.clone()).unwrap_or_default());
-                let name = name.trim().to_owned();
+                    .name
+                    .clone()
+                    .or_else(|| old.as_ref().map(|o| o.name.clone()))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
                 let role = input
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| old.as_ref().map(|o| o.role.clone()).unwrap_or_default());
-                let role = role.trim().to_owned();
+                    .role
+                    .clone()
+                    .or_else(|| old.as_ref().map(|o| o.role.clone()))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
                 if !valid_agent_name(&name) {
                     return Err(hagency_core::InvalidInput(
                         "Agent name must start with a lowercase letter and contain only lowercase letters, numbers, underscores or hyphens (64 characters maximum)",
@@ -504,9 +564,15 @@ impl DomainRepository {
                 {
                     return Err(Error::Conflict);
                 }
+                let template = match input.harness_template.as_ref() {
+                    Some(value) => Some(validate_harness_template(&resource, value)?),
+                    None => old
+                        .as_ref()
+                        .and_then(|definition| definition.harness_template.clone()),
+                };
                 if let Some(old) = &old
                     && in_use(&tx, &old.name)?
-                    && (name != old.name || role != old.role)
+                    && (name != old.name || role != old.role || template != old.harness_template)
                 {
                     return Err(Error::Conflict);
                 }
@@ -519,13 +585,10 @@ impl DomainRepository {
                     )
                     .into());
                 }
-                let enabled = match input.get("enabled") {
-                    None => old.as_ref().map(|o| o.enabled).unwrap_or(true),
-                    Some(Value::Bool(v)) => *v,
-                    Some(_) => {
-                        return Err(hagency_core::InvalidInput("enabled must be a boolean").into());
-                    }
-                };
+                let enabled = input
+                    .enabled
+                    .or_else(|| old.as_ref().map(|o| o.enabled))
+                    .unwrap_or(true);
                 let id = match &old {
                     Some(old) => old.id.clone(),
                     None => format!("rad_{}", random_hex()?),
@@ -537,23 +600,30 @@ impl DomainRepository {
                     role,
                     enabled,
                     created_at: old.as_ref().map(|o| o.created_at).unwrap_or(now),
+                    harness_template: template,
                 };
+                let template = definition
+                    .harness_template
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
                 if old.is_some() {
                     tx.execute(
-                        "UPDATE agent_definitions SET name=?2,role=?3,enabled=?4 WHERE id=?1",
+                        "UPDATE agent_definitions SET name=?2,role=?3,enabled=?4,harness_template=?5 WHERE id=?1",
                         params![
                             definition.id,
                             definition.name,
                             definition.role,
-                            definition.enabled
+                            definition.enabled,
+                            template,
                         ],
                     )?;
                 } else {
                     tx.execute(
-                        "INSERT INTO agent_definitions(id,resource_id,name,role,enabled,created_at) \
-                         VALUES(?1,?2,?3,?4,?5,?6)",
+                        "INSERT INTO agent_definitions(id,resource_id,name,role,enabled,created_at,harness_template) \
+                         VALUES(?1,?2,?3,?4,?5,?6,?7)",
                         params![definition.id, definition.resource_id, definition.name,
-                            definition.role, definition.enabled, definition.created_at],
+                            definition.role, definition.enabled, definition.created_at, template],
                     )?;
                 }
                 Some(definition)
@@ -568,7 +638,7 @@ impl DomainRepository {
     /// reserved = a live pending/reserved one holds it).
     pub fn agent_definitions(&self, resource_id: &str) -> Result<Vec<Value>, Error> {
         let mut query = self.db.prepare(
-            "SELECT id,resource_id,name,role,enabled,created_at FROM agent_definitions \
+            "SELECT id,resource_id,name,role,enabled,created_at,harness_template FROM agent_definitions \
              WHERE resource_id=?1 ORDER BY created_at,id",
         )?;
         let rows = query
@@ -580,6 +650,17 @@ impl DomainRepository {
                     role: r.get(3)?,
                     enabled: r.get::<_, i64>(4)? == 1,
                     created_at: u64::try_from(r.get::<_, i64>(5)?).unwrap_or(0),
+                    harness_template: r
+                        .get::<_, Option<String>>(6)?
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -604,7 +685,7 @@ impl DomainRepository {
                 };
                 Ok(json!({"id":d.id,"name":d.name,"role":d.role,
                     "enabled":d.enabled,"createdAt":d.created_at,"status":status,
-                    "activeEngagements":active}))
+                    "activeEngagements":active,"harnessTemplate":d.harness_template}))
             })
             .collect()
     }

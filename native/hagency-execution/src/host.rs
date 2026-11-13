@@ -143,6 +143,7 @@ pub struct Host {
     pub(crate) approvals: Option<crate::ApprovalHost>,
     executable: PathBuf,
     environment: BTreeMap<OsString, OsString>,
+    plugin_service: Option<hagency_plugin::PluginService>,
     workspaces: Workspaces,
     managed_account: Option<hagency_store::ManagedAccount>,
     /// The provider-owned local binding: the user's Codex or Claude Code
@@ -235,6 +236,7 @@ impl Host {
             approvals: None,
             executable,
             environment,
+            plugin_service: None,
             workspaces,
             managed_account: None,
             local_codex: None,
@@ -257,6 +259,24 @@ impl Host {
             panic_after_workspace: false,
             guardian_prepare_stall: false,
         })
+    }
+    /// Enable qualified runtime and harness plugin dispatch for this host.
+    pub fn with_plugin_service(
+        mut self,
+        service: hagency_plugin::PluginService,
+    ) -> Result<Self, super::Failure> {
+        if self.plugin_service.is_some() {
+            return Err(super::Failure::Admission);
+        }
+        self.plugin_service = Some(service);
+        Ok(self)
+    }
+
+    pub(crate) fn plugin_service(&self) -> Option<hagency_plugin::PluginService> {
+        self.plugin_service.clone()
+    }
+    pub(crate) fn plugin_enabled(&self) -> bool {
+        self.plugin_service.is_some()
     }
     /// Consume the original registry binding. Managed scope cannot fall through
     /// to the fixed development HOME, and another account cannot replace it.
@@ -496,13 +516,12 @@ impl Host {
         limits: Limits,
         task_context: Option<&Arc<hagency_store::task_context::RetainedTaskContext>>,
     ) -> Result<Prepared, super::Failure> {
-        // ADR-142, ADR-192: a dispatch naming the other coding agent than this
-        // host's runner is refused by name before any workspace is resolved,
-        // custody-checked or process spawned. Hoisted above the resource slice
-        // and the workspace get/check so "no process and no workspace work" is
-        // literal, and distinct from the generic Admission refusal below.
+        // Built-in runner mismatches are refused by name before workspace work.
         let framework = scope.resource().framework.as_str();
-        if framework != self.runner.framework() && native_framework(framework) {
+        if scope.resource().runtime_plugin.is_none()
+            && framework != self.runner.framework()
+            && native_framework(framework)
+        {
             return Err(super::Failure::UnsupportedRunner {
                 framework: framework.to_owned(),
             });
@@ -559,6 +578,9 @@ impl Host {
         // Directory custody still comes from the retained handle checked above;
         // the projection refuses device namespaces and ambiguous aliases.
         let path = std::path::PathBuf::from(root.approval_path()?);
+        if scope.resource().runtime_plugin.is_some() {
+            return self.prepare_plugin(scope, capability, limits, path, root);
+        }
         if let Some(local) = &self.local_codex {
             local.separate_from(root.path())?;
         }
@@ -670,6 +692,196 @@ impl Host {
                 input,
                 late_helper,
             },
+        })
+    }
+    fn effective_harness_template(
+        manager: &hagency_plugin::PluginService,
+        harness: &hagency_plugin::HarnessPluginRef,
+        selected: Option<&hagency_plugin::HarnessTemplateDocument>,
+    ) -> Result<hagency_plugin::HarnessTemplateDocument, super::Failure> {
+        if let Some(template) = selected {
+            let validated = manager
+                .validate_harness_template(template)
+                .map_err(|_| super::Failure::Admission)?;
+            if validated != harness.clone() {
+                return Err(super::Failure::Admission);
+            }
+            return Ok(template.clone());
+        }
+        manager
+            .resolve_harness_template(harness, &std::collections::BTreeMap::new())
+            .map_err(|_| super::Failure::Admission)
+    }
+
+    /// The scoped task helper a dispatch's host tools run on (ADR-193
+    /// decision 5), shared by every runtime the host relays tools for: the
+    /// same tool set and the same capability environment as Octos. The helper
+    /// is Hagency's own child, so the capability never reaches the runtime.
+    /// Coordination tools are excluded: they need owner approval, which is
+    /// not routed for relayed runtimes.
+    fn host_task_tools(
+        &self,
+        scope: &OwnedDispatchScope,
+        capability: &RunnerCapability,
+    ) -> Result<
+        (
+            hagency_runtime::octos::task_tools::TaskTools,
+            crate::octos_tools::Spec,
+        ),
+        super::Failure,
+    > {
+        let (executable, address) = self.task_helper.as_ref().ok_or(super::Failure::Admission)?;
+        let mut task_tools = hagency_runtime::octos::task_tools::TaskTools::new(
+            executable.clone(),
+            scope.task().id.clone(),
+        )
+        .map_err(|_| super::Failure::Admission)?;
+        let encoded = serde_json::to_string(capability).map_err(|_| super::Failure::Admission)?;
+        if encoded.len() > 4096 {
+            return Err(super::Failure::Admission);
+        }
+        let mut helper_environment = BTreeMap::from([
+            (
+                OsString::from(TASK_MCP_ENV[0]),
+                OsString::from(address.to_string()),
+            ),
+            (OsString::from(TASK_MCP_ENV[1]), OsString::from(encoded)),
+            (
+                OsString::from(TASK_MCP_ENV[2]),
+                OsString::from(scope.task().id.clone()),
+            ),
+        ]);
+        if self.file_tools {
+            helper_environment.insert(TaskMcp::FILE_TOOLS_ENV.into(), "1".into());
+            task_tools = task_tools.with_file_tools();
+        }
+        if self.receive_tools {
+            helper_environment.insert(TaskMcp::RECEIVE_TOOLS_ENV.into(), "1".into());
+            task_tools = task_tools.with_receive_tools();
+        }
+        let spec = crate::octos_tools::Spec {
+            executable: executable.clone(),
+            environment: helper_environment,
+            tools: task_tools.tools(),
+        };
+        Ok((task_tools, spec))
+    }
+    fn prepare_plugin(
+        &self,
+        scope: &OwnedDispatchScope,
+        capability: &RunnerCapability,
+        limits: Limits,
+        path: PathBuf,
+        root: Arc<Root>,
+    ) -> Result<Prepared, super::Failure> {
+        if scope.requires_managed_account() || self.plugin_service.is_none() {
+            return Err(super::Failure::Admission);
+        }
+        let manager = self
+            .plugin_service
+            .as_ref()
+            .ok_or(super::Failure::Admission)?;
+        let identity = scope
+            .resource()
+            .runtime_plugin
+            .as_ref()
+            .ok_or(super::Failure::Admission)?;
+        let runtime = hagency_plugin::RuntimePluginRef {
+            plugin_id: identity.plugin_id.clone(),
+            adapter_id: identity.adapter_id.clone(),
+            package_sha256: identity.package_sha256.clone(),
+            settings_sha256: identity.settings_sha256.clone(),
+        };
+        let runtime_launch = manager
+            .runtime_launch(&runtime, &scope.resource().framework)
+            .map_err(|_| super::Failure::Admission)?;
+        let prompt = hagency_core::canonical::encode_payload(&scope.input().payload)
+            .map_err(|_| super::Failure::Admission)?;
+        if prompt.is_empty() || prompt.len() > hagency_plugin::MAX_FRAME_BYTES {
+            return Err(super::Failure::Admission);
+        }
+        let mut environment = std::collections::BTreeMap::new();
+        environment.extend(
+            manager
+                .runtime_environment(&runtime_launch, path.clone())
+                .map_err(|_| super::Failure::Admission)?
+                .build(),
+        );
+        let harness_identity = scope.resource().harness_plugin.clone();
+        if harness_identity.is_none() && scope.harness_template().is_some() {
+            return Err(super::Failure::Admission);
+        }
+        let (harness_template, harness_launch, harness_environment, harness_lease) =
+            if let Some(identity) = harness_identity.as_ref() {
+                let harness = hagency_plugin::HarnessPluginRef {
+                    plugin_id: identity.plugin_id.clone(),
+                    harness_id: identity.harness_id.clone(),
+                    package_sha256: identity.package_sha256.clone(),
+                    settings_sha256: identity.settings_sha256.clone(),
+                };
+                let template =
+                    Self::effective_harness_template(manager, &harness, scope.harness_template())?;
+                let harness_launch = manager
+                    .harness_launch(&harness)
+                    .map_err(|_| super::Failure::Admission)?;
+                let harness_environment = manager
+                    .harness_environment(&harness_launch, path.clone())
+                    .map_err(|_| super::Failure::Admission)?
+                    .build();
+                let lease = manager
+                    .claim_harness(&harness)
+                    .map_err(|_| super::Failure::Admission)?;
+                (
+                    Some(template),
+                    Some(harness_launch),
+                    Some(harness_environment),
+                    Some(lease),
+                )
+            } else {
+                (None, None, None, None)
+            };
+        // The same host tools Octos gets, when this host serves them. They are
+        // started only if the runtime advertises the tool capability.
+        let tools = if self.task_helper.is_some() {
+            Some(self.host_task_tools(scope, capability)?.1)
+        } else {
+            None
+        };
+        let runtime_lease = manager
+            .claim_runtime_launch(&runtime_launch)
+            .map_err(|_| super::Failure::Admission)?;
+        let launch = Launch {
+            executable: runtime_launch.executable.clone(),
+            arguments: runtime_launch.arguments.clone(),
+            directory: path,
+            environment: environment.clone(),
+            require_crash_containment: false,
+        };
+        launch.validate().map_err(|_| super::Failure::Admission)?;
+        Ok(Prepared {
+            launch,
+            io_limits: transport::Limits {
+                write_timeout_ms: limits.response_ms,
+                event_wait_ms: limits.operation_ms,
+                lifetime_ms: limits.operation_ms,
+            },
+            root,
+            account: None,
+            runner: PreparedRunner::Plugin(Box::new(PreparedPlugin {
+                runtime: runtime_launch,
+                environment,
+                prompt,
+                dispatch_id: capability.dispatch_id.clone(),
+                turn_id: format!("turn-{}", capability.fence),
+                allocation_id: scope.allocation_id().to_owned(),
+                agent_name: scope.agent_name().to_owned(),
+                harness_template,
+                runtime_lease,
+                harness_launch,
+                harness_environment,
+                harness_lease,
+                tools,
+            })),
         })
     }
     /// ADR-192: the Claude half of `prepare_bound`, after the shared workspace
@@ -849,44 +1061,11 @@ impl Host {
         // ADR-193 decision 5: the task tools are Hagency's host tools, served
         // by the same scoped helper as for Codex and Claude Code. The helper
         // is Hagency's own child: the capability never reaches Octos.
-        let (executable, address) = self.task_helper.as_ref().ok_or(super::Failure::Admission)?;
-        let mut task_tools = hagency_runtime::octos::task_tools::TaskTools::new(
-            executable.clone(),
-            scope.task().id.clone(),
-        )
-        .map_err(|_| super::Failure::Admission)?;
-        let encoded = serde_json::to_string(capability).map_err(|_| super::Failure::Admission)?;
-        if encoded.len() > 4096 {
-            return Err(super::Failure::Admission);
-        }
-        let mut helper_environment = BTreeMap::from([
-            (
-                OsString::from(TASK_MCP_ENV[0]),
-                OsString::from(address.to_string()),
-            ),
-            (OsString::from(TASK_MCP_ENV[1]), OsString::from(encoded)),
-            (
-                OsString::from(TASK_MCP_ENV[2]),
-                OsString::from(scope.task().id.clone()),
-            ),
-        ]);
-        if self.file_tools {
-            helper_environment.insert(TaskMcp::FILE_TOOLS_ENV.into(), "1".into());
-            task_tools = task_tools.with_file_tools();
-        }
-        if self.receive_tools {
-            helper_environment.insert(TaskMcp::RECEIVE_TOOLS_ENV.into(), "1".into());
-            task_tools = task_tools.with_receive_tools();
-        }
+        let (task_tools, tools) = self.host_task_tools(scope, capability)?;
         let prompt = task_tools.prompt(&prompt);
         if prompt.len() > hagency_runtime::octos::MAX_TEXT_BYTES {
             return Err(super::Failure::Admission);
         }
-        let tools = crate::octos_tools::Spec {
-            executable: executable.clone(),
-            environment: helper_environment,
-            tools: task_tools.tools(),
-        };
         let mut environment = self.environment.clone();
         environment.retain(|key, _| !provider_key(key));
         // First use would otherwise download a 334 MB embedding model.
@@ -949,25 +1128,30 @@ impl Host {
             return Err(super::Failure::Admission);
         }
         let resource = scope.resource();
-        // ADR-192: the agent's own runner, by name; then its provider.
-        if resource.framework != self.runner.framework() && native_framework(&resource.framework) {
-            return Err(super::Failure::UnsupportedRunner {
-                framework: resource.framework.clone(),
-            });
-        }
-        // An Octos profile names its own provider (ADR-193 decision 7).
-        let provider = match self.runner {
-            Runner::Codex => Some("openai"),
-            Runner::Claude => Some("anthropic"),
-            Runner::Octos => None,
-        };
-        if resource.framework != self.runner.framework()
-            || provider
-                .is_some_and(|provider| resource.provider.as_deref().is_some_and(|v| v != provider))
-            || (self.runner != Runner::Codex && resource.reasoning.is_some())
-            || (self.runner == Runner::Octos && resource.octos_profile.is_none())
-        {
-            return Err(super::Failure::Admission);
+        if resource.runtime_plugin.is_none() {
+            // Native runner/provider checks do not apply to plugin resources;
+            // qualified identities are checked by prepare_plugin.
+            if resource.framework != self.runner.framework()
+                && native_framework(&resource.framework)
+            {
+                return Err(super::Failure::UnsupportedRunner {
+                    framework: resource.framework.clone(),
+                });
+            }
+            let provider = match self.runner {
+                Runner::Codex => Some("openai"),
+                Runner::Claude => Some("anthropic"),
+                Runner::Octos => None,
+            };
+            if resource.framework != self.runner.framework()
+                || provider.is_some_and(|provider| {
+                    resource.provider.as_deref().is_some_and(|v| v != provider)
+                })
+                || (self.runner != Runner::Codex && resource.reasoning.is_some())
+                || (self.runner == Runner::Octos && resource.octos_profile.is_none())
+            {
+                return Err(super::Failure::Admission);
+            }
         }
         home.check_provision_scope(scope)
             .map_err(|_| super::Failure::Admission)?;
@@ -998,9 +1182,11 @@ impl Host {
             return Err(super::Failure::Admission);
         }
         let resource = scope.resource();
-        // A warm child is an app server; Claude and Octos agents start their
-        // session on demand until a ready-ahead session lands (ADR-192, ADR-193).
-        if matches!(resource.framework.as_str(), "claude" | "octos") || self.runner != Runner::Codex
+        // A warm child is an app server; plugin runtimes still need a distinct
+        // owned `hagency.runtime/v1` session adapter.
+        if resource.runtime_plugin.is_some()
+            || matches!(resource.framework.as_str(), "claude" | "octos")
+            || self.runner != Runner::Codex
         {
             return Err(super::Failure::UnsupportedRunner {
                 framework: resource.framework.clone(),
@@ -1092,6 +1278,24 @@ pub(crate) struct Prepared {
     pub(crate) account: Option<hagency_store::ManagedLaunch>,
     pub(crate) runner: PreparedRunner,
 }
+/// A qualified plugin runtime launch, with its optional harness and the host
+/// task tools it may relay (ADR-195, decision 0002).
+pub(crate) struct PreparedPlugin {
+    pub(crate) runtime: hagency_plugin::RuntimeLaunch,
+    pub(crate) environment: BTreeMap<OsString, OsString>,
+    pub(crate) prompt: String,
+    pub(crate) dispatch_id: String,
+    pub(crate) turn_id: String,
+    pub(crate) allocation_id: String,
+    pub(crate) agent_name: String,
+    pub(crate) harness_template: Option<hagency_plugin::HarnessTemplateDocument>,
+    pub(crate) runtime_lease: hagency_plugin::PluginLease,
+    pub(crate) harness_launch: Option<hagency_plugin::HarnessLaunch>,
+    pub(crate) harness_environment: Option<BTreeMap<OsString, OsString>>,
+    pub(crate) harness_lease: Option<hagency_plugin::PluginLease>,
+    /// The host task tools this dispatch may relay (same as Octos).
+    pub(crate) tools: Option<crate::octos_tools::Spec>,
+}
 /// The runner-specific half of a prepared launch (ADR-192).
 pub(crate) enum PreparedRunner {
     Codex {
@@ -1099,6 +1303,8 @@ pub(crate) enum PreparedRunner {
         input: String,
         late_helper: Option<TaskMcp>,
     },
+    /// Boxed: a plugin launch carries far more than the other runners.
+    Plugin(Box<PreparedPlugin>),
     /// The prompt is the dispatch payload. The scoped helper is bound after
     /// initialize (ADR-158), through the retained context when there is one.
     Claude {
@@ -1310,5 +1516,58 @@ mod tests {
                 Err(super::super::Failure::Admission)
             ));
         }
+    }
+    #[test]
+    fn native_plugin_default_template_is_resolved_without_agent_override() {
+        let package = tempfile::tempdir().unwrap();
+        let bin = package.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            package.path().join("hagency-plugin.toml"),
+            r#"
+schema = "hagency.plugin/v1"
+id = "example.plugin"
+name = "Example"
+version = "1.0.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[harnesses]]
+id = "default"
+command = ["bin/harness"]
+protocol = "hagency.harness/v1"
+
+[[harnesses.configuration]]
+id = "target"
+label = "Target"
+description = "Target"
+kind = "text"
+default = "agent"
+"#,
+        )
+        .unwrap();
+        std::fs::write(bin.join("harness"), b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            bin.join("harness"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let state = tempfile::tempdir().unwrap();
+        let manager = hagency_plugin::PluginService::open(state.path()).unwrap();
+        let record = manager.link(package.path()).unwrap();
+        manager.enable(&record.id).unwrap();
+        let harness = hagency_plugin::HarnessPluginRef {
+            plugin_id: record.id,
+            harness_id: "default".into(),
+            package_sha256: record.package_sha256,
+            settings_sha256: record.settings_sha256,
+        };
+        let document = Host::effective_harness_template(&manager, &harness, None).unwrap();
+        assert_eq!(
+            document.values.get("target"),
+            Some(&serde_json::json!("agent"))
+        );
     }
 }

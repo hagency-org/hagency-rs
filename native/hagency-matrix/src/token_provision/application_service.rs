@@ -146,51 +146,71 @@ impl TokenAccountProvision {
             initial
         } else {
             if records.possible {
-                return Err(Error::OutcomeUnknown);
-            }
-            timeout_at(deadline, guard.sender(cancel))
-                .await
-                .map_err(|_| Error::OutcomeUnknown)??;
-            self.current(cancel, deadline).await?;
-            write(custody, "possible", json!(null)).await?;
-            timeout_at(deadline, guard.sender(cancel))
-                .await
-                .map_err(|_| Error::OutcomeUnknown)??;
-            let body=serde_json::to_string(&json!({"type":"m.login.application_service",
-                "username":self.context.user.split_once(':').ok_or(Error::Config)?.0.trim_start_matches('@'),"inhibit_login":true}))
-                .map_err(|_|Error::Config)?;
-            let mut response = self
-                .post(&http, super::REGISTER, body, cancel, deadline)
-                .await?;
-            // Palpo's /register only knows file-backed App Service
-            // registrations, so one installed through its admin API is refused
-            // as M_MISSING_TOKEN although the same token authenticates every
-            // other App Service request. There, acting as the namespace user is
-            // what creates it (TS lib/matrix-direct-chat.js logs straight in):
-            // the masquerade whoami both creates and proves the identity.
-            if response.status == 401
-                && response
-                    .value
-                    .as_ref()
-                    .and_then(|v| v.get("errcode"))
-                    .and_then(|v| v.as_str())
-                    == Some("M_MISSING_TOKEN")
-            {
+                // The App Service namespace provides an idempotent exact-user
+                // operation, so recovery can establish the identity without
+                // retrying the create request.
+                timeout_at(deadline, guard.sender(cancel))
+                    .await
+                    .map_err(|_| Error::OutcomeUnknown)??;
                 timeout_at(deadline, guard.identity(&self.context.user, true, cancel))
                     .await
                     .map_err(|_| Error::OutcomeUnknown)??;
-                response = SavedResponse {
+                let response = SavedResponse {
                     status: 200,
                     value: Some(json!({"user_id": self.context.user})),
                 };
+                write(
+                    custody,
+                    "initial",
+                    serde_json::to_value(&response).map_err(|_| Error::Storage)?,
+                )
+                .await?;
+                response
+            } else {
+                timeout_at(deadline, guard.sender(cancel))
+                    .await
+                    .map_err(|_| Error::OutcomeUnknown)??;
+                self.current(cancel, deadline).await?;
+                write(custody, "possible", json!(null)).await?;
+                timeout_at(deadline, guard.sender(cancel))
+                    .await
+                    .map_err(|_| Error::OutcomeUnknown)??;
+                let body=serde_json::to_string(&json!({"type":"m.login.application_service",
+                    "username":self.context.user.split_once(':').ok_or(Error::Config)?.0.trim_start_matches('@'),"inhibit_login":true}))
+                    .map_err(|_|Error::Config)?;
+                let mut response = self
+                    .post(&http, super::REGISTER, body, cancel, deadline)
+                    .await?;
+                // Palpo's /register only knows file-backed App Service
+                // registrations, so one installed through its admin API is refused
+                // as M_MISSING_TOKEN although the same token authenticates every
+                // other App Service request. There, acting as the namespace user is
+                // what creates it (TS lib/matrix-direct-chat.js logs straight in):
+                // the masquerade whoami both creates and proves the identity.
+                if response.status == 401
+                    && response
+                        .value
+                        .as_ref()
+                        .and_then(|v| v.get("errcode"))
+                        .and_then(|v| v.as_str())
+                        == Some("M_MISSING_TOKEN")
+                {
+                    timeout_at(deadline, guard.identity(&self.context.user, true, cancel))
+                        .await
+                        .map_err(|_| Error::OutcomeUnknown)??;
+                    response = SavedResponse {
+                        status: 200,
+                        value: Some(json!({"user_id": self.context.user})),
+                    };
+                }
+                write(
+                    custody,
+                    "initial",
+                    serde_json::to_value(&response).map_err(|_| Error::Storage)?,
+                )
+                .await?;
+                response
             }
-            write(
-                custody,
-                "initial",
-                serde_json::to_value(&response).map_err(|_| Error::Storage)?,
-            )
-            .await?;
-            response
         };
         if initial.status != 200 {
             return Err(remote(&initial));
@@ -201,8 +221,9 @@ impl TokenAccountProvision {
                 .get("home_server")
                 .is_some_and(|v| v.as_str() != Some(&self.context.registration.server))
             || [
+                // Palpo's /register returns "device_id" even with
+                // inhibit_login=true; without a credential it grants nothing.
                 "access_token",
-                "device_id",
                 "refresh_token",
                 "expires_in_ms",
             ]

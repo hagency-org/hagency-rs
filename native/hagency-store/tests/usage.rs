@@ -1,6 +1,10 @@
 mod common;
 use common::*;
-use hagency_core::{JSON_SAFE_MAX, tasks::*};
+use hagency_core::{
+    JSON_SAFE_MAX,
+    project::{HarnessPluginIdentity, RuntimePluginIdentity},
+    tasks::*,
+};
 use hagency_metering::{Framework, observation::UsageObservation};
 use hagency_store::*;
 use serde_json::json;
@@ -24,10 +28,51 @@ impl Fixture {
         Self::with_ceiling(framework, 1000)
     }
     fn with_ceiling(framework: Framework, ceiling: u64) -> Self {
+        Self::with_resource_framework(framework, "codex", ceiling)
+    }
+    fn with_resource_framework(
+        framework: Framework,
+        resource_framework: &str,
+        ceiling: u64,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let mut db = DomainRepository::open(&root.path().join("state")).unwrap();
         db.register(&registration()).unwrap();
         let mut pool = resource("usage_pool", "usage_seat", ceiling);
+        pool.framework = resource_framework.into();
+        if resource_framework == "example-plugin" {
+            pool.provider = Some("example-provider".into());
+            pool.reasoning = None;
+            pool.model = "example-plugin".into();
+            pool.roles = vec!["coding".into()];
+            pool.runtime_plugin = Some(RuntimePluginIdentity {
+                plugin_id: "example.runtime".into(),
+                adapter_id: "example-adapter".into(),
+                package_sha256: "a".repeat(64),
+                settings_sha256: "b".repeat(64),
+            });
+            pool.harness_plugin = Some(HarnessPluginIdentity {
+                plugin_id: "example.harness".into(),
+                harness_id: "managed".into(),
+                package_sha256: "a".repeat(64),
+                settings_sha256: "b".repeat(64),
+            });
+            db.put_plugin_runtime_qualification(&PluginRuntimeQualification {
+                plugin_id: "example.runtime".into(),
+                adapter_id: "example-adapter".into(),
+                package_sha256: "a".repeat(64),
+                settings_sha256: "b".repeat(64),
+                framework: "example-plugin".into(),
+                model: "example-plugin".into(),
+                provider: "example-provider".into(),
+                reasoning: None,
+                roles: vec!["coding".into()],
+                evidence_digest: "c".repeat(64),
+                qualified_at: 1,
+                evidence: json!({"passed": true}),
+            })
+            .unwrap();
+        }
         if framework == Framework::Claude {
             pool.framework = "claude".into();
             pool.model = "claude-sonnet-5".into();
@@ -560,6 +605,8 @@ INSERT INTO usage_sources_68 SELECT * FROM usage_sources;
 DROP TABLE usage_sources;
 ALTER TABLE usage_sources_68 RENAME TO usage_sources;
 CREATE INDEX usage_sources_engagement ON usage_sources(engagement_id);
+DROP TABLE plugin_tool_calls; DROP TABLE plugin_invocations; DROP TABLE plugin_runtime_qualifications;
+ALTER TABLE agent_definitions DROP COLUMN harness_template;
 PRAGMA user_version=68;",
     )
     .unwrap();
@@ -602,8 +649,6 @@ PRAGMA user_version=68;",
     assert_eq!(orphans, 0);
     sql.execute("UPDATE usage_sources SET framework='octos'", [])
         .unwrap();
-    assert!(
-        sql.execute("UPDATE usage_sources SET framework='hermes'", [])
-            .is_err()
-    );
+    sql.execute("UPDATE usage_sources SET framework='example-plugin'", [])
+        .unwrap();
 }

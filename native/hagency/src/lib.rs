@@ -11,6 +11,8 @@ pub mod mcp;
 mod operator;
 pub mod operator_cli;
 pub mod ops;
+pub mod plugin_cli;
+mod plugins;
 pub(crate) mod receive_service;
 mod resources;
 mod runner;
@@ -33,6 +35,7 @@ use tokio::sync::Semaphore;
 pub struct App {
     store: Store,
     domain: Option<DomainStore>,
+    plugins: Option<hagency_plugin::PluginService>,
     token_hash: [u8; 32],
     authority: String,
     requests: Arc<Semaphore>,
@@ -71,6 +74,7 @@ impl App {
         Ok(Self {
             store,
             domain: None,
+            plugins: None,
             token_hash: Sha256::digest(token).into(),
             authority: address.to_string(),
             requests: Arc::new(Semaphore::new(8)),
@@ -91,6 +95,13 @@ impl App {
     pub fn with_domain(mut self, domain: DomainStore) -> Self {
         self.domain = Some(domain);
         self
+    }
+    pub fn with_plugins(mut self, plugins: hagency_plugin::PluginService) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+    pub(crate) fn plugins(&self) -> Option<hagency_plugin::PluginService> {
+        self.plugins.clone()
     }
     /// Attach the owning native fleet's shared routing table before serving.
     /// Entries can only be installed by that original Host service.
@@ -213,6 +224,7 @@ impl App {
                     .push(console::operator_router())
                     .push(runtime::router())
                     .push(operator::router())
+                    .push(plugins::router())
                     .push(Router::with_path("custody").post(receive)),
             )
     }

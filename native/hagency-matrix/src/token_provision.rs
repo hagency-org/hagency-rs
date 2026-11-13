@@ -321,6 +321,19 @@ impl TokenAccountProvision {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<ProvisionedTokenAccount, Error> {
+        // A provision interrupted after its App Service register was sent
+        // (custody stops at "possible"/"initial", without "complete") would be
+        // refused by inspection on every pass and never become active. In App
+        // Service mode the exact-user identity and login are idempotent
+        // (deterministic user and device id), so recovery finishes the account
+        // step itself. Password registration stays inspection-only.
+        if self.recovering
+            && self.reattach
+            && self.context.application_service.is_some()
+            && !self.root.join("complete").exists()
+        {
+            self.reattach = false;
+        }
         if self.reattach {
             hagency_store::private::open(&self.root.join("complete"), false)
                 .map_err(|_| Error::Storage)?;
@@ -556,7 +569,27 @@ impl ProvisionedTokenAccount {
             return Err(Error::Config);
         }
         let original = self.scope.as_ref().ok_or(Error::Config)?;
-        let operation = rooms::Operation::new(self, original.clone(), representative)?;
+        let rooms_root = self
+            .root
+            .parent()
+            .ok_or(Error::Config)?
+            .join(format!("agent-rooms-{}", original.effect.id));
+        // No room custody means the account was the only physical write. The
+        // fresh continuation may create rooms; an incomplete room custody
+        // remains on the inspected replay path below.
+        if !rooms_root
+            .join("agent-rooms")
+            .try_exists()
+            .map_err(|_| Error::Storage)?
+        {
+            original
+                .domain
+                .resume_inspected_provision(inspection)
+                .await?;
+            self.reattach = false;
+            return Ok(());
+        }
+        let operation = rooms::Operation::new(self, original.clone(), representative, 1)?;
         let (custody, rooms) = operation.inspect_before_owner_invite().await?;
         let config = self
             .host_config(1, self.key, rooms)?
@@ -702,11 +735,29 @@ impl ProvisionedTokenAccount {
         if !self.reattach {
             return Err(Error::Config);
         }
-        self.create_agent_rooms(representative_token, cancel)
+        self.create_agent_rooms_at_generation(representative_token, generation, cancel)
             .await?;
-        let rooms = self.room_jobs.rooms()?;
+        let mut rooms = self.room_jobs.rooms()?;
         self.room_jobs.check_rooms(&rooms)?;
         let original = self.scope.as_ref().ok_or(Error::Config)?;
+        for room in &mut rooms {
+            if let Some(state) = original
+                .domain
+                .matrix_room_state(original.effect.engagement_id.clone(), room.room_id.clone())
+                .await?
+            {
+                room.generation = if state.available {
+                    state.generation
+                } else if matches!(
+                    room.privacy,
+                    hagency_core::replies::RoomPrivacy::Direct { .. }
+                ) {
+                    state.generation.checked_add(1).ok_or(Error::Capacity)?
+                } else {
+                    state.generation
+                };
+            }
+        }
         let config = self
             .host_config(generation, key, rooms)?
             .with_fresh_account_enrollment(anchors)?;
@@ -739,16 +790,29 @@ impl ProvisionedTokenAccount {
         representative_token: &str,
         cancel: &CancellationToken,
     ) -> Result<(), Error> {
+        self.create_agent_rooms_at_generation(representative_token, 1, cancel)
+            .await
+    }
+    async fn create_agent_rooms_at_generation(
+        &self,
+        representative_token: &str,
+        transport_generation: u64,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
         let original = self.scope.as_ref().ok_or(Error::Config)?;
-        let operation = rooms::Operation::new(self, original.clone(), representative_token)?;
+        let operation = rooms::Operation::new(
+            self,
+            original.clone(),
+            representative_token,
+            transport_generation,
+        )?;
         let result = self
             .room_jobs
             .run(operation, rooms::Phase::Rooms, cancel)
             .await;
         if result.is_ok() {
-            // The custody verified this credential against the server
-            // (whoami + invite accepted); the collector built from this
-            // account may re-use it for kick recovery. No new login.
+            // The custody verified this credential against the server (whoami + invite accepted);
+            // the collector built from this account may re-use it for kick recovery.
             *self
                 .representative_token
                 .lock()
@@ -765,7 +829,7 @@ impl ProvisionedTokenAccount {
         cancel: &CancellationToken,
     ) -> Result<(), Error> {
         let original = self.scope.as_ref().ok_or(Error::Config)?;
-        let operation = rooms::Operation::new(self, original.clone(), representative_token)?;
+        let operation = rooms::Operation::new(self, original.clone(), representative_token, 1)?;
         self.room_jobs
             .run(operation, rooms::Phase::Owner, cancel)
             .await
@@ -870,3 +934,7 @@ async fn write(custody: &Arc<Custody>, name: &'static str, value: Value) -> Resu
         .await
         .map_err(|_| Error::OutcomeUnknown)?
 }
+
+#[cfg(test)]
+#[path = "../tests/token_provision_recovery/mod.rs"]
+mod recovery_tests;

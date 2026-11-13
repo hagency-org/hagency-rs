@@ -23,6 +23,10 @@ fn framework(value: &str) -> Result<Framework, Error> {
         _ => Err(Error::Schema),
     }
 }
+fn valid_framework(value: &str) -> Result<(), Error> {
+    identifier(value, 64)?;
+    Ok(())
+}
 fn source_binding(db: &Connection, source: &UsageSource) -> Result<(String, String), Error> {
     let row: Option<(String, String, String)> = db
         .query_row(
@@ -35,7 +39,7 @@ fn source_binding(db: &Connection, source: &UsageSource) -> Result<(String, Stri
     if digest != source.identity_digest {
         return Err(Error::RunnerAuthority);
     }
-    framework(&runtime)?;
+    valid_framework(&runtime)?;
     Ok((engagement, runtime))
 }
 impl DomainRepository {
@@ -96,7 +100,7 @@ impl DomainRepository {
         }
         let session = execution::session(&tx, &current.input().session_id)?;
         let engagement = read_engagement(&tx, session.engagement_id())?;
-        framework(&current.resource().framework)?;
+        valid_framework(&current.resource().framework)?;
         let global: u64 = tx.query_row("SELECT COUNT(*) FROM usage_sources", [], |r| r.get(0))?;
         let own: u64 = tx.query_row(
             "SELECT COUNT(*) FROM usage_sources WHERE engagement_id=?1",

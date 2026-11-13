@@ -193,11 +193,18 @@ async fn supervise(
     if let (Some(probes), Some(service)) = (&probes, &running.service) {
         probes.attach_runtime(service.routes());
     }
+    // Notices this service queues from here on are worded in the operator's
+    // configured language.
+    domain
+        .set_notice_language(running.notice_language)
+        .await
+        .map_err(|_| Failure::OutcomeUnknown)?;
     stage.set("running");
     run(running, &state, &domain, &registration, &stage, &cancel).await
 }
 
 struct Running {
+    notice_language: hagency_core::notice::NoticeLanguage,
     host: Arc<TokenProvisioningHost>,
     service: Option<Service>,
     owner_notices: Arc<Mutex<BTreeMap<String, mpsc::Sender<hagency_execution::ApprovalRequests>>>>,
@@ -223,6 +230,7 @@ fn build(
             .trim_end_matches('/')
     );
     let runtime = config::load_fleet_runtime(runtime_state, address, &homeserver)?;
+    let notice_language = runtime.notice_language;
     let key: [u8; 32] = private::read_secret(&state.join("matrix.provisioning_key"))
         .map_err(|_| Failure::OutcomeUnknown)?
         .try_into()
@@ -271,6 +279,7 @@ fn build(
         runtime.setup,
     )?;
     Ok(Running {
+        notice_language,
         host,
         service: Some(service),
         owner_notices,
@@ -392,6 +401,7 @@ async fn prepare_owners(
             .await
             .unwrap_or_default(),
     );
+    let mut by_owner: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     for engagement in engagements {
         let Some((owner, room)) = domain
             .engagement_owner_room(engagement.clone())
@@ -400,6 +410,14 @@ async fn prepare_owners(
         else {
             continue;
         };
+        let entry = by_owner
+            .entry(owner)
+            .or_insert_with(|| (room.clone(), Vec::new()));
+        if !entry.1.contains(&engagement) {
+            entry.1.push(engagement);
+        }
+    }
+    for (owner, (room, engagements)) in by_owner {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -436,6 +454,7 @@ async fn prepare_owners(
             &owner,
             &anchor,
             &device,
+            &engagements,
         )?;
         running
             .host
@@ -458,6 +477,7 @@ async fn prepare_owners(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn owner_collector(
     running: &Running,
     state: &Path,
@@ -466,6 +486,7 @@ fn owner_collector(
     owner: &str,
     anchor: &str,
     device: &fleet_identity::OwnerApprovalDevice,
+    engagements: &[String],
 ) -> Result<Arc<ApprovalCollector>, Failure> {
     let refused = || Failure::Config {
         field: "owner approval device",
@@ -518,6 +539,7 @@ fn owner_collector(
             registration_generation: registration.generation,
             bot_mxid: registration.approval_bot_mxid.clone(),
         },
+        engagements.to_vec(),
     )
     .and_then(|approval| {
         approval.with_fresh_account_enrollment(vec![(owner.to_owned(), anchor.to_owned())])

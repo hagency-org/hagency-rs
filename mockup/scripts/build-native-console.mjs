@@ -32,7 +32,7 @@ for (const name of ['components', 'lib', 'package.json', 'jsconfig.json', 'next.
  * redirect(), which a static export cannot honour. The served-binary test
  * (tests/console/rail.rs) parses Rail.jsx and GETs every native href, so a
  * rail page can never go missing from this list again (board #88). */
-const ROUTES = ['server-engagements', 'usage', 'resources', 'alerts', 'engagements', 'accounts', 'agents', 'project-sides', 'approvals', 'tasks', 'project-board', 'task-graphs', 'invites', 'setup'];
+const ROUTES = ['server-engagements', 'usage', 'resources', 'alerts', 'engagements', 'accounts', 'agents', 'project-sides', 'approvals', 'tasks', 'project-board', 'task-graphs', 'invites', 'setup', 'plugins'];
 for (const route of ROUTES) await cp(join(source, 'app', route), join(staged, 'app', route), { recursive: true });
 await rm(join(staged, 'app', 'agents', '[name]'), { recursive: true, force: true });
 /* app/page.jsx IS 我的资源 — the front door the rail's root row marks current. */

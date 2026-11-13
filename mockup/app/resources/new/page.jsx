@@ -15,7 +15,7 @@ import { NativeAccessNotice } from '@/components/NativeUsage';
 import NativeStatusStrip from '@/components/NativeStatusStrip';
 import SearchSelect from '@/components/SearchSelect';
 import { labelFor } from '@/lib/labels';
-import { fetchServerEngagements } from '@/lib/native-api';
+import { fetchPluginManifest, fetchPluginQualifications, fetchPluginSettings, fetchPlugins, fetchServerEngagements } from '@/lib/native-api';
 
 /*
  * ② 配置向导 — four steps, and three of them write a field that already exists.
@@ -37,7 +37,7 @@ const STEPS = ['framework', 'model', 'reasoning', 'budget'];
 // framework — it is the source's — so that step held nothing to decide and
 // opened the flow on a screen whose only control was Next. The native flow
 // starts at the first real choice; the source's framework is stated above it.
-const NATIVE_STEPS = ['model', 'reasoning', 'budget'];
+const NATIVE_STEPS = ['plugin', 'model', 'reasoning', 'budget'];
 
 /** Codex thinking levels, from the real enumeration's `reasoning` values. */
 function reasoningChoices(roleCapacity, framework) {
@@ -95,10 +95,13 @@ const validNativeTokens = (value) => /^[0-9]+$/.test(String(value)) && Number.is
 function nativeDraft(observation, editing) {
   const resource = observation.resource;
   const binding = editing ? observation.resource.engagementResources[0] : null;
-  return { framework: resource.framework, provider: resource.provider, model: resource.model, reasoning: resource.reasoning,
-    tokens: binding?.allocatedTokens ?? '', profileKind: 'preserve', ceilingKind: 'monthly',
+  return {
+    framework: resource.framework, provider: resource.provider, model: resource.model, reasoning: resource.reasoning,
+    runtimePlugin: resource.runtimePlugin, harnessPlugin: resource.harnessPlugin, profileKind: resource.runtimePlugin ? 'plugin' : 'preserve',
+    tokens: binding?.allocatedTokens ?? '', ceilingKind: 'monthly',
     serverEngagementId: binding?.serverEngagementId ?? '', allocationId: binding?.id ?? null,
-    expectedRevision: binding?.revision ?? null, managers: binding?.eligibleManagers.join('\n') ?? '' };
+    expectedRevision: binding?.revision ?? null, managers: binding?.eligibleManagers.join('\n') ?? '',
+  };
 }
 function WizardForm({ native = null }) {
   const t = useT(); const data = useData();
@@ -114,6 +117,8 @@ function WizardForm({ native = null }) {
   const [serverEngagements, setServerEngagements] = useState([]);
   const [engagementError, setEngagementError] = useState('');
   const [engagementsLoaded, setEngagementsLoaded] = useState(false);
+  const [pluginData, setPluginData] = useState([]);
+  const [pluginError, setPluginError] = useState('');
   useEffect(() => {
     if (!native) return;
     let active = true;
@@ -132,23 +137,45 @@ function WizardForm({ native = null }) {
     })().catch(e => { if (active) setEngagementError(e.message); });
     return () => { active = false; };
   }, [!!native]);
+  useEffect(() => {
+    if (!native) return;
+    let active = true;
+    (async () => {
+      const records = await fetchPlugins();
+      const loaded = await Promise.all(records.filter((record) => record.enabled).map(async (record) => {
+        const [manifest, qualifications, settings] = await Promise.all([fetchPluginManifest(record.id), fetchPluginQualifications(record.id), fetchPluginSettings(record.id)]);
+        return { record, manifest, qualifications, settings };
+      }));
+      if (active) setPluginData(loaded);
+    })().catch((cause) => { if (active) setPluginError(cause.message); });
+    return () => { active = false; };
+  }, [!!native]);
   const bindings = native?.editing ? observation.resource.engagementResources : [];
   const engagement = serverEngagements.find(e => e.id === draft.serverEngagementId);
   const managers = [...new Set((draft.managers ?? '').split(/[\s,]+/).filter(Boolean))];
   const validEngagement = engagement?.state === 'verified' && engagement.delegationExpiresAtMs > Date.now();
   const router = useRouter();
-  const set = (patch) => setDraft((d) => ({ ...d, ...patch, ...(native && ('model' in patch || 'reasoning' in patch) ? { profileKind: 'select' } : {}) }));
-  const selectable = draft.framework ? MODEL_SELECTABLE[draft.framework] : null;
-  const models = native ? observation.choices.map((c) => ({ ...c, provider: base.provider })) : draft.framework ? modelsFor(draft.framework) : [];
-  const reasonings = native ? [...new Set(observation.choices.filter((c) => c.model === draft.model).map((c) => c.reasoning))] : draft.framework ? reasoningChoices(roleCapacity, draft.framework) : [];
-  const choice = native ? observation.choices.find((c) => c.model === draft.model && c.reasoning === draft.reasoning) : null;
+  const set = (patch) => setDraft((d) => ({ ...d, ...patch, ...(native && ('model' in patch || 'reasoning' in patch) && d.profileKind !== 'plugin' ? { profileKind: 'select' } : {}) }));
+  const pluginChoices = pluginData.flatMap(({ qualifications }) => qualifications);
+  const selectedRuntimeChoices = draft.runtimePlugin
+    ? pluginChoices.filter((choice) => choice.pluginId === draft.runtimePlugin.pluginId && choice.adapterId === draft.runtimePlugin.adapterId && choice.packageSha256 === draft.runtimePlugin.packageSha256 && choice.settingsSha256 === draft.runtimePlugin.settingsSha256)
+    : [];
+  const models = native
+    ? (draft.profileKind === 'plugin' ? selectedRuntimeChoices : observation.choices).map((c) => ({ ...c, provider: c.provider ?? base.provider }))
+    : draft.framework ? modelsFor(draft.framework) : [];
+  const reasonings = native
+    ? [...new Set(models.filter((c) => c.model === draft.model).map((c) => c.reasoning))]
+    : draft.framework ? reasoningChoices(roleCapacity, draft.framework) : [];
+  const choice = native ? models.find((c) => c.model === draft.model && c.reasoning === draft.reasoning) : null;
   const outcome = native ? { tier: choice?.tier ?? (draft.profileKind === 'preserve' ? observation.modelTier : null), roles: (choice?.roles ?? (draft.profileKind === 'preserve' ? observation.modelRoles : [])).map((r) => ({ key: r, name: r })) }
     : draft.framework && draft.model ? qualifiesFor(roleCapacity, draft.framework, draft.model, draft.reasoning) : { tier: null, roles: [] };
   const manifest = frameworks.find((f) => f.id === draft.framework) ?? null;
   const chosenDetect = detected.find((f) => f.id === draft.framework) ?? null;
   const action = native?.action?.configuration ? native.action : null;
+  const selectedRuntimeSettings = draft.runtimePlugin && pluginData.find(({ record }) => record.id === draft.runtimePlugin.pluginId)?.settings;
+  const selectedHarnessSettings = draft.harnessPlugin && pluginData.find(({ record }) => record.id === draft.harnessPlugin.pluginId)?.settings;
   const blocked = native && (native.phase !== 'ready' || !native.permissions?.configureResource || ['pending', 'unknown', 'saved'].includes(action?.kind)
-    || (!native.editing && !choice) || !validNativeTokens(draft.tokens) || !validEngagement || managers.length === 0 || managers.length > 64
+    || (!native.editing && !choice) || (draft.profileKind === 'plugin' && !selectedRuntimeSettings?.settingsReady) || (draft.harnessPlugin && !selectedHarnessSettings?.settingsReady) || !validNativeTokens(draft.tokens) || !validEngagement || managers.length === 0 || managers.length > 64
     || managers.some(m => !m.startsWith('@') || m.split(':').slice(1).join(':') !== engagement.serverName));
   const reload = async () => {
     const value = await refresh();
@@ -217,6 +244,25 @@ function WizardForm({ native = null }) {
         <dl className="kv"><dt>{t('wz.step.framework')}</dt><dd>{base.framework}</dd><dt>{t('col.provider')}</dt><dd>{base.provider ?? t('nu.unknown')}</dd><dt>{t('col.model')}</dt><dd>{base.model}</dd></dl>
         <TechnicalDetails><code>{base.id}</code></TechnicalDetails>
       </section>}
+      {native && at === 'plugin' && (
+        <div className="panel" data-resource-plugin-model>
+          <h3 className="sub">{t('nc.pluginModelTitle')}</h3>
+          <p>{t('nc.pluginModelHelp')}</p>
+          <p className="notice">{t('nc.pluginTargetModel')}</p>
+          <p className="dim">{t('nc.pluginSelectionHelp')}</p>
+          {pluginError && <p className="notice bad" role="alert">Plugin metadata unavailable: {pluginError}</p>}
+          <button className={`btn${draft.profileKind === 'preserve' ? ' primary' : ''}`} onClick={() => setDraft((old) => ({ ...old, profileKind: 'preserve', runtimePlugin: null, harnessPlugin: null, framework: base.framework, provider: base.provider, model: base.model, reasoning: base.reasoning }))}>Keep source runtime</button>
+          <h4>Qualified runtimes</h4>
+          {pluginChoices.length === 0 ? <p className="dim">No enabled plugin has a stored qualification. Qualify the exact package before selecting it.</p> : <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Plugin</th><th>Adapter</th><th>Framework</th><th>Model</th><th>Provider</th><th>Reasoning</th><th /></tr></thead><tbody>{pluginChoices.map((candidate) => {
+            const selected = draft.profileKind === 'plugin' && draft.runtimePlugin?.pluginId === candidate.pluginId && draft.runtimePlugin?.adapterId === candidate.adapterId && draft.runtimePlugin?.packageSha256 === candidate.packageSha256 && draft.runtimePlugin?.settingsSha256 === candidate.settingsSha256 && draft.model === candidate.model && draft.reasoning === candidate.reasoning;
+            return <tr key={`${candidate.pluginId}-${candidate.adapterId}-${candidate.framework}-${candidate.model}-${candidate.reasoning ?? ''}`}><td className="mono-s">{candidate.pluginId}</td><td className="mono-s">{candidate.adapterId}</td><td>{candidate.framework}</td><td className="mono-s">{candidate.model}</td><td>{candidate.provider}</td><td>{candidate.reasoning ?? 'default'}</td><td><button className={`btn${selected ? ' primary' : ''}`} onClick={() => setDraft((old) => ({ ...old, profileKind: 'plugin', runtimePlugin: { pluginId: candidate.pluginId, adapterId: candidate.adapterId, packageSha256: candidate.packageSha256, settingsSha256: candidate.settingsSha256 }, framework: candidate.framework, provider: candidate.provider, model: candidate.model, reasoning: candidate.reasoning }))}>Use</button></td></tr>;
+          })}</tbody></table></div>}
+          {draft.profileKind === 'plugin' && <div className="field"><label htmlFor="configuration-harness">Harness plugin (optional)</label><select id="configuration-harness" value={draft.harnessPlugin ? `${draft.harnessPlugin.pluginId}:${draft.harnessPlugin.harnessId}:${draft.harnessPlugin.packageSha256}:${draft.harnessPlugin.settingsSha256}` : ''} onChange={(event) => {
+            const selected = pluginData.flatMap(({ record, manifest, settings }) => manifest.harnesses.map((harness) => ({ record, harness, settings }))).find(({ record, harness, settings }) => `${record.id}:${harness.id}:${record.packageSha256}:${settings.document.settingsSha256}` === event.target.value);
+            setDraft((old) => ({ ...old, harnessPlugin: selected ? { pluginId: selected.record.id, harnessId: selected.harness.id, packageSha256: selected.record.packageSha256, settingsSha256: selected.settings.document.settingsSha256 } : null }));
+          }}><option value="">No harness plugin</option>{pluginData.flatMap(({ record, manifest, settings }) => manifest.harnesses.map((harness) => <option key={`${record.id}:${harness.id}`} value={`${record.id}:${harness.id}:${record.packageSha256}:${settings.document.settingsSha256}`}>{record.id} · {harness.id}{settings.settingsReady ? '' : ' · configuration required'}</option>))}</select></div>}
+        </div>
+      )}
       {at === 'framework' && (
         <div className="panel">
           <h3 className="sub">{t('wz.pickFramework')}</h3>
@@ -268,8 +314,8 @@ function WizardForm({ native = null }) {
           </div>
 
           {/* Stated up front, because it changes what the next step can promise. */}
-          {selectable?.ok === false && (
-            <div className="notice warn">{t(selectable.why)}</div>
+          {MODEL_SELECTABLE[draft.framework]?.ok === false && (
+            <div className="notice warn">{t(MODEL_SELECTABLE[draft.framework].why)}</div>
           )}
 
           {/* How it starts, from the probe — not a warning, a fact. */}
@@ -485,7 +531,12 @@ function WizardForm({ native = null }) {
             disabled={blocked}
             onClick={async () => {
               if (native) {
-                await native.configure(base, { profileChange: draft.profileKind === 'preserve' ? { kind: 'preserve' } : { kind: 'select', model: draft.model, reasoning: draft.reasoning }, ceilingChange: { kind: 'monthly', tokens: Number(draft.tokens) }, engagement: { serverEngagementId: draft.serverEngagementId, allocationId: draft.allocationId, expectedRevision: draft.expectedRevision, eligibleManagers: managers } });
+                const profileChange = draft.profileKind === 'preserve'
+                  ? { kind: 'preserve' }
+                  : draft.profileKind === 'plugin'
+                    ? { kind: 'select_plugin', runtime_plugin: draft.runtimePlugin, harness_plugin: draft.harnessPlugin, framework: draft.framework, model: draft.model, provider: draft.provider, reasoning: draft.reasoning }
+                    : { kind: 'select', model: draft.model, reasoning: draft.reasoning };
+                await native.configure(base, { profileChange, ceilingChange: { kind: 'monthly', tokens: Number(draft.tokens) }, engagement: { serverEngagementId: draft.serverEngagementId, allocationId: draft.allocationId, expectedRevision: draft.expectedRevision, eligibleManagers: managers } });
                 return;
               }
               if (!live) return say('ok', t('wz.wouldCreate'));

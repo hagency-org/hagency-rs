@@ -109,7 +109,7 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (!response.ok) {
       if (value?.code === 'console_busy' && response.status === 429) throw new Error('busy');
-      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, invalid_engagement_id: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503 };
+      const known = { busy: 503, outcome_unknown: 504, resource_revision_conflict: 409, resource_publication_scope_required: 403, resource_configuration_scope_required: 403, resource_in_use: 409, invalid_resource_command: 400, account_scope_required: 403, account_state_conflict: 409, account_revision_conflict: 409, invalid_account_command: 400, invalid_engagement_id: 400, engagement_not_live: 409, engagement_not_pending: 409, decision_conflict: 409, over_commit: 409, no_ceiling: 409, insufficient_capacity: 409, agent_unavailable: 409, registration_generation: 409, command_conflict: 409, stale_generation: 409, invalid_side_query: 400, sides_unavailable: 503, plugin_unavailable: 503, plugin_not_found: 404, plugin_stale: 409, plugin_restart_required: 409, plugin_disabled: 409, plugin_incompatible: 409, plugin_untrusted: 403, plugin_busy: 409, plugin_outcome_unknown: 504, plugin_capacity: 413, plugin_build_failed: 422, plugin_invalid: 400, plugin_git_unavailable: 400, plugin_configuration_required: 409, plugin_settings_invalid: 400, plugin_settings_conflict: 409 };
       if (known[value?.code] === response.status || RECOVERY_ERRORS[value?.code] === response.status) {
         // ADR-186 §A2: a refusal may carry the store's human explanation of
         // the binding limit beside its code; it rides the error as `detail`.
@@ -121,7 +121,7 @@ async function request(path, options = {}, responseLimit = 64 * 1024) {
     }
     return value;
   } catch (error) {
-    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'invalid_engagement_id', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
+    if (['console_access_required', 'not_found', 'invalid_native_response', 'invalid_selection', 'busy', 'outcome_unknown', 'resource_revision_conflict', 'resource_publication_scope_required', 'resource_configuration_scope_required', 'resource_in_use', 'invalid_resource_command', 'account_scope_required', 'account_state_conflict', 'account_revision_conflict', 'invalid_account_command', 'invalid_engagement_id', 'engagement_not_live', 'engagement_not_pending', 'decision_conflict', 'over_commit', 'no_ceiling', 'insufficient_capacity', 'agent_unavailable', 'registration_generation', 'command_conflict', 'stale_generation', 'invalid_side_query', 'sides_unavailable', 'plugin_unavailable', 'plugin_not_found', 'plugin_stale', 'plugin_restart_required', 'plugin_disabled', 'plugin_incompatible', 'plugin_untrusted', 'plugin_busy', 'plugin_outcome_unknown', 'plugin_capacity', 'plugin_build_failed', 'plugin_invalid', 'plugin_git_unavailable', 'plugin_configuration_required', 'plugin_settings_invalid', 'plugin_settings_conflict', ...Object.keys(RECOVERY_ERRORS)].includes(error.message)) throw error;
     if (options.method === 'DELETE') throw new Error('logout_unknown');
     if (['POST', 'PATCH'].includes(options.method) && (path.startsWith('/api/resources') || path.startsWith('/api/accounts') || path.startsWith('/api/agents/') || path.startsWith('/api/engagements/'))) throw new Error('outcome_unknown');
     throw new Error('native_unavailable');
@@ -355,10 +355,21 @@ export async function fetchAgentDetail(name) {
  * rendered as unknown, never invented. A role carries framework/provider/model/
  * reasoning only: extraArgs, apiBaseUrl and apiKey have no native source and
  * are refused by exact-key checking rather than silently dropped. */
-const runtimeRole = (v) => object(v, ['framework', 'provider', 'model', 'reasoning'])
+const runtimePlugin = (v) => object(v, ['pluginId', 'adapterId', 'packageSha256', 'settingsSha256'])
+  && text(v.pluginId, 128) && text(v.adapterId, 128) && pluginDigest(v.packageSha256) && pluginDigest(v.settingsSha256);
+const harnessPlugin = (v) => object(v, ['pluginId', 'harnessId', 'packageSha256', 'settingsSha256'])
+  && text(v.pluginId, 128) && text(v.harnessId, 128) && pluginDigest(v.packageSha256) && pluginDigest(v.settingsSha256);
+const runtimeRole = (v) => [
+  ['framework', 'provider', 'model', 'reasoning'],
+  ['framework', 'provider', 'model', 'reasoning', 'runtimePlugin'],
+  ['framework', 'provider', 'model', 'reasoning', 'harnessPlugin'],
+  ['framework', 'provider', 'model', 'reasoning', 'runtimePlugin', 'harnessPlugin'],
+].some(keys => object(v, keys))
   && text(v.framework, 64) && text(v.model, 256)
   && (v.provider === null || text(v.provider, 64))
-  && (v.reasoning === null || text(v.reasoning, 64));
+  && (v.reasoning === null || text(v.reasoning, 64))
+  && (!Object.hasOwn(v, 'runtimePlugin') || v.runtimePlugin === null || runtimePlugin(v.runtimePlugin))
+  && (!Object.hasOwn(v, 'harnessPlugin') || v.harnessPlugin === null || harnessPlugin(v.harnessPlugin));
 export function validateLaunchEnv(v) {
   if (!object(v, ['runtimeProfile'])) throw new Error('invalid_native_response');
   const p = v.runtimeProfile;
@@ -805,8 +816,9 @@ const validResourceBindings = (bindings, resourceId) => Array.isArray(bindings) 
   && id(g.id) && id(g.serverEngagementId) && g.resourceId === resourceId && number(g.revision) && g.revision >= 1
   && number(g.allocatedTokens) && Array.isArray(g.eligibleManagers) && g.eligibleManagers.length <= 64
   && g.eligibleManagers.every(m => text(m, 255)));
-const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'published', 'roles', 'revision', 'engagementResources'])
+const validResource = (r) => !(!object(r, ['id', 'framework', 'model', 'provider', 'reasoning', 'ceiling', 'runtimePlugin', 'harnessPlugin', 'published', 'roles', 'revision', 'engagementResources'])
       || !id(r.id) || !text(r.framework, 64) || !text(r.model, 256) || !optionalText(r.provider, 128) || !optionalText(r.reasoning, 128)
+      || !(r.runtimePlugin === null || runtimePlugin(r.runtimePlugin)) || !(r.harnessPlugin === null || harnessPlugin(r.harnessPlugin))
       || !validResourceBindings(r.engagementResources, r.id) || !ceiling(r.ceiling) || typeof r.published !== 'boolean' || !Array.isArray(r.roles) || r.roles.length > 64 || !r.roles.every((v) => text(v, 64)) || !revision(r.revision));
 export function validateResources(value) {
   if (!object(value, ['resources', 'roles', 'next_after', 'permissions']) || !Array.isArray(value.resources) || value.resources.length > 16
@@ -1205,7 +1217,8 @@ async function setupCall(path, method) {
     try { value = await response.json(); } catch { /* not JSON: handled below */ }
     if (response.status === 401) throw new Error('console_access_required');
     if (!response.ok || value?.ok !== true) throw new Error(typeof value?.code === 'string' ? value.code : 'native_unavailable');
-    if (!Array.isArray(value.agents)) throw new Error('invalid_native_response');
+    if (!Array.isArray(value.agents) || !Array.isArray(value.pluginRuntimes) || typeof value.pluginRuntimeReady !== 'boolean'
+      || value.pluginRuntimes.length > 128 || value.pluginRuntimes.some((row) => !pluginRuntimeRow(row))) throw new Error('invalid_native_response');
     return value;
   } catch (error) {
     if (error.name === 'AbortError') throw new Error('outcome_unknown');
@@ -1214,13 +1227,20 @@ async function setupCall(path, method) {
     clearTimeout(timer);
   }
 }
+
 export function fetchSetup() { return setupCall('setup', 'GET'); }
 export function checkSetup() { return setupCall('setup/check', 'POST'); }
 // ADR-193: an Octos source also names the profile it runs; no other source does.
-export async function offerResource(model, reasoning, tokens, framework = 'codex', profile = null) {
+// Plugin runtime sources provide pluginId, adapterId, packageSha256, settingsSha256.
+export async function offerResource(model, reasoning, tokens, framework = 'codex', profile = null, pluginRuntime = null) {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 20000);
-  const body = { framework, model, reasoning, tokens, ...(profile ? { profile } : {}) };
+  const body = { framework, model, reasoning, tokens, ...(profile ? { profile } : {}), ...(pluginRuntime ? {
+    plugin_id: pluginRuntime.pluginId,
+    adapter_id: pluginRuntime.adapterId,
+    package_sha256: pluginRuntime.packageSha256,
+    settings_sha256: pluginRuntime.settingsSha256,
+  } : {}) };
   try {
     const response = await fetch(`${ROOT}/api/setup/resource`, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: abort.signal,
@@ -1299,5 +1319,201 @@ export async function fetchAssociations() {
 export async function startAssociation(input) {
   const value = await request('/api/palpo/associations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
   if (!object(value, ['id']) || !/^hf_[a-f0-9]{32}$/.test(value.id)) throw new Error('invalid_native_response');
+  return value;
+}
+const pluginId = (value) => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value);
+const entryId = (value) => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(value);
+const pluginDigest = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const pluginCommit = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
+const pluginText = (value, max) => typeof value === 'string' && value.length <= max
+  && [...value].every((character) => !/\p{C}/u.test(character));
+const pluginArgv = (value, required = false) => Array.isArray(value) && value.length <= 64
+  && (!required || value.length > 0) && value.every((argument) => pluginText(argument, 4096));
+const pluginSubdir = (value) => value === null || (typeof value === 'string' && value.length > 0 && value.length <= 4096
+  && !value.startsWith('/') && !value.endsWith('/') && !value.includes('\\')
+  && value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..'));
+const pluginSource = (value) => {
+  if (object(value, ['kind', 'path'])) {
+    return value.kind === 'linked' && typeof value.path === 'string' && value.path.startsWith('/') && pluginText(value.path, 4096);
+  }
+  return object(value, ['kind', 'owner', 'repo', 'subdir', 'commit', 'transport'])
+    && value.kind === 'github' && /^[A-Za-z0-9_-]{1,100}$/.test(value.owner)
+    && /^[A-Za-z0-9_-]{1,100}$/.test(value.repo) && pluginSubdir(value.subdir)
+    && pluginCommit(value.commit) && ['https', 'ssh'].includes(value.transport);
+};
+const pluginResponse = (value) => {
+  if (!Array.isArray(value) && (value === null || typeof value !== 'object')) throw new Error('invalid_native_response');
+  return value;
+};
+const utf8Bytes = (value) => new TextEncoder().encode(value).length;
+const settingText = (value, max, multiline = false) => typeof value === 'string' && utf8Bytes(value) <= max
+  && [...value].every((character) => !/\p{C}/u.test(character) || multiline && ['\n', '\r', '\t'].includes(character));
+const settingValue = (setting, value) => {
+  if (setting.kind === 'text') return settingText(value, 4096);
+  if (setting.kind === 'textarea') return settingText(value, setting.maxLength, true);
+  if (setting.kind === 'integer') return Number.isSafeInteger(value) && (setting.min === null || value >= setting.min) && (setting.max === null || value <= setting.max);
+  if (setting.kind === 'boolean') return typeof value === 'boolean';
+  return typeof value === 'string' && setting.options.includes(value);
+};
+const settingSpec = (setting) => object(setting, ['id', 'label', 'description', 'kind', 'required', 'default', 'options', 'min', 'max', 'maxLength'])
+  && entryId(setting.id) && settingText(setting.label, 128) && settingText(setting.description, 512)
+  && ['text', 'textarea', 'integer', 'boolean', 'select'].includes(setting.kind) && typeof setting.required === 'boolean'
+  && Array.isArray(setting.options) && setting.options.length <= 32 && setting.options.every((option) => settingText(option, 128))
+  && new Set(setting.options).size === setting.options.length && (setting.min === null || Number.isSafeInteger(setting.min))
+  && (setting.max === null || Number.isSafeInteger(setting.max)) && (setting.min === null || setting.max === null || setting.min <= setting.max)
+  && (setting.maxLength === null || Number.isSafeInteger(setting.maxLength))
+  && (setting.kind === 'text' && setting.maxLength === null && setting.options.length === 0 && setting.min === null && setting.max === null
+    || setting.kind === 'textarea' && setting.maxLength >= 1 && setting.maxLength <= 32768 && setting.options.length === 0 && setting.min === null && setting.max === null
+    || setting.kind === 'integer' && setting.maxLength === null && setting.options.length === 0
+    || setting.kind === 'boolean' && setting.maxLength === null && setting.options.length === 0 && setting.min === null && setting.max === null
+    || setting.kind === 'select' && setting.maxLength === null && setting.options.length > 0 && setting.min === null && setting.max === null)
+  && (setting.default === null || settingValue(setting, setting.default));
+const settingList = (values, max) => Array.isArray(values) && values.length <= max && values.every(settingSpec)
+  && new Set(values.map((setting) => setting.id)).size === values.length;
+const pluginManifestEntry = (value, keys, idKey = 'id') => object(value, keys)
+  && entryId(value[idKey]);
+const pluginManifest = (v) => {
+  const build = (value) => object(value, ['command']) && pluginArgv(value.command, true);
+  const startup = (value) => pluginManifestEntry(value, ['id', 'command']) && pluginArgv(value.command, true);
+  const action = (value) => pluginManifestEntry(value, ['id', 'title', 'command']) && pluginText(value.title, 256) && pluginArgv(value.command, true);
+  const event = (value) => object(value, ['on', 'command']) && pluginText(value.on, 128) && pluginArgv(value.command, true);
+  const tool = (value) => pluginManifestEntry(value, ['id', 'title', 'description', 'inputSchema', 'command'])
+    && pluginText(value.title, 256) && pluginText(value.description, 4096) && value.inputSchema !== null && typeof value.inputSchema === 'object' && !Array.isArray(value.inputSchema) && pluginArgv(value.command, true);
+  const runtime = (value) => pluginManifestEntry(value, ['id', 'framework', 'command', 'protocol']) && pluginText(value.framework, 64) && pluginArgv(value.command, true) && value.protocol === 'hagency.runtime/v1';
+  const harness = (value) => pluginManifestEntry(value, ['id', 'command', 'protocol', 'configuration']) && pluginArgv(value.command, true) && value.protocol === 'hagency.harness/v1' && settingList(value.configuration, 32);
+  const pane = (value) => pluginManifestEntry(value, ['id', 'title', 'harness', 'command']) && pluginText(value.title, 256) && entryId(value.harness) && pluginArgv(value.command, true);
+  return object(v, ['schema', 'id', 'name', 'version', 'minHagencyVersion', 'platforms', 'builds', 'startup', 'actions', 'events', 'tools', 'runtimes', 'harnesses', 'panes', 'settings'])
+    && v.schema === 'hagency.plugin/v1' && pluginId(v.id) && pluginText(v.name, 256) && pluginText(v.version, 64) && pluginText(v.minHagencyVersion, 64)
+    && Array.isArray(v.platforms) && v.platforms.length <= 16 && v.platforms.every((x) => pluginText(x, 64))
+    && Array.isArray(v.builds) && v.builds.length <= 16 && v.builds.every(build)
+    && Array.isArray(v.startup) && v.startup.length <= 16 && v.startup.every(startup)
+    && Array.isArray(v.actions) && v.actions.length <= 16 && v.actions.every(action)
+    && Array.isArray(v.events) && v.events.length <= 16 && v.events.every(event)
+    && Array.isArray(v.tools) && v.tools.length <= 16 && v.tools.every(tool)
+    && Array.isArray(v.panes) && v.panes.length <= 16 && v.panes.every(pane)
+    && settingList(v.settings, 32)
+    && Array.isArray(v.runtimes) && v.runtimes.length <= 64 && v.runtimes.every(runtime)
+    && Array.isArray(v.harnesses) && v.harnesses.length <= 64 && v.harnesses.every(harness);
+};
+const pluginFile = (value) => object(value, ['path', 'kind', 'mode', 'bytes']) && pluginText(value.path, 4096)
+  && ['file', 'directory'].includes(value.kind) && Number.isSafeInteger(value.mode) && value.mode >= 0
+  && Number.isSafeInteger(value.bytes) && value.bytes >= 0;
+const pluginPreview = (value) => object(value, ['source', 'manifest', 'files', 'buildArgv', 'sourceCommit', 'sourceSha256', 'manifestSha256', 'trustSha256'])
+  && pluginSource(value.source) && pluginManifest(value.manifest) && Array.isArray(value.files) && value.files.length <= 4096
+  && value.files.every(pluginFile) && Array.isArray(value.buildArgv) && value.buildArgv.length <= 16
+  && value.buildArgv.every((argv) => pluginArgv(argv, true)) && (value.sourceCommit === null || pluginCommit(value.sourceCommit))
+  && pluginDigest(value.sourceSha256) && pluginDigest(value.manifestSha256) && pluginDigest(value.trustSha256);
+const pluginRevision = (value) => object(value, ['packageSha256', 'sourceSha256', 'manifestVersion', 'installDir', 'capabilities', 'activatedAtMs', 'activeLeases'])
+  && pluginDigest(value.packageSha256) && pluginDigest(value.sourceSha256) && pluginText(value.manifestVersion, 64)
+  && typeof value.installDir === 'string' && value.installDir.startsWith('/') && pluginText(value.installDir, 4096)
+  && Array.isArray(value.capabilities) && value.capabilities.length <= 64 && value.capabilities.every((capability) => pluginText(capability, 128))
+  && number(value.activatedAtMs) && number(value.activeLeases);
+const pluginRecord = (value) => object(value, ['id', 'source', 'enabled', 'activePackageSha256', 'revisions', 'stale', 'restartRequired', 'manifestVersion', 'sourceSha256', 'packageSha256', 'installDir', 'capabilities', 'updatedAtMs', 'activeLeases', 'readiness', 'settingsSha256', 'settingsRevision', 'settingsReady', 'missingRequired'])
+  && pluginId(value.id) && pluginSource(value.source) && typeof value.enabled === 'boolean' && pluginDigest(value.activePackageSha256)
+  && value.revisions !== null && typeof value.revisions === 'object' && !Array.isArray(value.revisions) && Object.keys(value.revisions).length <= 64
+  && Object.entries(value.revisions).every(([digest, revision]) => pluginDigest(digest) && pluginRevision(revision) && revision.packageSha256 === digest)
+  && typeof value.stale === 'boolean' && typeof value.restartRequired === 'boolean' && pluginText(value.manifestVersion, 64)
+  && pluginDigest(value.sourceSha256) && pluginDigest(value.packageSha256) && typeof value.installDir === 'string' && value.installDir.startsWith('/') && pluginText(value.installDir, 4096)
+  && Array.isArray(value.capabilities) && value.capabilities.length <= 64 && value.capabilities.every((capability) => pluginText(capability, 128))
+  && number(value.updatedAtMs) && number(value.activeLeases) && pluginText(value.readiness, 64)
+  && (value.settingsSha256 === '' || pluginDigest(value.settingsSha256)) && number(value.settingsRevision) && typeof value.settingsReady === 'boolean'
+  && Array.isArray(value.missingRequired) && value.missingRequired.length <= 32 && value.missingRequired.every(entryId);
+const pluginRecordResponse = (value) => {
+  if (!pluginRecord(value)) throw new Error('invalid_native_response');
+  return value;
+};
+const pluginChoice = (v) => object(v, ['pluginId', 'adapterId', 'packageSha256', 'settingsSha256', 'framework', 'model', 'provider', 'reasoning', 'roles'])
+  && pluginId(v.pluginId) && entryId(v.adapterId) && pluginDigest(v.packageSha256) && pluginDigest(v.settingsSha256) && text(v.framework, 64) && text(v.model, 256) && text(v.provider, 128)
+  && (v.reasoning === null || text(v.reasoning, 128)) && Array.isArray(v.roles) && v.roles.length <= 6 && v.roles.every((role) => text(role, 64));
+const pluginSettings = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  && settingList(v.definitions, 32)
+  && v.document && typeof v.document === 'object' && v.document.schema === 'hagency.plugin.settings/v1' && pluginId(v.document.pluginId) && pluginDigest(v.document.packageSha256) && pluginDigest(v.document.settingsSha256) && Number.isSafeInteger(v.document.revision) && v.document.revision >= 0 && v.document.values && typeof v.document.values === 'object' && !Array.isArray(v.document.values)
+  && Object.entries(v.document.values).every(([id, value]) => { const setting = v.definitions.find((candidate) => candidate.id === id); return setting && settingValue(setting, value); })
+  && typeof v.settingsReady === 'boolean' && Array.isArray(v.missingRequired) && v.missingRequired.every((id) => typeof id === 'string');
+
+export async function fetchPluginSettings(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/settings`);
+  if (!pluginSettings(value) || value.document.pluginId !== id) throw new Error('invalid_native_response');
+  return value;
+}
+export async function updatePluginSettings(id, expectedRevision, values) {
+  if (!pluginId(id) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || values === null || typeof values !== 'object' || Array.isArray(values)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision, values }) });
+  if (!pluginSettings(value) || value.document.pluginId !== id) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPlugins() {
+  const value = await request('/api/plugins');
+  if (!Array.isArray(value) || value.length > 128 || value.some((row) => !pluginRecord(row))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPluginManifest(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/manifest`);
+  if (!pluginManifest(value) || value.id !== id) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPluginTools(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/tools`);
+  if (!Array.isArray(value) || value.length > 128 || value.some((tool) =>
+    !object(tool, ['name', 'pluginId', 'toolId', 'title', 'description', 'inputSchema', 'packageSha256'])
+    || tool.pluginId !== id || !pluginId(tool.toolId) || !text(tool.name, 256)
+    || !text(tool.title, 256) || !text(tool.description, 4096) || tool.inputSchema === null
+    || typeof tool.inputSchema !== 'object' || Array.isArray(tool.inputSchema) || !pluginDigest(tool.packageSha256))) {
+    throw new Error('invalid_native_response');
+  }
+  return value;
+}
+export async function fetchPluginQualifications(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/qualifications`);
+  if (!Array.isArray(value) || value.length > 256 || value.some((choice) => !pluginChoice(choice) || choice.pluginId !== id)) throw new Error('invalid_native_response');
+  return value;
+}
+export async function fetchPluginLogs(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/logs`);
+  if (!Array.isArray(value) || value.length > 512 || value.some((row) => !object(row, ['atMs', 'invocationId', 'stream', 'text']) || !number(row.atMs) || !text(row.invocationId, 128) || !['stdout', 'stderr'].includes(row.stream) || !text(row.text, 256 * 1024))) throw new Error('invalid_native_response');
+  return value;
+}
+export async function invokePluginAction(id, actionId, input = {}) {
+  if (!pluginId(id) || !pluginId(actionId) || input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('invalid_selection');
+  const accepted = pluginResponse(await request(`/api/plugins/${encodeURIComponent(id)}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actionId, input, idempotencyKey: `ui:${actionId}:${JSON.stringify(input)}` }) }));
+  if (!accepted.invocationId) return accepted;
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const value = pluginResponse(await request(`/api/plugins/invocations/${encodeURIComponent(accepted.invocationId)}`));
+    if (['succeeded', 'failed', 'outcome_unknown'].includes(value.state)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('plugin_action_poll_timeout');
+}
+export async function previewPlugin(source) {
+  if (!pluginSource(source)) throw new Error('invalid_selection');
+  const value = await request('/api/plugins/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }) });
+  if (!pluginPreview(value)) throw new Error('invalid_native_response');
+  return value;
+}
+export async function installPlugin(source, trustDigest) {
+  if (!pluginSource(source) || !pluginDigest(trustDigest)) throw new Error('invalid_selection');
+  return pluginRecordResponse(await request('/api/plugins/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source, trustDigest }) }));
+}
+export async function updatePlugin(source, trustDigest) {
+  if (!pluginSource(source) || !pluginDigest(trustDigest)) throw new Error('invalid_selection');
+  return pluginRecordResponse(await request('/api/plugins/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source, trustDigest }) }));
+}
+export async function linkPlugin(path) {
+  if (typeof path !== 'string' || !path.startsWith('/') || !pluginText(path, 4096)) throw new Error('invalid_selection');
+  return pluginRecordResponse(await request('/api/plugins/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) }));
+}
+export async function setPluginEnabled(id, enabled) {
+  if (!pluginId(id) || typeof enabled !== 'boolean') throw new Error('invalid_selection');
+  return pluginRecordResponse(await request(`/api/plugins/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+}
+export async function uninstallPlugin(id) {
+  if (!pluginId(id)) throw new Error('invalid_selection');
+  const value = await request(`/api/plugins/${encodeURIComponent(id)}/uninstall`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  if (!object(value, ['ok']) || value.ok !== true) throw new Error('invalid_native_response');
   return value;
 }

@@ -1121,6 +1121,35 @@ async fn finish_attempt(
             work.end().await;
         }
         status.phase("delivered");
+    } else if report.settlement == hagency_execution::Settlement::Completed {
+        // A plain-text completion stores its final reply too (see
+        // complete_owned_clock); deliver it the same way. None means the
+        // completion carried no reply text, which is not an error.
+        match domain
+            .claim_final_reply_for_dispatch(capability.clone(), 60_000)
+            .await
+        {
+            Ok(Some(claim)) => {
+                status.phase("delivering");
+                match collector.send_final(claim, cancel).await {
+                    Ok(delivered)
+                        if delivered.state == hagency_matrix::OutgoingState::Delivered =>
+                    {
+                        for work in agent_work {
+                            work.end().await;
+                        }
+                        status.phase("delivered");
+                    }
+                    other => {
+                        tracing::warn!(dispatch_id = %capability.dispatch_id, outcome = ?other.map(|d| d.state), "plain-text final reply not delivered");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(dispatch_id = %capability.dispatch_id, ?error, "plain-text final reply claim refused");
+            }
+        }
     }
     Ok(Completed { report, capability })
 }

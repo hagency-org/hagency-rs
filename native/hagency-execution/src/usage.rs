@@ -93,6 +93,16 @@ impl UsageRun {
             },
         })
     }
+    pub(super) async fn bind_unmetered(
+        domain: DomainStore,
+        capability: RunnerCapability,
+        started: OwnedDispatchScope,
+    ) -> Result<Self, hagency_store::Error> {
+        let mut usage = Self::bind(domain, capability, started).await?;
+        usage.status.incomplete = true;
+        usage.close();
+        Ok(usage)
+    }
     pub(super) fn status(&self) -> UsageStatus {
         self.status
     }

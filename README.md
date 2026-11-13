@@ -92,6 +92,60 @@ Palpo homeserver  <── outbound HTTPS ──  hagency start (127.0.0.1:13300)
 
 The [code walkthrough](docs/architecture-walkthrough.md) follows each flow through the code, with diagrams.
 
+### Plugin architecture
+
+The plugin boundary is generic and implementation-language-neutral:
+
+```text
+Rinx (user interaction) → Palpo (homeserver/fleet transport) → Hagency
+                                                        ├─ PluginService
+                                                        │  ├─ registry + leases
+                                                        │  ├─ scheduler + guardian
+                                                        │  ├─ invocations/events
+                                                        │  └─ runtime/harness sessions
+                                                        └─ built-in fleet/execution
+```
+
+Rinx and Palpo never become plugin authorities. Hagency alone owns plugin
+lifecycle, task state, owner approval, workspace custody, usage, canonical
+results, process cleanup, and settlement. Plugins receive no Matrix, App
+Service, operator, provider, or runner credential. Plugin executables remain
+trusted OS-user processes with filesystem/network access; the manifest and
+guardian are not a sandbox.
+
+| Capability | Host-owned contract |
+| --- | --- |
+| `startup.v1` | One-shot after listener readiness and after an exact revision becomes active |
+| `action.v1` | Asynchronous idempotent invocation with durable polling |
+| `event.v1` | Post-commit redacted lossy observation only |
+| `tool.v1` | Existing owner approval, retained workspace, one guardian launch |
+| `runtime.v1` | Qualified runner protocol; Hagency settles the turn |
+| `harness.v1` | Redacted agent view; host-owned `stop_attempt`/`open_console`; template-bound prepare/release only |
+| `pane.v1` | Declarative metadata delivered to its named harness; no plugin UI/PTY |
+
+Install, enable, disable, update, uninstall, action, and qualification are
+service-owned operations. `hagency plugin` is an authenticated loopback client;
+it does not open a registry or domain database. The management flow is preview →
+explicit trust confirmation → isolated exact-commit build → reparse/re-hash →
+atomic immutable revision switch. Qualification runs the active revision through
+the normal guardian/session boundary. Runtime adapters execute agent turns.
+Harness adapters provide constrained views, host-owned controls, and template-
+bound prepare/release; managed mode may start/stop its configured agent. A
+harness does not submit turns or own their results. Optional agent runtime and harness plugins are maintained in `hagency-plugin-examples`.
+
+The console and CLI use the same update flow: preview the pinned replacement
+source, verify its source/manifest/trust digests, then choose **Update** (or
+`hagency plugin update`). Failed preview, trust, or build steps leave the active
+revision untouched; a successful replacement reports when a service restart is
+required.
+### Agent platform, runtime adapters and project workspaces
+
+Hagency is runtime-neutral: it is the agent platform that owns project and agent records, project workspaces, leases, approvals, dispatch, usage, results and cleanup. A harness adapter may map a project/agent context to a provider target and supervise that target. An agent runtime plugin is the provider-specific execution side; it is not the platform itself.
+
+The project room is Matrix conversation, the workspace is a host filesystem lease, and a pane/target is a provider-local runtime session. Installing or selecting a plugin does not itself create any of these objects. Provider-specific protocol and target documentation belongs in the separately versioned [Hagency plugin examples repository](https://github.com/nizarfadlan/hagency-agent-plugins/blob/main/README.md).
+
+
+
 ## Set up Hagency
 
 You need:
@@ -453,6 +507,7 @@ To change a value, edit the file (keep mode 0600) and restart the service, or ru
 | `approval_owner_wait_ms` | No | How long a card waits for the owner before it is denied. Without the field the wait is 1000 ms; `hagency setup` writes 180000. With the 5000 ms reply reserve it must fit in 600,000 ms. |
 | `send_file`, `receive_file` | No | Enable the file tools. Default `false`. |
 | `coordination_tools` | No | Enable delegation and peer tools. The owner approves each call. Default `false`. |
+| `notice_language` | No | The language of the activity and over-budget notices agents post into task threads: `en` (default), `id` or `zh`. `zh` keeps the retained product's Chinese wording. Presentation only. Other task notices are still English; notices produced while the service opens, before this file is read, use English. |
 | `matrix_request_interval_ms`, `matrix_sdk_timeout_ms` | No | Matrix request pacing, and the SDK budget (10 to 60,000 ms) |
 | `home` | Yes | Agent homes, with three required sub-fields: `root`, an existing owner-private directory; `task_client`, the absolute path of the `hagency` binary; and `projects`, up to 16 entries with `project_id`, `source` and `mode` (`copy` or `symlink`). `projects` may be `[]`: a project with no entry gets a home without a source copy. |
 

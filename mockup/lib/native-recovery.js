@@ -45,7 +45,14 @@ export function validateInspection(v, agent, original) {
   // it; rejecting the key set made every inspection render as unavailable.
   if (!keys(v, ['inspectionId', 'inspectionToken', 'expiresAt', 'snapshot']) || !hash(v.inspectionId) || !hash(v.inspectionToken) || !number(v.expiresAt)
     || !keys(s, ['dispatchId', 'fence', 'receiptDigest', 'observation', 'fenced', 'task', 'route']) || s.dispatchId !== original || !number(s.fence) || s.fence === 0 || !hash(s.receiptDigest) || typeof s.fenced !== 'boolean'
-    || !keys(o, ['scope', 'workspace', 'inventory']) || !hash(o.scope) || !id(o.workspace) || !task(s.task)
+    || !task(s.task)) invalid();
+  // A fenced snapshot (agent fence, runner lost, admission failed) carries the
+  // attempt's recorded evidence instead of a host content inventory; the
+  // server settles it only (`continue` needs the host receipt it lacks).
+  // Its evidence is untrusted, bounded, and displayed verbatim.
+  if (s.fenced) {
+    if (o === null || typeof o !== 'object' || Array.isArray(o) || !text(JSON.stringify(o), 16384)) invalid();
+  } else if (!keys(o, ['scope', 'workspace', 'inventory']) || !hash(o.scope) || !id(o.workspace)
     || !keys(inventory, ['profile', 'root', 'entries']) || inventory.profile !== 'stopped-content-inventory-v1'
     || !keys(inventory.root, ['platform', 'volume', 'object']) || !text(inventory.root.platform, 64) || !text(inventory.root.volume, 64)
     || !Array.isArray(inventory.root.object) || inventory.root.object.length !== 16 || !inventory.root.object.every((n) => number(n) && n < 256)
@@ -70,6 +77,7 @@ export async function inspectStopped(agent, original) {
 }
 export function resolutionBody(inspection, action, note, instruction, requestId, replacementId) {
   if (!['continue', 'accept_completed', 'keep_blocked'].includes(action) || !id(requestId) || !note.trim() || !text(note, 2000)
+    || (action === 'continue' && inspection.snapshot.fenced)
     || (action === 'continue' && (!id(replacementId) || !instruction.trim() || !text(instruction, 8192)))) throw new Error('invalid_selection');
   const s = inspection.snapshot;
   const body = JSON.stringify({ original: s.dispatchId, requestId, inspectionId: inspection.inspectionId, inspectionToken: inspection.inspectionToken,

@@ -103,15 +103,29 @@ impl HostTools {
     /// output for the model, `Err` its failure message. A helper that failed
     /// once is not used again; every later call fails in the same words.
     pub(crate) async fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        let tool = name
+            .strip_prefix(hagency_runtime::octos::task_tools::APP)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .unwrap_or("");
+        if tool.is_empty() {
+            return Err(format!("{name} is not a Hagency task tool of this task"));
+        }
+        self.call_tool(tool, name, args).await
+    }
+    /// One call by the helper's own tool name (`complete_task_with_reply`),
+    /// as a relayed runtime names it. `label` is how the caller named it.
+    pub(crate) async fn call_tool(
+        &mut self,
+        tool: &str,
+        label: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        let name = label;
         let unavailable = || "Hagency task tools are unavailable for this task".to_owned();
         if self.broken {
             return Err(unavailable());
         }
-        let Some(tool) = name
-            .strip_prefix(hagency_runtime::octos::task_tools::APP)
-            .and_then(|rest| rest.strip_prefix('.'))
-            .filter(|tool| self.names.contains(tool))
-        else {
+        let Some(tool) = self.names.iter().copied().find(|known| *known == tool) else {
             return Err(format!("{name} is not a Hagency task tool of this task"));
         };
         let params = json!({"name":tool,"arguments":args});
@@ -201,5 +215,163 @@ impl HostTools {
 impl Drop for HostTools {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+    }
+}
+
+/// The same host tools for a plugin runtime (`hagency.runtime/v1`): started
+/// only when the runtime asks for them, offered under the helper's own tool
+/// names, and executed exactly as for Octos.
+pub(crate) struct PluginTools {
+    spec: Spec,
+    running: Option<HostTools>,
+}
+impl PluginTools {
+    pub(crate) fn new(spec: Spec) -> Self {
+        Self {
+            spec,
+            running: None,
+        }
+    }
+}
+impl hagency_runtime::owned::PluginToolHost for PluginTools {
+    fn prepare(
+        &mut self,
+    ) -> hagency_runtime::owned::ToolFuture<'_, Result<Vec<hagency_plugin::ToolDescriptor>, ()>>
+    {
+        Box::pin(async move {
+            if self.running.is_some() {
+                return Err(());
+            }
+            let (tools, registered) = HostTools::start(&self.spec).await?;
+            self.running = Some(tools);
+            let prefix = format!("{}.", hagency_runtime::octos::task_tools::APP);
+            registered
+                .into_iter()
+                .map(|tool| {
+                    Ok(hagency_plugin::ToolDescriptor {
+                        name: tool.name.strip_prefix(&prefix).ok_or(())?.to_owned(),
+                        description: tool.description,
+                        input_schema: tool.input_schema,
+                        read_only: tool.read_only,
+                    })
+                })
+                .collect()
+        })
+    }
+    fn call<'a>(
+        &'a mut self,
+        tool: &'a str,
+        input: Value,
+    ) -> hagency_runtime::owned::ToolFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            match self.running.as_mut() {
+                Some(tools) => tools.call_tool(tool, tool, input).await,
+                None => Err("Hagency task tools are unavailable for this task".to_owned()),
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PluginTools, Spec};
+    use hagency_runtime::owned::PluginToolHost;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    /// The offline execution probe, which answers as the task helper.
+    fn probe() -> std::path::PathBuf {
+        let binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!(
+                "hagency-execution-probe{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+        assert!(
+            binary.is_file(),
+            "build the execution probe before the plugin tool test"
+        );
+        binary
+    }
+
+    fn spec() -> Spec {
+        let mut environment = BTreeMap::from([
+            ("PATH".into(), "".into()),
+            ("HAGENCY_TASK_ID".into(), "plugin-task".into()),
+            (
+                "HAGENCY_RUNNER_CAPABILITY".into(),
+                "offline-capability".into(),
+            ),
+            ("HAGENCY_RUNNER_API_ADDR".into(), "127.0.0.1:13300".into()),
+        ]);
+        if let Some(system) = std::env::var_os("SystemRoot") {
+            environment.insert("SystemRoot".into(), system);
+        }
+        Spec {
+            executable: probe(),
+            environment,
+            tools: hagency_runtime::task_mcp::owned_task_tools(false, false),
+        }
+    }
+
+    /// Decision 0002: a plugin runtime is offered exactly the task helper's
+    /// own catalog (the Octos set, helper names, no `hagency.` prefix), its
+    /// calls run on the dispatch's task and capability, a helper refusal comes
+    /// back as the tool's error, and a tool outside the catalog (coordination
+    /// included) never reaches the helper.
+    #[tokio::test]
+    async fn native_plugin_tools_relay_to_the_task_helper() {
+        let mut tools = PluginTools::new(spec());
+        // Nothing runs before the runtime asks.
+        assert_eq!(
+            tools.call("get_task", json!({})).await,
+            Err("Hagency task tools are unavailable for this task".to_owned())
+        );
+        let catalog = tools.prepare().await.unwrap();
+        let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(
+            names,
+            hagency_runtime::task_mcp::owned_task_tools(false, false)
+        );
+        let read_only: Vec<&str> = catalog
+            .iter()
+            .filter(|tool| tool.read_only)
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(read_only.contains(&"get_task"));
+        assert!(!read_only.contains(&"complete_task_with_reply"));
+        assert!(!names.contains(&"delegate_task"));
+        // One helper per dispatch.
+        assert!(tools.prepare().await.is_err());
+
+        let answer = tools
+            .call("get_task", json!({"task_id":"plugin-task"}))
+            .await
+            .unwrap();
+        assert_eq!(answer["tool"], "get_task");
+        assert_eq!(answer["arguments"], json!({"task_id":"plugin-task"}));
+        assert_eq!(answer["task"], "plugin-task");
+        assert_eq!(answer["capability"], true);
+        assert_eq!(answer["address"], "127.0.0.1:13300");
+
+        assert_eq!(
+            tools.call("transition_task", json!({})).await,
+            Err("offline refusal".to_owned())
+        );
+        for outside in ["delegate_task", "hagency.get_task", ""] {
+            assert_eq!(
+                tools.call(outside, json!({})).await,
+                Err(format!("{outside} is not a Hagency task tool of this task"))
+            );
+        }
+        // A refusal does not break the helper: the next call still answers.
+        assert_eq!(
+            tools.call("list_tasks", json!({})).await.unwrap()["tool"],
+            "list_tasks"
+        );
     }
 }

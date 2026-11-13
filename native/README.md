@@ -99,6 +99,12 @@ cargo test --workspace --all-targets --locked --no-fail-fast -- \
 
 Most library crates state their role and limits in a `//!` comment at the top of `src/lib.rs`.
 
+## Plugin packages
+
+Plugin manifests may declare global `[[settings]]` entries (`text`, `textarea`, `integer`, `boolean`, or `select`) and per-harness `[[harnesses.configuration]]` entries with the same bounded setting schema. The console stores each accepted global value set as an immutable `settingsSha256` revision; resource Agent definitions store a digest-bound harness template document with the selected harness values. Runtime and harness identities carry both `packageSha256` and `settingsSha256`; resource qualification and launch admission require both digests to match. Plugin processes receive the selected immutable revision through `HAGENCY_PLUGIN_CONFIG_DIR` and mutable per-plugin state through `HAGENCY_PLUGIN_STATE_DIR`.
+
+Changing settings creates a new revision and does not rewrite a revision already referenced by a resource. Required settings block qualification and launch until configured. The settings endpoint is exposed at `/console/api/plugins/<id>/settings` and uses an expected revision for conflict detection. A template change is refused while its Agent definition is in use; provision effects retain the template snapshot used at allocation.
+
 [fixtures/](fixtures/) holds shared JSON test fixtures. [scripts/](scripts/) holds the CI checkers and Linux qualification helpers.
 
 ## Where to start reading

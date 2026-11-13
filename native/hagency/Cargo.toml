@@ -20,6 +20,7 @@ hagency-matrix = { path = "../hagency-matrix" }
 hagency-palpo = { path = "../hagency-palpo" }
 hagency-runtime = { path = "../hagency-runtime" }
 hagency-files = { path = "../hagency-files" }
+hagency-plugin = { path = "../hagency-plugin" }
 hagency-media = { path = "../hagency-media" }
 hagency-media-store = { path = "../hagency-media-store" }
 cap-std = "=4.0.3"

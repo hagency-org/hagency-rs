@@ -1129,6 +1129,8 @@ impl DomainRepository {
             model: command.model,
             reasoning: command.reasoning,
             octos_profile: None,
+            harness_plugin: None,
+            runtime_plugin: None,
             ceiling: command.ceiling,
             roles: Vec::new(),
             published: true,

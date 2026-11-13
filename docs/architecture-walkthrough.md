@@ -91,6 +91,45 @@ The units in [deploy/](../deploy/) carry an `__AGENT_DRIVER__` placeholder (`<!-
 
 All HTTP traffic shares one loopback port (`127.0.0.1:13300` by default). `App::new` in [lib.rs](../native/hagency/src/lib.rs) refuses any listen address that is not loopback. The service reaches Palpo and Matrix only through outbound connections.
 
+
+## 3.1 Plugin service boundary
+
+The plugin system is generic and implementation-language-neutral. Rinx supplies
+user interaction; Palpo supplies homeserver and fleet transport; Hagency alone
+owns the local fleet, plugin lifecycle, execution authority, usage, and
+settlement:
+
+```text
+Rinx → Palpo → Hagency::PluginService
+                    ├─ one registry handle and immutable revision leases
+                    ├─ bounded scheduler and guardian-owned children
+                    ├─ durable invocations and post-commit event queues
+                    ├─ qualified runtime sessions and harness/view sessions
+                    └─ existing DomainStore approval/workspace/usage/settlement
+```
+
+The seven manifest capabilities have fixed ownership: `startup.v1`, `action.v1`,
+and `event.v1` are one-shot; `tool.v1` is approval-gated; `runtime.v1` is a
+qualified protocol adapter; `harness.v1` is a redacted view/control process;
+and `pane.v1` is declarative metadata delivered to a named harness. Plugins
+never receive Matrix, App Service, operator, provider, or runner credentials.
+They remain trusted OS-user executables, so manifest validation and guardian
+custody are not filesystem/network sandboxing.
+
+`hagency plugin` is an authenticated loopback client of the service. The service
+performs preview, explicit trust confirmation, exact-commit install, immutable
+revision switching, lease retention, invocation polling, qualification, and
+shutdown. The CLI and console never open a second registry or domain writer.
+
+Runtime publication and dispatch re-read the exact enabled qualification for
+plugin, adapter, package, framework, model, provider, and reasoning. Qualification
+executes the active revision through the normal guardian/session seam; Hagency
+derives the evidence digest, and a stale/disabled/missing row cannot affect
+built-in resources. Runtime adapters execute agent turns. Harness adapters provide
+constrained views and template-bound prepare/release, not turn submission. These
+adapters are optional companion examples; provider-specific protocol and target
+documentation lives in the separately versioned plugin repository.
+
 | Path | Caller | Auth |
 | --- | --- | --- |
 | `/health`, `/ready` | Supervisors | None. `/ready` answers 503 while any configured component is not ready. |

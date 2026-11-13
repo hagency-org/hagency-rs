@@ -1854,3 +1854,54 @@ div[data-engagement-id] > section:nth-last-child(-n+2) { grid-column: auto; }
 .resource-capacity b { font-size: 16px; font-variant-numeric: tabular-nums; }
 .resource-capacity b span, .resource-capacity small { font-size: 13px; color: var(--ink-2); font-weight: 400; }
 .resource-capacity .meter { width: 100%; max-width: 320px; }
+
+/* Plugin install is intentionally scoped: source review is a compact workflow,
+ * not a global form or table override. */
+.plugin-install { display: grid; gap: 16px; }
+.plugin-install > h2, .plugin-install > p { margin: 0; }
+.plugin-link-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+.plugin-remote-form { margin: 0; }
+.plugin-source-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; align-items: end; }
+.plugin-source-grid legend { grid-column: 1 / -1; margin: 0; }
+.plugin-source-help { grid-column: 1 / -1; margin: 0; }
+.plugin-source-grid > label { min-width: 0; }
+.plugin-source-grid > button { min-height: 40px; }
+.plugin-preview { display: grid; gap: 12px; }
+.plugin-preview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.plugin-source-badge { border: 1px solid var(--line-strong); border-radius: 999px; padding: 3px 8px; color: var(--ink-dim); font: 600 11px/1 var(--mono); }
+.plugin-digests { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; margin: 0; }
+.plugin-digests dt { color: var(--ink-dim); font-size: 12px; }
+.plugin-digests dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.plugin-preview > p { margin: 0; }
+.plugin-builds { border-top: 1px solid var(--line); padding-top: 10px; }
+.plugin-builds summary { cursor: pointer; color: var(--ink-2); }
+.plugin-builds ul { margin: 8px 0 0; padding-left: 20px; }
+.plugin-builds code { overflow-wrap: anywhere; }
+.plugin-trust-note { color: var(--ink-2); }
+.plugin-detail-title { margin-top: 0; font-size: 18px; }
+.plugin-details { display: grid; gap: 12px; }
+.plugin-details h3, .plugin-details p { margin: 0; }
+.plugin-detail-head { align-items: flex-start; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.plugin-detail-head .plugin-detail-title { min-width: 0; margin-bottom: 0; overflow-wrap: anywhere; }
+.plugin-details h3 { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim); }
+.plugin-action-row { padding-top: 0; }
+.plugin-details > .btn.primary { justify-self: start; }
+.plugin-details > .cmd { margin: 0; max-height: 280px; overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); color: var(--ink-2); font: 400 12px/1.65 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.plugin-setting { display: grid !important; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); color: var(--ink); }
+.plugin-setting > span { min-width: 0; font-weight: 600; }
+.plugin-setting > small { grid-column: 1; min-width: 0; color: var(--ink-dim); font-size: 12px; line-height: 1.45; }
+.plugin-setting > input:not([type="checkbox"]), .plugin-setting > select, .plugin-setting > textarea { grid-column: 1 / -1; width: 100%; }
+.plugin-setting > .plugin-setting-toggle { grid-column: 2; grid-row: 1 / span 2; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+@media (max-width: 980px) {
+  .plugin-source-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .plugin-source-help, .plugin-source-grid > button { grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+  .plugin-settings-grid { grid-template-columns: 1fr; }
+  .plugin-link-row, .plugin-source-grid, .plugin-digests { grid-template-columns: 1fr; }
+  .plugin-link-row > button, .plugin-source-grid > button { width: 100%; }
+  .plugin-source-grid legend, .plugin-source-help { grid-column: auto; }
+  .plugin-preview-head { align-items: flex-start; flex-direction: column; }
+  .plugin-digests dd { margin-bottom: 4px; }
+}

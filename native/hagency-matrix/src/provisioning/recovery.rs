@@ -107,7 +107,7 @@ impl TokenProvisioningHost {
         eprintln!(
             "provision recovery stage={stage} effect={} result={:?}",
             effect.id,
-            result.as_ref().map(|_| ())
+            result.as_ref().map(|_| ()),
         );
         let response = result.as_ref().map(|_| ()).map_err(Clone::clone);
         *job.result.lock().map_err(|_| Error::OutcomeUnknown)? = Some(result);

@@ -174,6 +174,8 @@ function mapPreset(p) {
     // The backend returns `true` rather than the secret when one is stored.
     apiKeySet: p.apiKey === true,
     ceiling: p.ceiling ?? null,
+    runtimePlugin: p.runtimePlugin ?? null,
+    harnessPlugin: p.harnessPlugin ?? null,
     agentDefinitions: p.agentDefinitions ?? [],
     catalogPublished: p.catalogPublished === true,
     executionPolicy: p.executionPolicy ?? { yolo: false },

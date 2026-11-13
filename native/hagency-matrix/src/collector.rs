@@ -508,7 +508,10 @@ impl Inner {
         // ADR-183: a homeserver that could not be read is not evidence about
         // this incarnation; the last complete batch stands and the next pass
         // reads again. Everything else keeps the original fence.
-        if error == Error::Cancelled || Self::unreachable(&error) {
+        // A local Capacity refusal (a batch larger than this host's own bounds)
+        // is not evidence about the incarnation either: fencing the transport
+        // for it would retire every route of a healthy device.
+        if error == Error::Cancelled || error == Error::Capacity || Self::unreachable(&error) {
             #[cfg(test)]
             observation::primary(error.clone());
             return Err(error);

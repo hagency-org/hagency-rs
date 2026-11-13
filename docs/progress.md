@@ -13358,3 +13358,9 @@ Live, working-tree binary: kill -9 mid-round, restart ready in two seconds, both
   readiness, owner DMs and common settings. Documented the existing fresh-state
   source-configuration API prerequisite. Agent checked 158 local links/anchors,
   47 shell blocks and 2 JSON payloads. All changes remain uncommitted.
+
+## 2026-11-10 — Plugin update flow and six live roles
+
+- Added the service-owned `POST /api/native/v1/plugins/update` route, loopback CLI `hagency plugin update`, and console update action. UI only offers Update after a pinned preview matches an installed plugin's GitHub source family and manifest ID; trust and source rechecks remain shared with install.
+- Failed update trust/build work leaves the prior active package untouched; successful replacement revokes stale runtime qualifications and preserves registry enablement/revision lease state. HTTP regression covers refusal preservation and successful replacement.
+- Focused parser and HTTP tests pass; `cargo fmt --all -- --check`, `git diff --check`, and the native console webpack artifact build pass. Broad mockup checks still require the missing dev-server fixture; the direct non-webpack Next build has a pre-existing runtime-module failure.

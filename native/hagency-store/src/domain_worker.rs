@@ -3473,6 +3473,9 @@ impl DomainStore {
         input: Option<serde_json::Value>,
         now: u64,
     ) -> Result<Option<AgentDefinition>, Error> {
+        let input = input
+            .map(serde_json::from_value::<crate::AgentDefinitionInput>)
+            .transpose()?;
         self.call(weight(&(&resource_id, &definition_id))?, move |db| {
             db.edit_agent_definition(&resource_id, definition_id.as_deref(), input.as_ref(), now)
         })
@@ -3500,6 +3503,18 @@ impl DomainStore {
     /// with entity payloads. One writer job, one bounded read.
     pub async fn console_entities(&self) -> Result<serde_json::Value, Error> {
         self.call(64, |db| db.console_entities()).await
+    }
+    /// Choose the language of every notice the store words from now on
+    /// (presentation only; one writer job).
+    pub async fn set_notice_language(
+        &self,
+        language: hagency_core::notice::NoticeLanguage,
+    ) -> Result<(), Error> {
+        self.call(8, move |db| {
+            db.set_notice_language(language);
+            Ok(())
+        })
+        .await
     }
     /// The read-only agent detail (board #22): one writer job, one bounded
     /// agent-keyed read — the projection is computed at the store, so the
@@ -5718,6 +5733,65 @@ impl DomainStore {
         self.call(weight(&proof.weight())?, move |db| {
             db.maintain_owned_approval_clock(&proof, writer_time)
         })
+        .await
+    }
+}
+impl DomainStore {
+    pub async fn put_plugin_runtime_qualification(
+        &self,
+        qualification: crate::PluginRuntimeQualification,
+    ) -> Result<(), Error> {
+        self.call(weight(&qualification)?, move |db| {
+            db.put_plugin_runtime_qualification(&qualification)
+        })
+        .await
+    }
+    pub async fn revoke_plugin_runtime_qualifications(
+        &self,
+        plugin_id: String,
+    ) -> Result<(), Error> {
+        self.call(weight(&plugin_id)?, move |db| {
+            db.revoke_plugin_runtime_qualifications(&plugin_id)
+        })
+        .await
+    }
+    pub async fn plugin_runtime_choices(
+        &self,
+        plugin_id: String,
+    ) -> Result<Vec<crate::PluginRuntimeChoice>, Error> {
+        self.call(weight(&plugin_id)?, move |db| {
+            db.plugin_runtime_choices(&plugin_id)
+        })
+        .await
+    }
+    pub async fn plugin_runtime_choices_all(
+        &self,
+    ) -> Result<Vec<crate::PluginRuntimeChoice>, Error> {
+        self.call(weight(&"plugin_runtime_choices_all")?, |db| {
+            db.plugin_runtime_choices_all()
+        })
+        .await
+    }
+    pub async fn plugin_runtime_qualification(
+        &self,
+        runtime: hagency_core::project::RuntimePluginIdentity,
+        framework: String,
+        model: String,
+        provider: String,
+        reasoning: Option<String>,
+    ) -> Result<Option<crate::PluginRuntimeQualification>, Error> {
+        self.call(
+            weight(&(&runtime, &framework, &model, &provider, &reasoning))?,
+            move |db| {
+                db.plugin_runtime_qualification(
+                    &runtime,
+                    &framework,
+                    &model,
+                    &provider,
+                    reasoning.as_deref(),
+                )
+            },
+        )
         .await
     }
 }

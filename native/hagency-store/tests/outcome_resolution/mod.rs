@@ -45,6 +45,27 @@ fn custody(f: &Fixture) -> Value {
 }
 
 #[test]
+fn native_admission_failure_can_be_inspected() {
+    let mut f = Fixture::configured(true, None, "dispatch", true);
+    f.db.observe_owned_failure(&f.cap, hagency_store::OwnedFailure::Admission, 1007)
+        .unwrap();
+    let detail = serde_json::json!({"status":{"protocol":"not_started"}}).to_string();
+    f.sql()
+        .execute(
+            "INSERT INTO runner_attempt_events(dispatch_id,fence,seq,at_ms,phase,detail) VALUES('dispatch',1,1,1007,'failed',?1)",
+            [&detail],
+        )
+        .unwrap();
+    let inspection =
+        f.db.begin_outcome_inspection(&f.engagement, "dispatch", 60_000, 1010)
+            .unwrap();
+    assert_eq!(inspection["snapshot"]["fenced"], true);
+    assert_eq!(
+        inspection["snapshot"]["observation"]["status"]["protocol"],
+        "not_started"
+    );
+}
+#[test]
 fn native_owned_stop_resolution_observation() {
     for action in [
         OutcomeAction::Continue,

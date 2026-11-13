@@ -198,7 +198,7 @@ console.log(`\nBrowser-only invariants against ${BASE}\n`);
    * show up first. A body that scrolls sideways loses the rail's right edge and the
    * last column at once.
    */
-  for (const path of ['/engagements', '/workforce']) {
+  for (const path of ['/engagements', '/workforce', '/plugins']) {
     for (const w of [375, 900, 1440]) {
       const ctx = await browser.createBrowserContext();
       const page = await ctx.newPage();

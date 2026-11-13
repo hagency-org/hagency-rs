@@ -385,6 +385,7 @@ fn owned_failure_label(error: &hagency_execution::Failure) -> &'static str {
         // native runner. The framework itself stays out of this fixed label
         // vocabulary; the operator-facing word is the failure variant's own.
         UnsupportedRunner { .. } => "unsupported_runner",
+        RuntimeNotReady { .. } => "runtime_not_ready",
     }
 }
 /// Bounded projection of why a guardian stopped observing its tree. Diagnostic
@@ -1588,9 +1589,11 @@ impl Bootstrap {
             _ => None,
         };
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: app_entered");
+        let plugins = hagency_plugin::PluginService::open(&state).map_err(|_| Failure::Startup)?;
         let mut app = crate::App::new(store.clone(), &token, listen)
             .map_err(|_| Failure::Startup)?
             .with_domain(domain.clone())
+            .with_plugins(plugins)
             .with_development(status.clone())
             .with_palpo(palpo_status.clone());
         let mut palpo = palpo::Live::new(
@@ -1766,6 +1769,9 @@ impl Bootstrap {
             pump.close().await?;
         }
         self.approval = None;
+        if let Some(plugins) = self.app.plugins() {
+            plugins.shutdown().map_err(|_| Failure::OutcomeUnknown)?;
+        }
         if !self.domain_closed {
             self.domain
                 .shutdown()
@@ -1846,6 +1852,9 @@ impl Bootstrap {
         // Poll the real server first. Its listener/router exist before any child
         // or helper can try to connect; no fixture-only readiness setter.
         tokio::select! { biased; result=&mut serving=>{result.map_err(|_|Failure::Server)?;return Err(Failure::Server);}, _=tokio::task::yield_now()=>{} }
+        if let Some(plugins) = self.app.plugins() {
+            plugins.start().map_err(|_| Failure::Startup)?;
+        }
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: driver_entered");
         for prepared in std::mem::take(&mut self.palpo_prepared) {
             self.palpo.start(prepared).await?;
