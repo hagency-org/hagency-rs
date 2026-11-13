@@ -270,6 +270,58 @@ async fn native_appservice_account_palpo_register_fallback() {
 }
 
 #[tokio::test]
+async fn native_appservice_account_recovers_lost_register_reply_when_identity_exists() {
+    let state = PrivateState::new();
+    let effect = effect();
+    let mut fake = Fake::start(true).await;
+    let cancel = CancellationToken::new();
+    let original = as_operation(&fake, state.path(), &effect).execute(&cancel);
+    let (result, ()) = tokio::join!(original, async {
+        loop {
+            let request = fake.next().await;
+            if request.target.ends_with("/register") {
+                assert!(root(state.path(), &effect).join("possible").exists());
+                request.raw(
+                    b"HTTP/1.1 200 Fixture\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{".to_vec(),
+                );
+                break;
+            }
+            let response = as_reply(&request, state.path(), &effect);
+            request.json(response.0, response.1);
+        }
+    });
+    assert_eq!(error(result), Error::OutcomeUnknown);
+    assert!(!root(state.path(), &effect).join("initial").exists());
+
+    let retry = as_operation(&fake, state.path(), &effect).execute(&cancel);
+    tokio::pin!(retry);
+    let account = loop {
+        tokio::select! {
+            result = &mut retry => break result.unwrap(),
+            request = fake.next() => {
+                assert!(!request.target.ends_with("/register"), "lost registration must not retry create");
+                let exact_identity = request.method == "GET"
+                    && request.headers.get("authorization") == Some(&format!("Bearer {AS_TOKEN}"))
+                    && request.target.contains("user_id=")
+                    && !request.target.contains("hagency_namespace_probe_")
+                    && !root(state.path(), &effect).join("initial").exists();
+                let response = if exact_identity {
+                    (200, json!({"user_id": identity(&effect).0, "is_guest": false}))
+                } else {
+                    as_reply(&request, state.path(), &effect)
+                };
+                request.json(response.0, response.1);
+            }
+        }
+    };
+    assert_eq!(account.sender_mxid(), identity(&effect).0);
+    assert_eq!(account.device_id(), identity(&effect).1);
+    assert!(root(state.path(), &effect).join("initial").exists());
+    assert!(root(state.path(), &effect).join("complete").exists());
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn native_appservice_account_provision() {
     let state = PrivateState::new();
     let effect = effect();
@@ -566,13 +618,42 @@ async fn native_appservice_account_custody() {
         wait_unlocked(&root(state.path(), &effect)).await;
         if lost {
             let before = fake.requests();
-            assert!(
-                as_operation(&fake, state.path(), &effect)
-                    .execute(&CancellationToken::new())
-                    .await
-                    .is_err()
-            );
-            assert_eq!(fake.requests(), before);
+            if boundary == "register" {
+                let retry_cancel = CancellationToken::new();
+                let retry = as_operation(&fake, state.path(), &effect).execute(&retry_cancel);
+                tokio::pin!(retry);
+                let mut writes = 0;
+                let result = loop {
+                    tokio::select! {
+                        result = &mut retry => break result,
+                        request = fake.next() => {
+                            if request.method == "POST" {
+                                writes += 1;
+                            }
+                            let missing_identity = request.method == "GET"
+                                && request.headers.get("authorization") == Some(&format!("Bearer {AS_TOKEN}"))
+                                && request.target.contains("user_id=")
+                                && !request.target.contains("hagency_namespace_probe_");
+                            let response = if missing_identity {
+                                (404, json!({"errcode":"M_NOT_FOUND"}))
+                            } else {
+                                as_reply(&request, state.path(), &effect)
+                            };
+                            request.json(response.0, response.1);
+                        }
+                    }
+                };
+                assert!(matches!(result, Err(Error::Remote(404))));
+                assert_eq!(writes, 0);
+            } else {
+                assert!(
+                    as_operation(&fake, state.path(), &effect)
+                        .execute(&CancellationToken::new())
+                        .await
+                        .is_err()
+                );
+                assert_eq!(fake.requests(), before);
+            }
         }
         fake.close().await;
     }

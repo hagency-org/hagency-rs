@@ -1,5 +1,5 @@
 //! Private terminal source receipts. They confer no event/room/crypto authority.
-use super::{Error, MAX_TIMELINE, Receipt};
+use super::{Error, MAX_TIMELINE, MAX_TOTAL_TIMELINE, Receipt};
 use hagency_core::canonical;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -167,7 +167,7 @@ pub(super) fn validate(
     candidates: usize,
     filtered: usize,
 ) -> Result<(), Error> {
-    if values.len() > MAX_TIMELINE {
+    if values.len() > MAX_TOTAL_TIMELINE {
         return Err(Error::Storage);
     }
     let mut next = 0;
@@ -220,8 +220,14 @@ pub(crate) fn raw_events(raw: &Value) -> Result<Vec<(String, Value)>, Error> {
                 return Err(Error::Unsupported);
             }
             if let Some(events) = update.pointer("/timeline/events") {
-                for event in events.as_array().ok_or(Error::Wire)? {
-                    if all.len() >= MAX_TIMELINE {
+                let events = events.as_array().ok_or(Error::Wire)?;
+                // Each room is bounded by the sync filter's own limit (a server
+                // exceeding it is refused), and the batch by every observed room.
+                if events.len() > MAX_TIMELINE {
+                    return Err(Error::Capacity);
+                }
+                for event in events {
+                    if all.len() >= MAX_TOTAL_TIMELINE {
                         return Err(Error::Capacity);
                     }
                     all.push((room.clone(), event.clone()));

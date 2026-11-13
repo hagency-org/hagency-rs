@@ -37,6 +37,7 @@ impl Operation {
         account: &ProvisionedTokenAccount,
         scope: ProvisionScope,
         token: &str,
+        transport_generation: u64,
     ) -> Result<Self, Error> {
         if !(16..=4096).contains(&token.len()) || !token.bytes().all(|b| (33..=126).contains(&b)) {
             return Err(Error::Config);
@@ -60,7 +61,7 @@ impl Operation {
             "request":request.digest().map_err(|_|Error::Config)?,"representative":project::hash(token.as_bytes()),
             "agent_credential":project::hash(account.token.as_bytes()),"key":project::hash(&account.key)})).map_err(|_|Error::Config)?;
         let config = account.host_config(
-            1,
+            transport_generation,
             account.key,
             vec![HostRoom {
                 room_id: request.target_room_id.clone(),
@@ -111,6 +112,12 @@ impl Operation {
             representative,
             representative_write,
         })
+    }
+    pub(super) fn owner_response_exists(&self) -> Result<bool, Error> {
+        self.root
+            .join("owner-invite-response")
+            .try_exists()
+            .map_err(|_| Error::Storage)
     }
     pub(super) async fn inspect_before_owner_invite(
         &self,
@@ -892,7 +899,7 @@ impl Jobs {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let mut resuming = false;
+        let mut resuming = phase == Phase::Owner && operation.owner_response_exists()?;
         let job = {
             let mut guard = self.0.lock().map_err(|_| Error::OutcomeUnknown)?;
             if let Some(job) = guard.as_ref() {

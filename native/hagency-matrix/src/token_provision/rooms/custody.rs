@@ -1,4 +1,4 @@
-//! Separate fixed encrypted room-write custody; partial records never rearm.
+//! Separate fixed encrypted room-write custody; room-side partial records never rearm, but the pre-create marker is safe to resume.
 use crate::Error;
 use hagency_store::private;
 use matrix_sdk_store_encryption::StoreCipher;

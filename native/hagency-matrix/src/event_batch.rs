@@ -18,12 +18,20 @@ pub(crate) mod disposition;
 use disposition::{Decision, Disposition, Rejection, Source};
 
 pub(crate) const MAX_TIMELINE: usize = 100;
+/// The sync filter allows MAX_TIMELINE events per room, so the batch-wide
+/// bound covers every observed room rather than one room's worth. Each room is
+/// still bounded by MAX_TIMELINE on its own.
+pub(crate) const MAX_TOTAL_TIMELINE: usize = MAX_TIMELINE * MAX_TARGETS;
 pub(crate) const MAX_TARGETS: usize = 64;
 /// A bounded retention of raw `m.room.encrypted` envelopes whose room key had
 /// not arrived yet (TS `bridge-matrix.js:6646` `pendingEncryptedEventStore`).
 /// Capacity refuses rather than evicting: an unresolved custody is never
 /// silently dropped (TS throws and the durable sync token does not advance).
-pub(crate) const MAX_PENDING_UNDECRYPTABLE: usize = 64;
+/// One room may legitimately hold a full timeline of such envelopes and a
+/// batch spans several rooms; a bound below that would refuse the same batch
+/// on every pass and stall intake. The durable list stays well below the SDK
+/// journal bound (a few KiB per envelope against MAX_JOURNAL_BYTES).
+pub(crate) const MAX_PENDING_UNDECRYPTABLE: usize = MAX_TIMELINE * 10;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
@@ -474,7 +482,10 @@ impl Batch {
         if serde_json::to_vec(&(&events, &self.pre_project, &dispositions, &pending))
             .map_err(|_| Error::Storage)?
             .len()
-            > 1024 * 1024
+            // The raw sync response is already bounded by `limits.bytes`
+            // (at most 1 MiB); candidates add decrypted content and the ledger.
+            // Stay well below the SDK journal bound (MAX_JOURNAL_BYTES).
+            > 4 * 1024 * 1024
         {
             return Err(Error::Capacity);
         }
@@ -822,7 +833,7 @@ impl Batch {
                 .len()
                 .checked_add(self.pre_project.len())
                 .and_then(|n| n.checked_add(self.filtered))
-                .is_none_or(|n| n > MAX_TIMELINE)
+                .is_none_or(|n| n > MAX_TOTAL_TIMELINE)
             || self.acknowledgements.len() > self.events.len()
             || self.raw.get("next_batch").and_then(Value::as_str) != Some(self.token.as_str())
             || canonical::transport_digest(&self.raw).map_err(|_| Error::Storage)? != self.digest

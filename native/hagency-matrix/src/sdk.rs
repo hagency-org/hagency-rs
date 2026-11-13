@@ -1306,7 +1306,7 @@ impl Sdk {
                         .acknowledgements
                         .len()
                         .checked_add(receipt.filtered)
-                        .is_none_or(|n| n > crate::event_batch::MAX_TIMELINE)
+                        .is_none_or(|n| n > crate::event_batch::MAX_TOTAL_TIMELINE)
                     || !journal
                         .receipts
                         .contains(&(receipt.token.clone(), receipt.digest.clone()))
