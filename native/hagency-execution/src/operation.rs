@@ -191,6 +191,11 @@ pub enum Failure {
         "no native runner exists for framework {framework}; the dispatch is refused before any spawn"
     )]
     UnsupportedRunner { framework: String },
+    /// The plugin runtime's readiness probe said its provider cannot take a
+    /// turn now (for Herdr: no server, or no target agent). Nothing started;
+    /// the dispatch was requeued with a backoff before this was returned.
+    #[error("plugin runtime is not ready; the dispatch was requeued before any start: {reason}")]
+    RuntimeNotReady { reason: String },
 }
 impl Failure {
     /// A lost authority named by the check and the store's own refusal.
@@ -225,6 +230,8 @@ impl Failure {
                 framework: framework.clone(),
             },
             Self::PeerUnavailable => OwnedFailure::PeerUnavailable,
+            // The same outcome `fail_before_start` records: no runner started.
+            Self::RuntimeNotReady { .. } => OwnedFailure::SpawnFailed,
         }
     }
 }
@@ -350,6 +357,10 @@ fn settlement_failure(report: &mut Report, error: &hagency_store::Error) -> Fail
 /// request must be answered promptly, while a running turn may stay quiet up
 /// to `turn_idle` between frames (runtimes heartbeat with `progress`). The
 /// dispatch budget and deadline still bound the whole turn.
+/// How long a dispatch whose plugin runtime is not ready waits before it is
+/// claimed again. Long enough that a stopped provider is not polled hot.
+const PLUGIN_NOT_READY_RETRY_MS: u64 = 30_000;
+
 const PLUGIN_TIMEOUTS: hagency_runtime::owned::PluginTimeouts =
     hagency_runtime::owned::PluginTimeouts {
         response: Duration::from_millis(2_000),
@@ -363,7 +374,8 @@ fn observes_completion<T>(drive: &Result<T, Failure>) -> bool {
             | Failure::Deadline
             | Failure::UnsupportedApproval
             | Failure::PeerUnavailable
-            | Failure::SettlementUnknown)
+            | Failure::SettlementUnknown
+            | Failure::RuntimeNotReady { .. })
     )
 }
 
@@ -2642,6 +2654,38 @@ async fn execute(
     report.account = account;
     report.local_codex = host.local_codex.clone();
     checkpoint(cancel, until)?;
+    // A plugin runtime that declares a readiness probe is asked before the
+    // dispatch starts. A provider that cannot take a turn now (its server is
+    // down, its target is gone) defers the dispatch as never started: it is
+    // requeued with a backoff and the thread says so, instead of the dispatch
+    // being fenced with an unknown outcome and its session quarantined.
+    if let crate::host::PreparedRunner::Plugin(plugin) = &runner
+        && let Some(service) = host.plugin_service()
+    {
+        let launch = plugin.runtime.clone();
+        let input = serde_json::json!({
+            "dispatchId": cap.dispatch_id,
+            "harnessTemplate": plugin.harness_template.as_ref().map(|template| &template.values),
+        });
+        let readiness = bounded(
+            tokio::task::spawn_blocking(move || service.probe_runtime_readiness(&launch, &input)),
+            cancel,
+            until,
+        )
+        .await?
+        .map_err(|_| Failure::Worker)?
+        .map_err(|_| Failure::Admission)?;
+        if let hagency_plugin::RuntimeReadiness::NotReady(reason) = readiness {
+            bounded(
+                domain.fail_before_start(cap.clone(), now_ms(), PLUGIN_NOT_READY_RETRY_MS),
+                cancel,
+                until,
+            )
+            .await?
+            .map_err(|_| Failure::Admission)?;
+            return Err(Failure::RuntimeNotReady { reason });
+        }
+    }
     let start_reply = bounded(
         domain.start_owned_dispatch(cap.clone(), expected.clone()),
         cancel,

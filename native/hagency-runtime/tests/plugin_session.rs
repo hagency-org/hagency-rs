@@ -114,6 +114,7 @@ fn launch(root: &Path) -> RuntimeLaunch {
         executable: root.join("plugin"),
         arguments: vec![],
         package_dir: root.into(),
+        readiness: None,
     }
 }
 fn session(fixture: &Fixture, mode: &str) -> OwnedPluginSession {

@@ -115,6 +115,10 @@ pub struct RuntimeSpec {
     pub framework: String,
     pub command: Vec<String>,
     pub protocol: String,
+    /// An optional read-only readiness probe the host runs before it starts a
+    /// dispatch: exit 0 means the runtime's provider is ready. It must have no
+    /// side effects; a refusal requeues the dispatch as never started.
+    pub readiness: Option<Vec<String>>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,6 +206,8 @@ struct RawRuntime {
     framework: String,
     command: Vec<String>,
     protocol: String,
+    #[serde(default)]
+    readiness: Option<Vec<String>>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -366,6 +372,10 @@ impl Manifest {
                     framework: nonempty(v.framework, "runtimes.framework")?,
                     command: validate_command(v.command, "runtimes.command", true)?,
                     protocol: v.protocol,
+                    readiness: v
+                        .readiness
+                        .map(|argv| validate_command(argv, "runtimes.readiness", true))
+                        .transpose()?,
                 })
             })
             .collect::<Result<Vec<_>, ManifestError>>()?;
@@ -567,6 +577,11 @@ impl Manifest {
             .runtimes
             .iter()
             .map(|entry| &entry.command)
+            .chain(
+                self.runtimes
+                    .iter()
+                    .filter_map(|entry| entry.readiness.as_ref()),
+            )
             .chain(self.harnesses.iter().map(|entry| &entry.command))
         {
             let path = root.join(&command[0]);

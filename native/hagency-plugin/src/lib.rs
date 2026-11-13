@@ -74,6 +74,47 @@ pub struct RuntimeLaunch {
     pub executable: PathBuf,
     pub arguments: Vec<OsString>,
     pub package_dir: PathBuf,
+    /// The manifest's readiness probe, package-relative, if it declares one.
+    pub readiness: Option<Vec<String>>,
+}
+
+/// How long a runtime readiness probe may take before it counts as not ready.
+pub const READINESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// The longest reason a readiness probe may give; longer text is cut.
+const READINESS_REASON_LIMIT: usize = 512;
+
+/// What a runtime's readiness probe observed before a dispatch started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeReadiness {
+    /// The runtime declares no probe: the host starts as it always has.
+    Undeclared,
+    Ready,
+    /// The provider cannot take a turn now; nothing was started. The reason
+    /// is the probe's own bounded words, for the operator.
+    NotReady(String),
+}
+
+/// Read a probe's stdout: exactly one JSON object with a boolean `ready`.
+/// Anything else is not ready, so a broken probe defers rather than starts.
+pub fn readiness_verdict(stdout: &[u8]) -> RuntimeReadiness {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return RuntimeReadiness::NotReady("readiness probe answered no JSON object".into());
+    };
+    match value.get("ready").and_then(serde_json::Value::as_bool) {
+        Some(true) => RuntimeReadiness::Ready,
+        Some(false) => {
+            let reason: String = value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("not ready")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(READINESS_REASON_LIMIT)
+                .collect();
+            RuntimeReadiness::NotReady(reason)
+        }
+        None => RuntimeReadiness::NotReady("readiness probe answered without `ready`".into()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1707,6 +1748,45 @@ impl PluginService {
             executable,
             arguments,
             package_dir: record.install_dir,
+            readiness: spec.readiness.clone(),
+        })
+    }
+    /// Run the runtime's declared readiness probe once, read-only and bounded,
+    /// in its package directory with the runtime's own environment (no
+    /// workspace). `input` is written to its stdin as JSON. The probe answers
+    /// one JSON object on stdout: `{"ready":true}` or
+    /// `{"ready":false,"reason":"..."}`. Anything else, a timeout, or a probe
+    /// whose cleanup is unproven is `NotReady`: the caller only ever uses the
+    /// verdict to defer a dispatch that has not started.
+    pub fn probe_runtime_readiness(
+        &self,
+        launch: &RuntimeLaunch,
+        input: &serde_json::Value,
+    ) -> Result<RuntimeReadiness, PluginError> {
+        let Some(argv) = launch.readiness.clone() else {
+            return Ok(RuntimeReadiness::Undeclared);
+        };
+        let environment = self.environment_with_settings(
+            &launch.runtime.plugin_id,
+            &launch.package_dir,
+            &format!("{}.readiness", launch.runtime.adapter_id),
+            None,
+            &launch.runtime.settings_sha256,
+            &launch.runtime.package_sha256,
+        )?;
+        let result = self.run_bounded(
+            &launch.runtime.plugin_id,
+            CommandRequest {
+                argv,
+                cwd: launch.package_dir.clone(),
+                stdin: serde_json::to_vec(input)?,
+                environment,
+                deadline: READINESS_DEADLINE,
+            },
+        );
+        Ok(match result {
+            Ok(result) => readiness_verdict(&result.stdout),
+            Err(error) => RuntimeReadiness::NotReady(format!("readiness probe failed: {error}")),
         })
     }
     pub fn logs(&self, id: &str) -> Result<Vec<LogRecord>, PluginError> {

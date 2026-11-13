@@ -385,6 +385,7 @@ fn owned_failure_label(error: &hagency_execution::Failure) -> &'static str {
         // native runner. The framework itself stays out of this fixed label
         // vocabulary; the operator-facing word is the failure variant's own.
         UnsupportedRunner { .. } => "unsupported_runner",
+        RuntimeNotReady { .. } => "runtime_not_ready",
     }
 }
 /// Bounded projection of why a guardian stopped observing its tree. Diagnostic

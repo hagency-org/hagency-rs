@@ -837,3 +837,79 @@ fn reference_examples_use_closed_manifest_schema() {
         Manifest::parse(&bytes).expect("valid example manifest");
     }
 }
+
+/// A readiness probe answers one JSON object; anything else defers, so a
+/// broken probe can never start a dispatch it was asked to hold back.
+#[test]
+fn native_plugin_readiness_verdict_is_typed_and_fails_closed() {
+    use hagency_plugin::{RuntimeReadiness, readiness_verdict};
+    assert_eq!(
+        readiness_verdict(br#"{"ready":true}"#),
+        RuntimeReadiness::Ready
+    );
+    assert_eq!(
+        readiness_verdict(br#"{"ready":false,"reason":"herdr server is not running"}"#),
+        RuntimeReadiness::NotReady("herdr server is not running".into())
+    );
+    for broken in [&b""[..], b"ok", br#"{"ready":"yes"}"#, br#"{}"#, b"[true]"] {
+        assert!(
+            matches!(readiness_verdict(broken), RuntimeReadiness::NotReady(_)),
+            "{}",
+            String::from_utf8_lossy(broken)
+        );
+    }
+    let long = format!(r#"{{"ready":false,"reason":"{}\u0007"}}"#, "x".repeat(2000));
+    let RuntimeReadiness::NotReady(reason) = readiness_verdict(long.as_bytes()) else {
+        panic!("not ready");
+    };
+    assert_eq!(
+        reason.chars().count(),
+        512,
+        "bounded, control characters dropped"
+    );
+}
+
+/// The probe is a package-relative command like the runtime's own: an
+/// absolute or escaping path is refused, and a declared probe must exist.
+#[test]
+fn native_plugin_runtime_readiness_is_package_relative() {
+    let runtime = |readiness: &str| {
+        format!(
+            "schema = \"hagency.plugin/v1\"\nid = \"example.ready\"\nname = \"Ready\"\nversion = \"1.0.0\"\nmin_hagency_version = \"0.1.0\"\nplatforms = [\"linux-x86_64\"]\n\n[[runtimes]]\nid = \"fake\"\nframework = \"fake\"\ncommand = [\"bin/runtime\"]\nprotocol = \"hagency.runtime/v1\"\n{readiness}"
+        )
+    };
+    let parsed = Manifest::parse(runtime("readiness = [\"bin/probe\", \"--check\"]\n").as_bytes())
+        .expect("relative probe");
+    assert_eq!(
+        parsed.runtimes[0].readiness,
+        Some(vec!["bin/probe".to_owned(), "--check".to_owned()])
+    );
+    assert_eq!(
+        Manifest::parse(runtime("").as_bytes())
+            .expect("no probe")
+            .runtimes[0]
+            .readiness,
+        None
+    );
+    for refused in [
+        "readiness = [\"/bin/true\"]\n",
+        "readiness = [\"../probe\"]\n",
+        "readiness = []\n",
+    ] {
+        assert!(
+            Manifest::parse(runtime(refused).as_bytes()).is_err(),
+            "{refused}"
+        );
+    }
+    let dir = tempdir().expect("package");
+    fs::create_dir_all(dir.path().join("bin")).expect("bin");
+    fs::write(dir.path().join("bin/runtime"), "#!/bin/sh\n").expect("runtime");
+    assert!(
+        parsed.validate_package_root(dir.path()).is_err(),
+        "a declared probe that is not in the package is refused"
+    );
+    fs::write(dir.path().join("bin/probe"), "#!/bin/sh\n").expect("probe");
+    parsed
+        .validate_package_root(dir.path())
+        .expect("both entrypoints exist");
+}

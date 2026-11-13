@@ -49,6 +49,12 @@ approval, workspace, usage, cleanup, and settlement authority.
   tool outside the offered catalog, and any `tool/call` when no catalog was
   offered. A helper that stopped answering makes later calls fail as outcome
   unknown. Plugin approval requests are still denied.
+- Run a runtime's optional manifest `readiness` probe (package-relative argv,
+  bounded, read-only, the runtime's own environment, no workspace) before the
+  dispatch starts. `{"ready":false,"reason":...}`, malformed output, or a
+  timeout requeues the dispatch as never started (`fail_before_start` with a
+  backoff, a launch-retry notice); it never fences the dispatch or
+  quarantines its session. A runtime without a probe starts as before.
 - When a plugin turn completes with plain `finalText` and no
   `complete_task_with_reply` call, the host moves the task to Done and sends the
   text as the room reply (only when the task has a Matrix route).
@@ -118,6 +124,18 @@ Scenario: The runtime receives HOME and tools only when due
   Given a guardian command environment
   When it is built
   Then `HOME` is present and no secret or ambient variable is
+
+Scenario: A runtime that is not ready defers the dispatch without starting it
+  Test: native_plugin_runtime_not_ready_requeues_without_starting
+  Given a qualified plugin runtime whose readiness probe answers not ready
+  When a dispatch is claimed for it
+  Then nothing is launched, the dispatch is queued behind a backoff, the session is not quarantined, and a later ready probe launches it
+
+Scenario: Readiness probes are package-relative and fail closed
+  Test: native_plugin_readiness_verdict_is_typed_and_fails_closed
+  Given ready, not-ready, malformed and oversized probe answers
+  When the host reads them
+  Then only an explicit ready starts the dispatch and reasons are bounded
 
 ## Out of Scope
 
