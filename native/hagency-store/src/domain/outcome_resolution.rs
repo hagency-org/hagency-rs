@@ -128,7 +128,23 @@ fn snapshot(db: &Connection, id: &str, d: &execution::Dispatch) -> Result<Snapsh
                             |r| r.get(0),
                         )
                         .optional()?;
-                    ("runner_lost", lost.ok_or(Error::State)?)
+                    if let Some(lost) = lost {
+                        ("runner_lost", lost)
+                    } else {
+                        // A dispatch refused before its runner started (owned
+                        // admission) is settle-only evidence of the same shape.
+                        let admission_failed: Option<String> = db
+                            .query_row(
+                                "SELECT e.detail FROM runner_attempt_events e WHERE e.dispatch_id=?1 AND e.fence=?2 AND e.phase='failed' AND json_extract(e.detail,'$.status.protocol')='not_started' ORDER BY e.seq DESC LIMIT 1",
+                                params![id, d.fence],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        (
+                            "runner_admission_failed",
+                            admission_failed.ok_or(Error::State)?,
+                        )
+                    }
                 }
             };
             let receipt = canonical::digest(&json!([kind, &evidence]))?;

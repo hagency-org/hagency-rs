@@ -134,7 +134,7 @@ pub struct DomainRepository {
     warm_scopes: std::collections::BTreeMap<String, OwnedProvisionScope>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 73;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 74;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -1383,6 +1383,8 @@ impl DomainRepository {
                         73,
                         include_str!("migrations/079-agent-harness-templates.sql"),
                     ),
+                    // Plugin usage sources accept the resource's validated framework identifier.
+                    (74, include_str!("migrations/080-plugin-usage-sources.sql")),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[

@@ -1,6 +1,14 @@
 use super::*;
 use hagency_core::project::EngagementState;
 
+#[test]
+fn native_usage_source_binds_plugin_framework() {
+    let mut f = Fixture::with_resource_framework(Framework::Codex, "example-plugin", 1000);
+    let (_cap, _started, source) = f.start();
+    assert!(source.id().starts_with("usage_"));
+    assert_eq!(f.count("usage_sources"), 1);
+}
+
 /// THE LOCKOUT, ported: a ceiling swamped by cache reads still approves work.
 /// 13.6M consumed against a 10M ceiling of which only 681k is fresh. Under a
 /// consumed-total rule this agent had zero headroom and every allocation

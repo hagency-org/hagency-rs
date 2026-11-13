@@ -25,9 +25,11 @@ pub enum ProfileChange {
         model: String,
         reasoning: Option<String>,
     },
+    /// Boxed identities keep this request-sized enum small; the JSON shape is
+    /// unchanged (serde treats `Box` transparently).
     SelectPlugin {
-        runtime_plugin: RuntimePluginIdentity,
-        harness_plugin: Option<HarnessPluginIdentity>,
+        runtime_plugin: Box<RuntimePluginIdentity>,
+        harness_plugin: Option<Box<HarnessPluginIdentity>>,
         framework: String,
         model: String,
         provider: String,
@@ -276,8 +278,8 @@ impl DomainRepository {
                 resource.provider = Some(provider);
                 resource.reasoning = reasoning;
                 resource.octos_profile = None;
-                resource.runtime_plugin = Some(runtime_plugin);
-                resource.harness_plugin = harness_plugin;
+                resource.runtime_plugin = Some(*runtime_plugin);
+                resource.harness_plugin = harness_plugin.map(|harness| *harness);
                 resource.roles = serde_json::from_str(&roles)?;
                 true
             }

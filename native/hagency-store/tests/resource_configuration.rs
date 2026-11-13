@@ -417,8 +417,8 @@ fn native_resource_configuration_selects_qualified_runtime_and_harness() {
                     resource_publication_revision(&source).unwrap(),
                     true,
                     ProfileChange::SelectPlugin {
-                        runtime_plugin: runtime.clone(),
-                        harness_plugin: Some(harness.clone()),
+                        runtime_plugin: Box::new(runtime.clone()),
+                        harness_plugin: Some(Box::new(harness.clone())),
                         framework: "herdr".into(),
                         model: "herdr".into(),
                         provider: "herdr".into(),

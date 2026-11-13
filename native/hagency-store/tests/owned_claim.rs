@@ -1,9 +1,32 @@
 mod common;
 use common::*;
-use hagency_core::{replies::*, tasks::*};
-use hagency_store::{DomainRepository, EffectOutcome, OwnedClaimProfile, OwnedClaimRoom};
+use hagency_core::{
+    project::{HarnessPluginIdentity, RuntimePluginIdentity},
+    replies::*,
+    tasks::*,
+};
+use hagency_plugin::{HARNESS_TEMPLATE_SCHEMA, HarnessTemplateDocument, harness_template_digest};
+use hagency_store::{
+    DomainRepository, EffectOutcome, OwnedClaimProfile, OwnedClaimRoom, PluginRuntimeQualification,
+};
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+fn harness_template() -> HarnessTemplateDocument {
+    let mut values = BTreeMap::new();
+    values.insert("target".into(), json!("managed"));
+    let mut template = HarnessTemplateDocument {
+        schema: HARNESS_TEMPLATE_SCHEMA.into(),
+        plugin_id: "example.harness".into(),
+        harness_id: "managed".into(),
+        package_sha256: "a".repeat(64),
+        settings_sha256: "b".repeat(64),
+        template_sha256: String::new(),
+        values,
+    };
+    template.template_sha256 = harness_template_digest(&template).unwrap();
+    template
+}
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -34,6 +57,37 @@ impl Fixture {
         if framework == "octos" {
             pool.model = "kimi-k3".into();
             pool.octos_profile = Some("coding".into());
+        }
+        if framework == "herdr" {
+            pool.model = "herdr".into();
+            pool.roles = vec!["coding".into()];
+            pool.runtime_plugin = Some(RuntimePluginIdentity {
+                plugin_id: "example.runtime".into(),
+                adapter_id: "herdr".into(),
+                package_sha256: "a".repeat(64),
+                settings_sha256: "b".repeat(64),
+            });
+            pool.harness_plugin = Some(HarnessPluginIdentity {
+                plugin_id: "example.harness".into(),
+                harness_id: "managed".into(),
+                package_sha256: "a".repeat(64),
+                settings_sha256: "b".repeat(64),
+            });
+            db.put_plugin_runtime_qualification(&PluginRuntimeQualification {
+                plugin_id: "example.runtime".into(),
+                adapter_id: "herdr".into(),
+                package_sha256: "a".repeat(64),
+                settings_sha256: "b".repeat(64),
+                framework: "herdr".into(),
+                model: "herdr".into(),
+                provider: "herdr".into(),
+                reasoning: None,
+                roles: vec!["coding".into()],
+                evidence_digest: "c".repeat(64),
+                qualified_at: 1,
+                evidence: json!({"passed": true}),
+            })
+            .unwrap();
         }
         pool.provider = provider.map(str::to_owned);
         // An empty word is no reasoning setting, as Claude resources carry.
@@ -85,6 +139,43 @@ impl Fixture {
             transport,
         }
     }
+    fn with_harness_template() -> Self {
+        let fixture = Self::with_runtime("herdr", Some("herdr"), "");
+        let id = fixture.transport.engagement_id.clone();
+        let template = serde_json::to_value(harness_template()).unwrap();
+        let sql =
+            rusqlite::Connection::open(fixture._root.path().join("state/domain.sqlite3")).unwrap();
+        let effect: String = sql
+            .query_row(
+                "SELECT payload FROM effects WHERE engagement_id=?1 AND kind='provision'",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut effect: serde_json::Value = serde_json::from_str(&effect).unwrap();
+        effect["harnessTemplate"] = template.clone();
+        sql.execute(
+            "UPDATE effects SET payload=?1 WHERE engagement_id=?2 AND kind='provision'",
+            rusqlite::params![serde_json::to_string(&effect).unwrap(), &id],
+        )
+        .unwrap();
+        let projection: String = sql
+            .query_row(
+                "SELECT projection FROM engagements WHERE id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut projection: serde_json::Value = serde_json::from_str(&projection).unwrap();
+        projection["harnessTemplate"] = template;
+        sql.execute(
+            "UPDATE engagements SET projection=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_string(&projection).unwrap(), &id],
+        )
+        .unwrap();
+        fixture
+    }
+
     fn queue(&mut self, id: &str, workspace: &str) {
         self.queue_with(id, workspace, true);
     }
@@ -127,6 +218,44 @@ impl Fixture {
         .unwrap()
     }
 }
+#[test]
+fn plugin_owned_claim_accepts_runtime_resource() {
+    let mut f = Fixture::with_runtime("herdr", Some("herdr"), "");
+    f.queue("plugin_selected", "work");
+    let cap =
+        f.db.claim_owned_dispatch_for_host(
+            &f.profile("DEVICE_1", RoomPrivacy::Group {}),
+            "plugin_host",
+            2000,
+            60_000,
+            60_000,
+            1,
+        )
+        .unwrap()
+        .expect("plugin runtime dispatch is claimable");
+    assert_eq!(cap.dispatch_id, "plugin_selected");
+}
+
+#[test]
+fn plugin_owned_scope_accepts_harness_without_coordinator_allocation() {
+    let mut f = Fixture::with_harness_template();
+    f.queue("plugin_harness_scope", "work");
+    let cap =
+        f.db.claim_owned_dispatch_for_host(
+            &f.profile("DEVICE_1", RoomPrivacy::Group {}),
+            "plugin_host",
+            2000,
+            60_000,
+            60_000,
+            1,
+        )
+        .unwrap()
+        .expect("plugin harness dispatch is claimable");
+    let scope = f.db.owned_dispatch_scope(&cap, 2001).unwrap();
+    assert_eq!(scope.allocation_id(), f.transport.engagement_id);
+    assert!(scope.harness_template().is_some());
+}
+
 #[test]
 fn native_owned_claim_plaintext_project() {
     let mut f = Fixture::with_runtime_and_room("codex", None, "medium", false);
