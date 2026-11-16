@@ -151,7 +151,7 @@ impl Plugin {
         pool.runtime_plugin = Some(identity);
         let mut default_template = None;
         if harness {
-            let harness_record = service.link(&harness_package(root.path())).unwrap();
+            let harness_record = service.link(harness_package(root.path())).unwrap();
             service.enable(&harness_record.id).unwrap();
             let reference = hagency_plugin::HarnessPluginRef {
                 plugin_id: harness_record.id.clone(),
