@@ -566,6 +566,12 @@ pub struct Status {
     /// reads it to decide anything, and the wait has no deadline.
     #[serde(skip_serializing_if = "Option::is_none")]
     awaiting_owner_since_ms: Option<u64>,
+    /// ADR-199 P6: why a provision is waiting, retrying or parked, and what to
+    /// do. Fixed reason code plus a plain remedy; never a secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provision_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provision_remedy: Option<String>,
     settlement: Option<&'static str>,
     error: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -609,6 +615,8 @@ impl StatusHandle {
             refresh_failures: 0,
             refresh_since_ms: None,
             awaiting_owner_since_ms: None,
+            provision_reason: None,
+            provision_remedy: None,
             settlement: None,
             error: None,
             matrix_error: None,
@@ -699,6 +707,14 @@ impl StatusHandle {
         status.state = "awaiting_owner";
         status.awaiting_owner_since_ms = Some(since_ms);
     }
+    /// ADR-199 P6: a provision that is retrying or parked, or a wait for the
+    /// owner with its concrete remedy. Status only.
+    fn provision_note(&self, state: &'static str, reason: &'static str, remedy: String) {
+        let mut status = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        status.state = state;
+        status.provision_reason = Some(reason);
+        status.provision_remedy = Some(remedy);
+    }
     fn begin_attempt(&self) {
         let mut status = self.0.lock().unwrap_or_else(|e| e.into_inner());
         status.state = "refreshing";
@@ -707,6 +723,8 @@ impl StatusHandle {
         status.cleanup = None;
         status.stop_cause = None;
         status.awaiting_owner_since_ms = None;
+        status.provision_reason = None;
+        status.provision_remedy = None;
         status.settlement = None;
         status.error = None;
         status.matrix_error = None;

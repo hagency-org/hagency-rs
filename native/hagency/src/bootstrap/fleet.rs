@@ -72,6 +72,8 @@ impl Routes {
                 "not_started"
                     | "not_attached"
                     | "awaiting_owner"
+                    | "provision_retrying"
+                    | "provision_parked"
                     | "closed"
                     | "retiring"
                     | "refresh_refused"
@@ -120,7 +122,7 @@ impl Routes {
         if let Ok(mut entries) = self.entries.lock()
             && entries
                 .get(engagement)
-                .is_some_and(|entry| entry.status.state() == "awaiting_owner")
+                .is_some_and(|entry| is_provision_row(entry.status.state()))
         {
             entries.remove(engagement);
         }
@@ -131,7 +133,7 @@ impl Routes {
             .map(|entries| {
                 entries
                     .iter()
-                    .filter(|(_, entry)| entry.status.state() == "awaiting_owner")
+                    .filter(|(_, entry)| is_provision_row(entry.status.state()))
                     .map(|(engagement, _)| engagement.clone())
                     .collect()
             })
@@ -261,6 +263,12 @@ impl Provider {
                 .map_err(|_| hagency_matrix::Error::OutcomeUnknown)??;
                 host.take_agent(engagement)
             }
+        }
+    }
+    fn provision_notes(&self) -> Vec<hagency_matrix::ProvisionNote> {
+        match self {
+            Self::Coordinator(c) => c.provision_notes(),
+            Self::Fleet { host, .. } => host.provision_notes(),
         }
     }
     fn awaiting_owner_engagements(&self) -> Vec<(String, u64)> {
@@ -563,8 +571,37 @@ impl Service {
                 let _ = self.register_root(engagement.clone(), None, None, status);
             }
         }
+        // ADR-199 P6: the reason and remedy of every stuck provision, on its
+        // row, so the owner and the operator read what to do.
+        let notes = self.provider.provision_notes();
+        for note in &notes {
+            let status = self.routes.entries.lock().ok().and_then(|entries| {
+                entries
+                    .get(&note.engagement)
+                    .filter(|e| is_provision_row(e.status.state()))
+                    .map(|e| e.status.clone())
+            });
+            match status {
+                Some(status) => status.provision_note(note.state, note.reason, note.remedy.clone()),
+                None => {
+                    let absent = self
+                        .routes
+                        .entries
+                        .lock()
+                        .map(|entries| !entries.contains_key(&note.engagement))
+                        .unwrap_or(false);
+                    if absent {
+                        let status = StatusHandle::for_mode(DriverMode::Continuous);
+                        status.provision_note(note.state, note.reason, note.remedy.clone());
+                        let _ = self.register_root(note.engagement.clone(), None, None, status);
+                    }
+                }
+            }
+        }
         for engagement in self.routes.awaiting_rows() {
-            if !waiting.iter().any(|(e, _)| *e == engagement) {
+            if !waiting.iter().any(|(e, _)| *e == engagement)
+                && !notes.iter().any(|n| n.engagement == engagement)
+            {
                 self.routes.remove_awaiting(&engagement);
             }
         }
@@ -688,6 +725,14 @@ impl Drop for Service {
     fn drop(&mut self) {
         self.quiesce();
     }
+}
+
+/// The state words of a row that exists only while a provision is stuck.
+fn is_provision_row(state: &str) -> bool {
+    matches!(
+        state,
+        "awaiting_owner" | "provision_retrying" | "provision_parked"
+    )
 }
 
 #[cfg(test)]
