@@ -220,20 +220,24 @@ impl Drop for HostTools {
 
 /// The same host tools for a plugin runtime (`hagency.runtime/v1`): started
 /// only when the runtime asks for them, offered under the helper's own tool
-/// names, and executed exactly as for Octos.
-pub(crate) struct PluginTools {
+/// names, and executed as for Octos. A coordination call that reaches another
+/// session first goes to the owner through the gate (ADR-196); with no gate it
+/// is refused and the helper never hears of it.
+pub(crate) struct PluginTools<'a> {
     spec: Spec,
     running: Option<HostTools>,
+    gate: Option<crate::approval::plugin::PluginGate<'a>>,
 }
-impl PluginTools {
-    pub(crate) fn new(spec: Spec) -> Self {
+impl<'a> PluginTools<'a> {
+    pub(crate) fn new(spec: Spec, gate: Option<crate::approval::plugin::PluginGate<'a>>) -> Self {
         Self {
             spec,
             running: None,
+            gate,
         }
     }
 }
-impl hagency_runtime::owned::PluginToolHost for PluginTools {
+impl hagency_runtime::owned::PluginToolHost for PluginTools<'_> {
     fn prepare(
         &mut self,
     ) -> hagency_runtime::owned::ToolFuture<'_, Result<Vec<hagency_plugin::ToolDescriptor>, ()>>
@@ -264,10 +268,24 @@ impl hagency_runtime::owned::PluginToolHost for PluginTools {
         input: Value,
     ) -> hagency_runtime::owned::ToolFuture<'a, Result<Value, String>> {
         Box::pin(async move {
-            match self.running.as_mut() {
-                Some(tools) => tools.call_tool(tool, tool, input).await,
-                None => Err("Hagency task tools are unavailable for this task".to_owned()),
+            let Some(tools) = self.running.as_mut() else {
+                return Err("Hagency task tools are unavailable for this task".to_owned());
+            };
+            // A name outside this dispatch's catalog is refused by the helper
+            // call itself, gated or not.
+            if !crate::approval::plugin::gated(tool) || !self.spec.tools.contains(&tool) {
+                return tools.call_tool(tool, tool, input).await;
             }
+            // The owner answers first; the helper is called only on approval.
+            let Some(gate) = self.gate.as_mut() else {
+                return Err(format!(
+                    "{tool} needs owner approval, which is not available; nothing was sent."
+                ));
+            };
+            let permit = gate.authorize(tool, &input).await?;
+            let result = tools.call_tool(tool, tool, input).await;
+            gate.answered(permit, tools.broken).await;
+            result
         })
     }
 }
@@ -299,6 +317,10 @@ mod tests {
     }
 
     fn spec() -> Spec {
+        spec_with(false)
+    }
+
+    fn spec_with(coordination: bool) -> Spec {
         let mut environment = BTreeMap::from([
             ("PATH".into(), "".into()),
             ("HAGENCY_TASK_ID".into(), "plugin-task".into()),
@@ -311,10 +333,13 @@ mod tests {
         if let Some(system) = std::env::var_os("SystemRoot") {
             environment.insert("SystemRoot".into(), system);
         }
+        if coordination {
+            environment.insert("HAGENCY_COORDINATION_TOOLS".into(), "1".into());
+        }
         Spec {
             executable: probe(),
             environment,
-            tools: hagency_runtime::task_mcp::owned_task_tools(false, false),
+            tools: hagency_runtime::task_mcp::owned_plugin_tools(false, false, coordination),
         }
     }
 
@@ -322,10 +347,10 @@ mod tests {
     /// own catalog (the Octos set, helper names, no `hagency.` prefix), its
     /// calls run on the dispatch's task and capability, a helper refusal comes
     /// back as the tool's error, and a tool outside the catalog (coordination
-    /// included) never reaches the helper.
+    /// included, when the host did not offer it) never reaches the helper.
     #[tokio::test]
     async fn native_plugin_tools_relay_to_the_task_helper() {
-        let mut tools = PluginTools::new(spec());
+        let mut tools = PluginTools::new(spec(), None);
         // Nothing runs before the runtime asks.
         assert_eq!(
             tools.call("get_task", json!({})).await,
@@ -372,6 +397,61 @@ mod tests {
         assert_eq!(
             tools.call("list_tasks", json!({})).await.unwrap()["tool"],
             "list_tasks"
+        );
+    }
+
+    /// ADR-196: with the coordination group on, the plugin is offered the
+    /// eight coordination names beside the core task tools and no graph tool.
+    /// Without an owner gate a gated name is refused before the helper hears
+    /// of it; `comment_task`, which is not gated, still runs.
+    #[tokio::test]
+    async fn native_plugin_advertising_tool_is_offered_the_coordination_catalog() {
+        let mut tools = PluginTools::new(spec_with(true), None);
+        let catalog = tools.prepare().await.unwrap();
+        let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(
+            names,
+            hagency_runtime::task_mcp::owned_plugin_tools(false, false, true)
+        );
+        for name in hagency_runtime::task_mcp::COORDINATION_TOOLS {
+            assert!(names.contains(&name), "{name}");
+        }
+        for core in hagency_runtime::task_mcp::TASK_MCP_TOOLS {
+            assert!(names.contains(&core), "{core}");
+        }
+        assert!(
+            names.iter().all(|name| !name.contains("graph")),
+            "{names:?}"
+        );
+        for gated in [
+            "delegate_task",
+            "open_conversation",
+            "get_conversation",
+            "update_conversation_members",
+            "close_conversation",
+            "send_peer_message",
+            "read_peer_inbox",
+        ] {
+            assert_eq!(
+                tools.call(gated, json!({})).await,
+                Err(format!(
+                    "{gated} needs owner approval, which is not available; nothing was sent."
+                ))
+            );
+        }
+        // Nothing above reached the helper: its first answered call is 1.
+        let answer = tools.call("comment_task", json!({})).await.unwrap();
+        assert_eq!(answer["tool"], "comment_task");
+        assert_eq!(answer["calls"], 1);
+        // The group is off by default: exactly the old set.
+        let mut off = PluginTools::new(spec(), None);
+        let catalog = off.prepare().await.unwrap();
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            hagency_runtime::task_mcp::owned_task_tools(false, false)
         );
     }
 }

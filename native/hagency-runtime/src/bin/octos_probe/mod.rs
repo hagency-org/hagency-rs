@@ -451,6 +451,10 @@ pub(super) fn run(mode: &str, marker: &Path) -> io::Result<()> {
 pub(super) fn task_helper() -> io::Result<()> {
     let file_tools = std::env::var_os("HAGENCY_FILE_TOOLS").is_some();
     let receive_tools = std::env::var_os("HAGENCY_RECEIVE_FILE_TOOLS").is_some();
+    let coordination = std::env::var_os("HAGENCY_COORDINATION_TOOLS").is_some();
+    // Calls answered so far: one helper serves one dispatch, so a test reads
+    // from this that no call was made before the owner approved it.
+    let mut calls = 0u64;
     let mut stdin = io::stdin().lock();
     let mut line = String::new();
     loop {
@@ -464,24 +468,29 @@ pub(super) fn task_helper() -> io::Result<()> {
                 "capabilities":{"tools":{}},"serverInfo":{"name":"offline","version":"0"}}),
             Some("notifications/initialized") => continue,
             Some("tools/list") => {
-                let tools: Vec<Value> =
-                    hagency_runtime::task_mcp::owned_task_tools(file_tools, receive_tools)
-                        .into_iter()
-                        .map(|name| {
-                            json!({"name":name,"description":format!("offline {name}"),
+                let tools: Vec<Value> = hagency_runtime::task_mcp::owned_plugin_tools(
+                    file_tools,
+                    receive_tools,
+                    coordination,
+                )
+                .into_iter()
+                .map(|name| {
+                    json!({"name":name,"description":format!("offline {name}"),
                                 "inputSchema":{"type":"object","properties":{}},
                                 "annotations":{"readOnlyHint":name.starts_with("get_")
                                     || name.starts_with("list_") || name == "read_conversation"}})
-                        })
-                        .collect();
+                })
+                .collect();
                 json!({"tools":tools})
             }
             Some("tools/call") => {
                 let name = request["params"]["name"].as_str().unwrap_or_default();
+                calls += 1;
                 if name == "transition_task" {
                     json!({"content":[{"type":"text","text":"offline refusal"}],"isError":true})
                 } else {
                     let structured = json!({"tool":name,"arguments":request["params"]["arguments"],
+                        "calls":calls,
                         "task":std::env::var("HAGENCY_TASK_ID").ok(),
                         "capability":std::env::var_os("HAGENCY_RUNNER_CAPABILITY").is_some(),
                         "address":std::env::var("HAGENCY_RUNNER_API_ADDR").ok()});

@@ -68,3 +68,29 @@ async fn native_owned_profile_serves_coordination_only_with_the_marker() {
     assert!(!output.status.success());
     f.close().await;
 }
+
+#[tokio::test]
+async fn native_plugin_delegate_task_creates_pending_work_for_the_assignee() {
+    let f = Fixture::new().await;
+    let c = f.owned_client(Some("1")).await;
+    let parent = c.ok("get_task", json!({"id":f.parent.task_id})).await;
+    let args = json!({"call_id":"plugin-delegate","assignee_engagement":f.agents[1],"input_sequences":[f.seq],"definition":{"title":"Implement sum","parent_id":f.parent.task_id}});
+    let result = c.ok("delegate_task", args.clone()).await;
+    assert_eq!(result["activation"], "pending");
+    assert_eq!(f.count("canonical_tasks"), 2);
+    // The assignee has a new task of its own, in a session that is not ours.
+    assert_ne!(result["session_id"], f.parent.session_id);
+    let created = c.ok("get_task", json!({"id":result["task_id"]})).await;
+    assert_eq!(created["task"]["id"], result["task_id"]);
+    assert_ne!(created["task"]["id"], f.parent.task_id);
+    // The delegator's own task is unchanged and not completed by delegating.
+    let after = c.ok("get_task", json!({"id":f.parent.task_id})).await;
+    assert_eq!(after["task"], parent["task"]);
+    // The same call replays the same task.
+    let replay = c.ok("delegate_task", args).await;
+    assert_eq!(replay["task_id"], result["task_id"]);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(f.count("canonical_tasks"), 2);
+    c.close().await;
+    f.close().await;
+}

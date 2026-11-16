@@ -1420,6 +1420,26 @@ async fn watched_with<F: Future<Output = Result<T, E>>, T, E>(
     until: Instant,
     status: &mut Option<TaskState>,
 ) -> Result<T, Failure> {
+    watched_unless_parked(
+        future, refused, domain, cap, expected, cancel, until, status, None,
+    )
+    .await
+}
+/// `watched_with`, except that while `parked` is set the dispatch is parked on
+/// its owner (ADR-196): the plain renewal only accepts a started dispatch, and
+/// whoever set the flag renews the lease itself (`maintain_owned_approval`).
+#[allow(clippy::too_many_arguments)]
+async fn watched_unless_parked<F: Future<Output = Result<T, E>>, T, E>(
+    future: F,
+    refused: impl Fn(E) -> Failure,
+    domain: &DomainStore,
+    cap: &RunnerCapability,
+    expected: &str,
+    cancel: &AtomicBool,
+    until: Instant,
+    status: &mut Option<TaskState>,
+    parked: Option<&AtomicBool>,
+) -> Result<T, Failure> {
     tokio::pin!(future); // Held across checks; a cancelled future is never repolled.
     let mut tick = interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1429,6 +1449,9 @@ async fn watched_with<F: Future<Output = Result<T, E>>, T, E>(
             biased;
             _ = tokio::time::sleep_until(until) => return Err(Failure::Deadline),
             _ = tick.tick() => {
+                if parked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                    continue;
+                }
                 let current = bounded(domain.renew_owned_dispatch(cap.clone(), expected.into(), 5_000), cancel, until).await?
                     .map_err(|error| Failure::lost(AuthoritySite::LeaseRenew, &error))?;
                 *status = Some(current.status);
@@ -2354,6 +2377,8 @@ async fn run_plugin_turn(
     expected: &str,
     plugin: crate::host::PreparedPlugin,
     workspace: String,
+    approval: Option<TurnApproval>,
+    ceiling: Instant,
     report: &mut Report,
 ) -> Result<(), Failure> {
     let crate::host::PreparedPlugin {
@@ -2372,8 +2397,6 @@ async fn run_plugin_turn(
         tools,
     } = plugin;
     let leases = (runtime_lease, harness_lease);
-    // The same host task tools as Octos, started only if the runtime asks.
-    let mut plugin_tools = tools.map(crate::octos_tools::PluginTools::new);
     note(
         domain,
         cap,
@@ -2502,9 +2525,46 @@ async fn run_plugin_turn(
             "ownership": &prepared.ownership,
         })
     });
-    let drive = {
+    // The same host task tools as Octos, started only if the runtime asks. A
+    // coordination call goes to the owner first (ADR-196): the gate borrows the
+    // run's approval state, so it exists only while the turn is driven.
+    let parked = Arc::new(AtomicBool::new(false));
+    let (drive, over_budget) = {
+        let gate = match (&tools, approval, report.approvals.as_mut()) {
+            (Some(_), Some(approval), Some(run)) => {
+                let thread = crate::approval::octos::opaque(&dispatch_id);
+                let turn = crate::approval::octos::opaque(&turn_id);
+                let connection =
+                    hagency_core::canonical::digest(&serde_json::json!([cap, thread, turn]))
+                        .map_err(|_| Failure::Admission)?;
+                let context = hagency_core::approvals::HostApprovalContext {
+                    id: format!("owned_{connection}"),
+                    connection_id: connection,
+                    thread_id: thread,
+                    turn_id: turn,
+                    workspace_resource: approval.resource,
+                    workspace: approval.workspace,
+                    windows_paths: cfg!(windows),
+                    environment_id: None,
+                    may_write: approval.may_write,
+                    yolo: false,
+                };
+                Some(crate::approval::plugin::PluginGate::new(
+                    run,
+                    domain,
+                    cap,
+                    expected,
+                    context,
+                    ceiling,
+                    approval.expires_at,
+                    Arc::clone(&parked),
+                ))
+            }
+            _ => None,
+        };
+        let mut plugin_tools = tools.map(|spec| crate::octos_tools::PluginTools::new(spec, gate));
         let session = report.plugin.as_mut().ok_or(Failure::Worker)?;
-        watched_with(
+        let drive = watched_unless_parked(
             session.run_turn(
                 dispatch_id.clone(),
                 turn_id,
@@ -2524,9 +2584,10 @@ async fn run_plugin_turn(
             cancel,
             until,
             &mut report.canonical_status,
-        )
+            Some(&parked),
+        );
+        budget.watch(drive, domain, cap).await
     };
-    let (drive, over_budget) = budget.watch(drive, domain, cap).await;
     if matches!(&drive, Err(Failure::Cancelled | Failure::Deadline))
         && let Some(session) = report.plugin.as_mut()
     {
@@ -2850,6 +2911,8 @@ async fn execute(
             &expected,
             *plugin,
             launch.directory.to_string_lossy().into_owned(),
+            turn_approval,
+            ceiling,
             report,
         )
         .await;

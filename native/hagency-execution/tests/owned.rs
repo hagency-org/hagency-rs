@@ -34,6 +34,8 @@ mod octos;
 mod octos_approvals;
 #[path = "owned/octos_live.rs"]
 mod octos_live;
+#[path = "owned/plugin_coordination.rs"]
+mod plugin_coordination;
 #[path = "owned/plugin_readiness.rs"]
 mod plugin_readiness;
 #[path = "owned/receive.rs"]

@@ -6,6 +6,7 @@ mod control;
 pub mod diagnostics;
 mod observations;
 pub(crate) mod octos;
+pub(crate) mod plugin;
 pub(crate) mod state;
 pub use capacity::ApprovalHost;
 pub(crate) use capacity::Reservation;

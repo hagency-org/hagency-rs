@@ -215,6 +215,9 @@ impl Host {
                     || key
                         .to_string_lossy()
                         .eq_ignore_ascii_case(TaskMcp::RECEIVE_TOOLS_ENV)
+                    || key
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(TaskMcp::COORDINATION_TOOLS_ENV)
             })
         {
             return Err(super::Failure::Admission);
@@ -717,12 +720,14 @@ impl Host {
     /// decision 5), shared by every runtime the host relays tools for: the
     /// same tool set and the same capability environment as Octos. The helper
     /// is Hagency's own child, so the capability never reaches the runtime.
-    /// Coordination tools are excluded: they need owner approval, which is
-    /// not routed for relayed runtimes.
+    /// Coordination tools are served only when `coordination` is set, which a
+    /// caller does only for a runtime whose every such call goes to the owner
+    /// first (ADR-196); Octos passes `false`.
     fn host_task_tools(
         &self,
         scope: &OwnedDispatchScope,
         capability: &RunnerCapability,
+        coordination: bool,
     ) -> Result<
         (
             hagency_runtime::octos::task_tools::TaskTools,
@@ -759,10 +764,16 @@ impl Host {
             helper_environment.insert(TaskMcp::RECEIVE_TOOLS_ENV.into(), "1".into());
             task_tools = task_tools.with_receive_tools();
         }
+        let tools = if coordination {
+            helper_environment.insert(TaskMcp::COORDINATION_TOOLS_ENV.into(), "1".into());
+            hagency_runtime::task_mcp::owned_plugin_tools(self.file_tools, self.receive_tools, true)
+        } else {
+            task_tools.tools()
+        };
         let spec = crate::octos_tools::Spec {
             executable: executable.clone(),
             environment: helper_environment,
-            tools: task_tools.tools(),
+            tools,
         };
         Ok((task_tools, spec))
     }
@@ -841,9 +852,13 @@ impl Host {
                 (None, None, None, None)
             };
         // The same host tools Octos gets, when this host serves them. They are
-        // started only if the runtime advertises the tool capability.
+        // started only if the runtime advertises the tool capability. The
+        // coordination group is added only when the host has it on AND an
+        // owner approval path: without one a coordination call could not be
+        // asked of the owner, so it is not offered (ADR-196).
         let tools = if self.task_helper.is_some() {
-            Some(self.host_task_tools(scope, capability)?.1)
+            let coordination = self.coordination_tools && self.approvals.is_some();
+            Some(self.host_task_tools(scope, capability, coordination)?.1)
         } else {
             None
         };
@@ -1061,7 +1076,7 @@ impl Host {
         // ADR-193 decision 5: the task tools are Hagency's host tools, served
         // by the same scoped helper as for Codex and Claude Code. The helper
         // is Hagency's own child: the capability never reaches Octos.
-        let (task_tools, tools) = self.host_task_tools(scope, capability)?;
+        let (task_tools, tools) = self.host_task_tools(scope, capability, false)?;
         let prompt = task_tools.prompt(&prompt);
         if prompt.len() > hagency_runtime::octos::MAX_TEXT_BYTES {
             return Err(super::Failure::Admission);
