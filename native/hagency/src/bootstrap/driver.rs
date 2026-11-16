@@ -303,6 +303,88 @@ struct Attempt<'a> {
 struct Completed {
     report: Box<Report>,
     capability: hagency_core::tasks::RunnerCapability,
+    /// The stored final reply did not reach the room; the worker retries it
+    /// from this exact completed attempt on a later pass.
+    reply_pending: bool,
+}
+
+/// How many undelivered final replies one worker retains for retry. Each
+/// is already durable in the store; this bounds only the worker's memory.
+const MAX_PENDING_REPLIES: usize = 16;
+/// A failed send leaves its claim leased for 60 s; the store releases it
+/// back to `pending` only after that lease, so a retry waits past it.
+const REPLY_RETRY_AFTER: Duration = Duration::from_secs(61);
+
+struct PendingReply {
+    capability: hagency_core::tasks::RunnerCapability,
+    not_before: tokio::time::Instant,
+}
+
+/// Settle the agent's protected outgoing journal before a new send. A send
+/// that timed out (a started notice, an earlier reply) stays journaled, and
+/// the collector refuses every new send until it settles. Resume re-sends
+/// the journaled write with its original transaction id, which Matrix
+/// dedups, or settles an accepted one. False when it is still unsettled.
+async fn settle_outgoing(collector: &Collector, cancel: &CancellationToken) -> bool {
+    match collector.resume_outgoing_custody(cancel).await {
+        Ok(summary) if summary.state != hagency_matrix::OutgoingState::Uncertain => true,
+        other => {
+            tracing::warn!(outcome = ?other.map(|s| s.state),
+                "earlier outgoing Matrix send is still unsettled");
+            false
+        }
+    }
+}
+
+/// Retry final replies that a completed attempt stored but could not post.
+/// Only the exact original attempt can claim its reply again; a reply that
+/// is no longer pending (delivered, cancelled, or held by the journal's own
+/// uncertain custody) is dropped from the worker's list.
+async fn deliver_pending_replies(
+    domain: &DomainStore,
+    collector: &Collector,
+    cancel: &CancellationToken,
+    pending: &mut Vec<PendingReply>,
+) {
+    let now = tokio::time::Instant::now();
+    if !pending.iter().any(|reply| reply.not_before <= now)
+        || !settle_outgoing(collector, cancel).await
+    {
+        return;
+    }
+    let mut kept = Vec::with_capacity(pending.len());
+    for reply in pending.drain(..) {
+        if reply.not_before > now || cancel.is_cancelled() {
+            kept.push(reply);
+            continue;
+        }
+        let dispatch_id = reply.capability.dispatch_id.clone();
+        match domain
+            .claim_final_reply_for_dispatch(reply.capability.clone(), 60_000)
+            .await
+        {
+            Ok(None) => {
+                tracing::info!(%dispatch_id, "final reply no longer pending; retry dropped");
+            }
+            Ok(Some(claim)) => match collector.send_final(claim, cancel).await {
+                Ok(delivered) if delivered.state == hagency_matrix::OutgoingState::Delivered => {
+                    tracing::info!(%dispatch_id, "final reply delivered on retry");
+                }
+                other => {
+                    tracing::warn!(%dispatch_id, outcome = ?other.map(|d| d.state),
+                        "final reply retry not delivered; retrying later");
+                    kept.push(PendingReply {
+                        capability: reply.capability,
+                        not_before: tokio::time::Instant::now() + REPLY_RETRY_AFTER,
+                    });
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%dispatch_id, ?error, "final reply retry claim refused; retry dropped");
+            }
+        }
+    }
+    *pending = kept;
 }
 
 async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failure> {
@@ -312,6 +394,7 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
     // the retained product's 1 s → 60 s, reset by the first pass that got
     // through its refresh.
     let mut refresh_backoff = super::RETRY_BACKOFF_MIN;
+    let mut pending_replies: Vec<PendingReply> = Vec::new();
     loop {
         if input.cancel.is_cancelled() {
             return Ok(None);
@@ -353,6 +436,13 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
                 "agent display-name reconcile refused; the worker continues"
             );
         }
+        deliver_pending_replies(
+            input.domain,
+            input.collector,
+            input.cancel,
+            &mut pending_replies,
+        )
+        .await;
         let outcome = run(Attempt {
             domain: input.domain,
             owner: &mut *input.owner,
@@ -429,6 +519,10 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
                     Ok(Some(false)) => continue,
                     _ => {}
                 }
+                // The worker ends here and nothing restarts it; this agent
+                // stops reading its rooms until the service restarts. Say so.
+                tracing::error!(engagement = %engagement, error = ?error,
+                    "agent worker stopped; the agent receives nothing until the service restarts");
                 return Err(error);
             }
         }) else {
@@ -443,6 +537,17 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
             hagency_execution::Settlement::Completed
                 | hagency_execution::Settlement::CanonicalReplyReady
         );
+        if completed.reply_pending {
+            if pending_replies.len() >= MAX_PENDING_REPLIES {
+                let dropped = pending_replies.remove(0);
+                tracing::warn!(dispatch_id = %dropped.capability.dispatch_id,
+                    "pending final reply retry list is full; oldest retry dropped (its reply stays stored)");
+            }
+            pending_replies.push(PendingReply {
+                capability: completed.capability.clone(),
+                not_before: tokio::time::Instant::now() + REPLY_RETRY_AFTER,
+            });
+        }
         let physically_stopped = stopped(&mut completed.report);
         if completed.report.failure.is_some() || !settled {
             // The retained product tells the thread when a run's outcome is
@@ -665,9 +770,26 @@ async fn run(input: Attempt<'_>) -> Result<Option<Completed>, Failure> {
         // Reconcile every protected outgoing journal before scheduling new
         // work. Canonical agent replies use the same custody path as file and
         // enrollment traffic, including in otherwise message-only hosts.
-        let result = resumed.map_err(|_| Failure::OutcomeUnknown)?;
-        if result.state == hagency_matrix::OutgoingState::Uncertain {
-            return Err(Failure::OutcomeUnknown);
+        // Still unsettled: claim no new work, and let the worker's refresh
+        // backoff run resume again on its next pass. Each resume re-sends the
+        // journaled write with its original transaction id (`outgoing_job`),
+        // so retrying never duplicates a message. Ending the worker here left
+        // the agent deaf, silently, until the service restarted.
+        let unsettled = match resumed {
+            Ok(summary) => {
+                (summary.state == hagency_matrix::OutgoingState::Uncertain).then_some(None)
+            }
+            Err(error) => Some(Some(error)),
+        };
+        if let Some(error) = unsettled {
+            if let Some(error) = &error {
+                status.matrix_refusal(error);
+            }
+            tracing::warn!(
+                ?error,
+                "outgoing Matrix send is still unsettled; no new work until it settles"
+            );
+            return Err(Failure::Refresh);
         }
     }
     refresh.map_err(|e| {
@@ -1099,8 +1221,12 @@ async fn finish_attempt(
     // owned worker publishes successful completion; negative scopes retain
     // their leases until exact explicit recovery. G8 automatic stop settlement
     // remains owed, never inferred from a formatted Report or global queue.
+    let mut reply_pending = false;
     if report.settlement == hagency_execution::Settlement::CanonicalReplyReady {
         status.phase("delivering");
+        // A send journaled earlier in this attempt (the started notice) must
+        // settle first, or the collector refuses this one outright.
+        settle_outgoing(collector, cancel).await;
         let claim = domain
             .claim_final_reply_for_dispatch(capability.clone(), 60_000)
             .await
@@ -1131,6 +1257,7 @@ async fn finish_attempt(
         {
             Ok(Some(claim)) => {
                 status.phase("delivering");
+                settle_outgoing(collector, cancel).await;
                 match collector.send_final(claim, cancel).await {
                     Ok(delivered)
                         if delivered.state == hagency_matrix::OutgoingState::Delivered =>
@@ -1141,7 +1268,10 @@ async fn finish_attempt(
                         status.phase("delivered");
                     }
                     other => {
-                        tracing::warn!(dispatch_id = %capability.dispatch_id, outcome = ?other.map(|d| d.state), "plain-text final reply not delivered");
+                        // The reply stays stored; the worker claims it again
+                        // from this attempt once the claim lease has lapsed.
+                        reply_pending = true;
+                        tracing::warn!(dispatch_id = %capability.dispatch_id, outcome = ?other.map(|d| d.state), "plain-text final reply not delivered; the worker retries it");
                     }
                 }
             }
@@ -1151,7 +1281,11 @@ async fn finish_attempt(
             }
         }
     }
-    Ok(Completed { report, capability })
+    Ok(Completed {
+        report,
+        capability,
+        reply_pending,
+    })
 }
 
 #[cfg(test)]
