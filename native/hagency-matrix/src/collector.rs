@@ -125,6 +125,29 @@ impl Collector {
             .map_err(|_| Error::Busy)?;
         self.close_with_permit(_permit).await
     }
+    /// Close this agent's SDK store (its open database handles) and keep the
+    /// collector otherwise usable. A revoked engagement's worker calls this
+    /// once its retirement has been observed: nothing reads the store again,
+    /// and a store left open holds file descriptors until the service exits
+    /// (ADR-199 P5). A later `collect` reopens it, so nothing is fenced.
+    pub async fn release_store(&self) -> Result<(), Error> {
+        let _permit = self
+            .inner
+            .busy
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::Busy)?;
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = _permit;
+            if let Some(owner) = inner.owner.lock().await.take() {
+                owner.close().await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::OutcomeUnknown)?
+    }
     /// Reconcile this agent's Matrix display name from its own definition,
     /// throttled to the retained 300 s per agent (`reconcileAgentProfile`,
     /// bridge-matrix.js:5938-5955). The control plane is this port's local
@@ -1125,6 +1148,23 @@ pub(crate) mod fixtures;
 mod tests {
     use super::fixtures as common;
     use super::*;
+    #[tokio::test]
+    async fn revoked_engagement_matrix_store_is_closed() {
+        let f = common::Fixture::new();
+        let collector =
+            Collector::new(f.config("https://127.0.0.1:1/"), f.store.clone()).unwrap();
+        let config = &collector.inner.config;
+        *collector.inner.owner.lock().await = Some(Owner::open(config).await.unwrap());
+        assert!(
+            matches!(Owner::open(config).await, Err(Error::Busy)),
+            "the open store holds the exclusive lease"
+        );
+        collector.release_store().await.unwrap();
+        assert!(collector.inner.owner.lock().await.is_none());
+        let reopened = Owner::open(config).await.unwrap();
+        reopened.close().await.unwrap();
+        collector.release_store().await.unwrap();
+    }
     #[tokio::test]
     async fn native_factory_observed_group_generation() {
         let f = common::Fixture::new();

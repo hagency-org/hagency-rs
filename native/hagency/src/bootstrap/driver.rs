@@ -405,7 +405,10 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
         // the agent uses the credential it already holds, then clears it. The
         // worker IS the executor, so no timer and no separate sweeper exists.
         match retire_requested(&input, &engagement).await? {
-            Some(true) => return Ok(None),
+            Some(true) => {
+                release_store(&input, &engagement).await;
+                return Ok(None);
+            }
             Some(false) => continue,
             None => {}
         }
@@ -515,7 +518,10 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
             // that lands while it is failing is still carried out first.
             Err(error) => {
                 match retire_requested(&input, &engagement).await {
-                    Ok(Some(true)) => return Ok(None),
+                    Ok(Some(true)) => {
+                        release_store(&input, &engagement).await;
+                        return Ok(None);
+                    }
                     Ok(Some(false)) => continue,
                     _ => {}
                 }
@@ -695,6 +701,14 @@ async fn retire_requested(input: &Attempt<'_>, engagement: &str) -> Result<Optio
         .await
         .map_err(|_| Failure::OutcomeUnknown)?;
     Ok(Some(true))
+}
+
+/// A retired agent's worker ends, so its Matrix SDK store is closed now
+/// instead of holding its descriptors until the service exits (ADR-199 P5).
+async fn release_store(input: &Attempt<'_>, engagement: &str) {
+    if let Err(error) = input.collector.release_store().await {
+        tracing::warn!(%engagement, ?error, "retired agent's Matrix store was not released");
+    }
 }
 
 /// What the store holds against this agent (ADR-182): its unresolved
