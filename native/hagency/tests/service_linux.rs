@@ -60,6 +60,19 @@ fn unit_directives(unit: &str) -> BTreeMap<String, Vec<(String, String)>> {
     }
     sections
 }
+/// ADR-199 P5: the unit raises the descriptor limit above the systemd default
+/// (1024), which a fleet of four agents exhausted. Runs on every leg.
+#[test]
+fn service_unit_sets_limit_nofile_65536() {
+    let unit = fs::read_to_string(deploy_unit()).expect("unit present on every leg");
+    let sections = unit_directives(&unit);
+    let limits: Vec<&str> = sections["Service"]
+        .iter()
+        .filter(|(k, _)| k == "LimitNOFILE")
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(limits, ["65536"]);
+}
 /// The named refusal the spec fixes for the other hosted OSes (ADR-127):
 /// never skip, never pretend a service leg ran where it cannot. The leg
 /// instead pins the unit contract offline — the directives the Linux spawn

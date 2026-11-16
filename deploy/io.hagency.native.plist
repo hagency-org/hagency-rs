@@ -54,6 +54,20 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
 
+  <!-- ADR-199 P5: the launchd default soft limit (256) is below one agent's
+       Matrix store plus the console. 10240 is the per-process ceiling macOS
+       grants by default (kern.maxfilesperproc is larger on most hosts). -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>10240</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>10240</integer>
+  </dict>
+
   <key>ProcessType</key>
   <string>Background</string>
 

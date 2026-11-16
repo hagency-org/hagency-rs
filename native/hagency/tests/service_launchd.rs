@@ -38,6 +38,9 @@ fn plist_path() -> PathBuf {
 fn assert_plist_contract() {
     let plist = fs::read_to_string(plist_path()).expect("plist present on every leg");
     let value = |key: &str| plist_value(&plist, key);
+    // ADR-199 P5: the default launchd soft limit is far below the descriptors
+    // a fleet needs; both limits are set from the parsed XML.
+    assert_eq!(value("NumberOfFiles").as_deref(), Some("10240"));
     assert_eq!(value("Label").as_deref(), Some("io.hagency.native"));
     assert_eq!(
         value("RunAtLoad").as_deref(),
