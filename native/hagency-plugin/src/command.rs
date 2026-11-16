@@ -46,6 +46,10 @@ pub struct CommandEnvironment {
     /// and config.
     pub home: Option<OsString>,
     pub workspace: Option<PathBuf>,
+    /// Where `cargo` writes build output (`CARGO_TARGET_DIR`). Set for build
+    /// steps only, so a plugin inside a Cargo workspace builds into its own
+    /// package and the installed copy carries the binary.
+    pub build_target_dir: Option<PathBuf>,
 }
 impl CommandEnvironment {
     pub fn build(&self) -> BTreeMap<OsString, OsString> {
@@ -76,6 +80,12 @@ impl CommandEnvironment {
             OsString::from("HAGENCY_PLUGIN_ENTRYPOINT_ID"),
             self.entrypoint_id.clone().into(),
         );
+        if let Some(target) = &self.build_target_dir {
+            env.insert(
+                OsString::from("CARGO_TARGET_DIR"),
+                target.as_os_str().to_owned(),
+            );
+        }
         env
     }
 }
@@ -301,7 +311,7 @@ pub fn run_supervised_command(
             return Err(CommandError::OutcomeUnknown);
         }
         Ok(CommandResult {
-            status: 0,
+            status: leader_exit_status(report.leader_status),
             stdout,
             stderr,
             whole_tree_stopped: true,
@@ -310,6 +320,19 @@ pub fn run_supervised_command(
     #[cfg(windows)]
     {
         run_supervised_windows(owner, pipes, request)
+    }
+}
+
+/// The leader's exit code from the raw `waitpid` status the guardian reports:
+/// the code for a normal exit, the negated signal number for a signal, and 0
+/// when the guardian did not report one (callers that need proof of success
+/// must not rely on that case alone).
+#[cfg(unix)]
+pub(crate) fn leader_exit_status(raw: Option<i32>) -> i32 {
+    match raw {
+        Some(raw) if raw & 0x7f == 0 => (raw >> 8) & 0xff,
+        Some(raw) => -(raw & 0x7f),
+        None => 0,
     }
 }
 
@@ -367,6 +390,41 @@ pub(crate) fn resolve_executable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn supervised_command_reports_the_real_exit_status() {
+        assert_eq!(leader_exit_status(Some(0)), 0);
+        assert_eq!(leader_exit_status(Some(256)), 1);
+        assert_eq!(leader_exit_status(Some(127 << 8)), 127);
+        assert_eq!(leader_exit_status(Some(9)), -9);
+        assert_eq!(leader_exit_status(None), 0);
+    }
+
+    #[test]
+    fn build_environment_points_cargo_at_the_package_target_dir() {
+        let mut environment = CommandEnvironment {
+            plugin_id: "example".into(),
+            plugin_root: "/pkg".into(),
+            config_dir: "/config".into(),
+            state_dir: "/state".into(),
+            entrypoint_id: "build-0".into(),
+            path: None,
+            home: None,
+            workspace: None,
+            build_target_dir: None,
+        };
+        assert!(
+            !environment
+                .build()
+                .contains_key(&OsString::from("CARGO_TARGET_DIR"))
+        );
+        environment.build_target_dir = Some("/pkg/target".into());
+        assert_eq!(
+            environment.build().get(&OsString::from("CARGO_TARGET_DIR")),
+            Some(&OsString::from("/pkg/target"))
+        );
+    }
 
     #[test]
     fn resolve_executable_uses_command_path() {

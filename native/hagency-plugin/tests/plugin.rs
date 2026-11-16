@@ -38,6 +38,7 @@ fn command_environment(root: &Path) -> CommandEnvironment {
         path: None,
         home: None,
         workspace: None,
+        build_target_dir: None,
     }
 }
 

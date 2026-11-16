@@ -79,6 +79,8 @@ pub struct RuntimeLaunch {
 }
 
 /// How long a runtime readiness probe may take before it counts as not ready.
+/// How long the install proof lets one launcher run with stdin closed.
+const LAUNCHER_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 pub const READINESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// The longest reason a readiness probe may give; longer text is cut.
 const READINESS_REASON_LIMIT: usize = 512;
@@ -861,31 +863,7 @@ impl PluginService {
             return Err(PluginError::Untrusted);
         }
         if source_owned {
-            for (index, build) in manifest.builds.iter().enumerate() {
-                let environment = self.build_environment(
-                    &manifest.id,
-                    &prepared.root,
-                    &format!("build-{index}"),
-                )?;
-                let mut argv = build.command.clone();
-                let executable = crate::command::resolve_executable(
-                    &argv[0],
-                    &prepared.root,
-                    environment.path.as_ref(),
-                )
-                .map_err(PluginError::Command)?;
-                argv[0] = executable.to_string_lossy().into_owned();
-                let request = CommandRequest {
-                    argv,
-                    cwd: prepared.root.clone(),
-                    stdin: Vec::new(),
-                    environment,
-                    deadline: BUILD_DEADLINE,
-                };
-                if let Err(error) = self.run_bounded(&manifest.id, request) {
-                    return Err(PluginError::BuildFailed(error.to_string()));
-                }
-            }
+            self.build_package(&manifest, &prepared.root)?;
         }
         let after_manifest_bytes = fs::read(prepared.root.join(MANIFEST_FILE))?;
         if sha256(&after_manifest_bytes) != manifest_sha256 {
@@ -1911,6 +1889,30 @@ impl PluginService {
         Ok(())
     }
     fn run_bounded(&self, id: &str, request: CommandRequest) -> Result<CommandResult, PluginError> {
+        self.run_bounded_labeled(id, "", request)
+    }
+    /// `label` names the invocation in the plugin logs (a build step, a
+    /// launcher probe). A non-empty label also asks for the command's exit
+    /// status: the Linux guardian reports none, so the command runs under a
+    /// small `sh` wrapper that prints it on stderr, and `status` is read from
+    /// there.
+    fn run_bounded_labeled(
+        &self,
+        id: &str,
+        label: &str,
+        mut request: CommandRequest,
+    ) -> Result<CommandResult, PluginError> {
+        let report_exit = !label.is_empty() && cfg!(unix);
+        if report_exit {
+            let mut wrapped = vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                EXIT_MARKER_SCRIPT.to_owned(),
+                "hagency-exit".to_owned(),
+            ];
+            wrapped.append(&mut request.argv);
+            request.argv = wrapped;
+        }
         let (slot, guardian) = {
             let state = self
                 .inner
@@ -1925,29 +1927,44 @@ impl PluginService {
             })?;
             (slot, state.guardian.clone())
         };
-        let result = run_supervised_command(&guardian, request);
-        let (stream_text, error_text) = match &result {
+        let mut result = run_supervised_command(&guardian, request);
+        if report_exit && let Ok(done) = &mut result {
+            let (stderr, status) = split_exit_marker(&done.stderr);
+            done.stderr = stderr;
+            if let Some(status) = status {
+                done.status = status;
+            }
+        }
+        let (stream_text, stderr_text, error_text) = match &result {
             Ok(result) => (
                 String::from_utf8_lossy(&result.stdout).into_owned(),
                 String::from_utf8_lossy(&result.stderr).into_owned(),
+                String::new(),
             ),
-            Err(error) => (String::new(), error.to_string()),
+            Err(error) => (String::new(), String::new(), error.to_string()),
         };
         if let Ok(mut state) = self.inner.lock() {
+            let invocation_id = if label.is_empty() {
+                format!("invocation-{}", now_ms())
+            } else {
+                format!("{label}-{}", now_ms())
+            };
             let logs = state.logs.entry(id.into()).or_default();
             logs.push_back(LogRecord {
                 at_ms: now_ms(),
-                invocation_id: format!("invocation-{}", now_ms()),
+                invocation_id: invocation_id.clone(),
                 stream: "stdout".into(),
                 text: stream_text,
             });
-            if !error_text.is_empty() {
-                logs.push_back(LogRecord {
-                    at_ms: now_ms(),
-                    invocation_id: format!("invocation-{}", now_ms()),
-                    stream: "stderr".into(),
-                    text: error_text,
-                });
+            for (stream, text) in [("stderr", stderr_text), ("stderr", error_text)] {
+                if !text.is_empty() {
+                    logs.push_back(LogRecord {
+                        at_ms: now_ms(),
+                        invocation_id: invocation_id.clone(),
+                        stream: stream.into(),
+                        text,
+                    });
+                }
             }
             while logs.len() > MAX_LOG_RECORDS {
                 logs.pop_front();
@@ -1955,6 +1972,110 @@ impl PluginService {
         }
         drop(slot);
         result.map_err(PluginError::Command)
+    }
+    /// Run the manifest's build steps in `root`, then prove the package can
+    /// launch. Build output goes to the plugin logs and to disk; a non-zero
+    /// exit or a launcher that cannot run is `PluginError::BuildFailed`.
+    pub fn build_package(&self, manifest: &Manifest, root: &Path) -> Result<(), PluginError> {
+        for (index, build) in manifest.builds.iter().enumerate() {
+            let environment =
+                self.build_environment(&manifest.id, root, &format!("build-{index}"))?;
+            let mut argv = build.command.clone();
+            let executable =
+                crate::command::resolve_executable(&argv[0], root, environment.path.as_ref())
+                    .map_err(PluginError::Command)?;
+            argv[0] = executable.to_string_lossy().into_owned();
+            let request = CommandRequest {
+                argv,
+                cwd: root.to_path_buf(),
+                stdin: Vec::new(),
+                environment,
+                deadline: BUILD_DEADLINE,
+            };
+            let label = format!("build-{index}");
+            let result = self
+                .run_bounded_labeled(&manifest.id, &label, request)
+                .map_err(|error| PluginError::BuildFailed(error.to_string()))?;
+            self.persist_build_log(&manifest.id, &label, &result);
+            if result.status != 0 {
+                return Err(PluginError::BuildFailed(format!(
+                    "build step {index} exited with status {}: {}",
+                    result.status,
+                    output_tail(&result.stderr)
+                )));
+            }
+        }
+        self.prove_launchers(manifest, root)
+    }
+    /// The last build's output, kept on disk because the in-memory plugin
+    /// logs do not survive a restart. Best effort: a failed write never
+    /// changes the install result.
+    fn persist_build_log(&self, id: &str, label: &str, result: &CommandResult) {
+        let Ok(state_dir) = self.state_dir() else {
+            return;
+        };
+        let dir = state_dir.join("plugins/logs").join(id);
+        if fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let mut text = format!("exit status {}\n--- stdout ---\n", result.status);
+        text.push_str(&String::from_utf8_lossy(&result.stdout));
+        text.push_str("\n--- stderr ---\n");
+        text.push_str(&String::from_utf8_lossy(&result.stderr));
+        let _ = fs::write(dir.join(format!("{label}.log")), text);
+    }
+    /// Proof that a freshly built package can launch: each runtime command,
+    /// runtime readiness command and harness command runs once from the
+    /// package root with stdin closed. Exit 126/127 or a failure to start is
+    /// a launcher that did not find its binary (for herdr-runtime, "is not
+    /// built"); any other status proves it ran. Nothing is copied or
+    /// registered by the caller before this passes.
+    pub fn prove_launchers(&self, manifest: &Manifest, root: &Path) -> Result<(), PluginError> {
+        let mut commands: Vec<(String, Vec<String>)> = Vec::new();
+        for runtime in &manifest.runtimes {
+            commands.push((format!("runtime {}", runtime.id), runtime.command.clone()));
+            if let Some(readiness) = &runtime.readiness {
+                commands.push((format!("readiness {}", runtime.id), readiness.clone()));
+            }
+        }
+        for harness in &manifest.harnesses {
+            commands.push((format!("harness {}", harness.id), harness.command.clone()));
+        }
+        for (index, (name, mut argv)) in commands.into_iter().enumerate() {
+            let mut environment =
+                self.build_environment(&manifest.id, root, &format!("install-probe-{index}"))?;
+            environment.build_target_dir = None;
+            let executable =
+                crate::command::resolve_executable(&argv[0], root, environment.path.as_ref())
+                    .map_err(PluginError::Command)?;
+            if !executable.is_file() {
+                return Err(PluginError::BuildFailed(format!(
+                    "{name}: launcher {} is not in the package",
+                    argv[0]
+                )));
+            }
+            argv[0] = executable.to_string_lossy().into_owned();
+            let request = CommandRequest {
+                argv,
+                cwd: root.to_path_buf(),
+                stdin: Vec::new(),
+                environment,
+                deadline: LAUNCHER_PROBE_DEADLINE,
+            };
+            let result = self
+                .run_bounded_labeled(&manifest.id, "install-probe", request)
+                .map_err(|error| {
+                    PluginError::BuildFailed(format!("{name}: launcher did not run: {error}"))
+                })?;
+            if result.status == 126 || result.status == 127 {
+                return Err(PluginError::BuildFailed(format!(
+                    "{name}: launcher exited {} (not built?): {}",
+                    result.status,
+                    output_tail(&result.stderr)
+                )));
+            }
+        }
+        Ok(())
     }
     fn environment(
         &self,
@@ -1992,6 +2113,7 @@ impl PluginService {
             path: std::env::var_os("PATH"),
             home: std::env::var_os("HOME"),
             workspace: None,
+            build_target_dir: Some(root.join("target")),
         })
     }
 
@@ -2017,6 +2139,7 @@ impl PluginService {
             path: std::env::var_os("PATH"),
             home: std::env::var_os("HOME"),
             workspace,
+            build_target_dir: None,
         })
     }
     fn staging_path(&self, label: &str) -> Result<PathBuf, PluginError> {
@@ -2053,6 +2176,41 @@ pub struct InvocationResult {
     pub invocation_id: String,
     pub value: serde_json::Value,
     pub stderr: String,
+}
+
+/// Runs its arguments as one command and prints the command's exit status as
+/// the last line of stderr (`split_exit_marker` reads it back).
+const EXIT_MARKER_SCRIPT: &str = "\"$@\"; status=$?; printf '\\n%s%s\\n' 'hagency-exit-status:' \"$status\" >&2; exit \"$status\"";
+const EXIT_MARKER: &[u8] = b"hagency-exit-status:";
+
+/// Remove the marker line `EXIT_MARKER_SCRIPT` wrote and return its status.
+fn split_exit_marker(stderr: &[u8]) -> (Vec<u8>, Option<i32>) {
+    let text = stderr.strip_suffix(b"\n").unwrap_or(stderr);
+    let start = text
+        .windows(EXIT_MARKER.len())
+        .rposition(|window| window == EXIT_MARKER);
+    let Some(start) = start else {
+        return (stderr.to_vec(), None);
+    };
+    let status = std::str::from_utf8(&text[start + EXIT_MARKER.len()..])
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok());
+    let mut kept = text[..start].to_vec();
+    if kept.last() == Some(&b'\n') {
+        kept.pop();
+    }
+    (kept, status)
+}
+
+/// The last bytes of a command's output as text, for an error message.
+fn output_tail(bytes: &[u8]) -> String {
+    const LIMIT: usize = 2048;
+    let start = bytes.len().saturating_sub(LIMIT);
+    String::from_utf8_lossy(&bytes[start..])
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect()
 }
 
 fn validate_compatibility(manifest: &Manifest) -> Result<(), PluginError> {
@@ -2159,5 +2317,18 @@ mod tests {
             environment.config_dir,
             state.path().join("plugins/config/example.plugin")
         );
+    }
+
+    #[test]
+    fn exit_marker_is_split_from_stderr_and_read_back() {
+        let (stderr, status) = split_exit_marker(b"warning\n\nhagency-exit-status:3\n");
+        assert_eq!(stderr, b"warning\n", "the build's own stderr is kept whole");
+        assert_eq!(status, Some(3));
+        let (stderr, status) = split_exit_marker(b"\nhagency-exit-status:0\n");
+        assert!(stderr.is_empty());
+        assert_eq!(status, Some(0));
+        let (stderr, status) = split_exit_marker(b"no marker");
+        assert_eq!(stderr, b"no marker");
+        assert_eq!(status, None);
     }
 }
