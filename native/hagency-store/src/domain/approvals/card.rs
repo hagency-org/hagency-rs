@@ -86,14 +86,17 @@ impl DomainRepository {
         // shows its method and params, unchanged.
         let claude = request.method == policy::CLAUDE_TOOL_METHOD;
         let octos = request.method == policy::OCTOS_APPROVAL_METHOD;
+        let plugin = request.method == policy::PLUGIN_TOOL_METHOD;
         let runtime = if claude {
             "claude"
+        } else if plugin {
+            "plugin"
         } else if octos {
             "octos"
         } else {
             "codex"
         };
-        let tool = if claude || octos {
+        let tool = if claude || octos || plugin {
             request.params["toolName"]
                 .as_str()
                 .filter(|tool| !tool.is_empty())
@@ -101,7 +104,7 @@ impl DomainRepository {
         } else {
             request.method.as_str()
         };
-        let preview = if claude {
+        let preview = if claude || plugin {
             serde_json::to_string(&request.params["input"])?
         } else if octos {
             // What Octos says the request does, as lines a person reads: its
@@ -133,6 +136,11 @@ impl DomainRepository {
         } else {
             serde_json::to_string(&request.params)?
         };
+        // A plugin tool call has no reusable scope and so no stored
+        // description: name the call for the owner.
+        if plugin && description.is_empty() {
+            description = format!("Plugin runtime tool call: {tool}");
+        }
         // The retained v1 client expects a nonempty display string. Preserve
         // the actual JSON-RPC type separately; neither field is authority.
         let upstream_display = match &request.upstream {

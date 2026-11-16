@@ -313,3 +313,23 @@ fn native_execution_octos_shell_scope() {
     missing["params"].as_object_mut().unwrap().remove("cwd");
     assert!(scope(&missing).is_none());
 }
+
+/// A relayed plugin tool call (ADR-196) never derives a reusable scope, however
+/// well formed: the owner approves that one call or denies it.
+#[test]
+fn native_plugin_tool_approval_has_no_reusable_scope() {
+    let original = json!({"agentId":"agent-one","workspace":"/work/a","taskId":"task-one","mayWrite":true,
+        "method":hagency_core::execution::PLUGIN_TOOL_METHOD,
+        "params":{"threadId":"session-one","turnId":"turn-one","itemId":"call-one",
+            "toolName":"delegate_task","input":{"call_id":"c1"}}});
+    assert!(scope(&original).is_none());
+    for (key, value) in [
+        ("extra", json!(true)),
+        ("toolName", json!("")),
+        ("input", json!("text")),
+    ] {
+        let mut changed = original.clone();
+        changed["params"][key] = value;
+        assert!(scope(&changed).is_none(), "{key}");
+    }
+}

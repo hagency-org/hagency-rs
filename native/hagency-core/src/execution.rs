@@ -66,6 +66,11 @@ pub const CLAUDE_TOOL_METHOD: &str = "claude/canUseTool";
 /// it in (`octosTurnId`), its `title` and `body`, and for a shell command, when
 /// Octos types it, the `command` line and its `cwd`.
 pub const OCTOS_APPROVAL_METHOD: &str = "octos/approval";
+/// The approval method of a plugin runtime's relayed `tool/call` (ADR-196). Its
+/// params carry the session as `threadId`, the dispatch's turn as `turnId` and
+/// the call as `itemId`, beside the `toolName` and the call's `input`. It has no
+/// reusable scope: the owner approves that one call or denies it.
+pub const PLUGIN_TOOL_METHOD: &str = "plugin/tool";
 #[derive(Serialize)]
 pub struct Scope {
     pub kind: ScopeKind,
@@ -287,6 +292,11 @@ pub fn derive(request: HostRequest<'_>) -> Option<Authorization> {
                 json!({"command":command,"cwd":cwd,"additionalPermissions":null}),
                 format!("Exact command:\n{command}\nWorking directory: {cwd}"),
             )
+        }
+        PLUGIN_TOOL_METHOD => {
+            // Approve once or deny only: a relayed coordination call reaches
+            // another session, so no task or always grant is ever derived.
+            return None;
         }
         _ => return None,
     };

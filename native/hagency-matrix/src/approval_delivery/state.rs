@@ -106,7 +106,8 @@ impl Frozen {
             || self.content["body"].as_str().is_none_or(str::is_empty)
             || d["version"] != 1
             || d["kind"] != "request"
-            || !["codex", "claude", "octos"].contains(&d["runtime"].as_str().unwrap_or_default())
+            || !["codex", "claude", "octos", "plugin"]
+                .contains(&d["runtime"].as_str().unwrap_or_default())
             || d["agent"] != a.agent_name
             || d["project"] != a.project_id
             || d["project_room_id"] != a.project_room_id
@@ -485,9 +486,9 @@ mod tests {
             }
         });
         assert!(frozen(request.clone()).validate().is_ok());
-        // A Claude or Octos agent's card names its own framework (ADR-192,
-        // ADR-193); any other runtime is refused.
-        for runtime in ["claude", "octos"] {
+        // A Claude, Octos or plugin agent's card names its own framework
+        // (ADR-192, ADR-193, ADR-196); any other runtime is refused.
+        for runtime in ["claude", "octos", "plugin"] {
             let mut named = request.clone();
             named["com.agentchat.approval"]["runtime"] = json!(runtime);
             assert!(frozen(named).validate().is_ok(), "{runtime}");
