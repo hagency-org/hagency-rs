@@ -1,7 +1,7 @@
 ---
 kind: decision
 id: ADR-199
-title: "Operator hardening: name reuse, retirement backoff and descriptor budget"
+title: "Operator hardening: name reuse, retirement backoff, descriptor budget and provisioning recovery"
 status: Accepted
 satisfies: [REQ-NATIVE-PLUGIN-SYSTEM]
 amends: [ADR-187]
@@ -81,6 +81,66 @@ revoked agents' stores stayed open. Policy:
 4. A health component reports the open descriptor count against the soft limit
    and warns above 80 percent.
 
+### Provisioning recovery after a transient failure past the owner invite (P6)
+
+Seen live on 2026-11-16 (engagement `en_5da01cad...`, agent `qore-agent`): the
+agent account, rooms, crypto enrollment and owner invite all succeeded and the
+owner joined the DM. A later step failed with `Error::Transport`
+(`provision room step failed ... error=Transport`, then `provision attempt
+failed ... activated=false`). Two defects followed:
+
+- `token_provision/rooms.rs` observed the effect `Unknown` on any error, and
+  `provisioning.rs` `provision_pass` skips an uncertain provision whose job is
+  still in `self.jobs`. In process it was never retried.
+- After a restart, `recover_enrolled` called `resume_before_owner_invite`, whose
+  rooms inspection refused every state with an owner-invite record
+  (`OutcomeUnknown` at stage `inspect_enrollment`). The agent stayed
+  `reserved`/`uncertain`, retire was the only way out, and the name stayed
+  locked (see name reuse above).
+
+Decision:
+
+1. **Retryable classification.** `Error::is_transient()` is true for
+   `Transport`, `Timeout`, `Remote(429)` and `Remote(5xx)` only. A transient
+   error is retried only at a step proven read-only or idempotent: the owner
+   step after the invite is proven (response stored, or `joined_dm` read the
+   owner as invited or joined). A transient error at any write whose outcome is
+   unknown (account register, room create, the invite POST itself, enrollment
+   upload) is still observed `Unknown`; nothing is replayed.
+2. **Bounded backoff.** The effect stays `Started`, nothing is observed
+   `Unknown`, and the job is resumed by `provision_pass` when its retry is due:
+   5 s doubling, capped at 300 s, at most 6 retries. The clock is injected
+   (`TokenProvisioningHost::with_clock`); tests never sleep. After the sixth
+   failure the effect is observed `Unknown` and the provision is parked with
+   the reason `transport_retry_exhausted`. A provision parked on a transient
+   error is dropped from `self.jobs` after one cap interval so the next pass
+   re-inspects it through the resume path. A parked state that is not transient
+   stays parked until an operator acts.
+3. **Resume proof.** `resume_enrolled` (formerly `resume_before_owner_invite`)
+   accepts a rooms custody with the identity, key ledger and rooms records
+   complete, whether the owner invite is absent, possibly sent (read back,
+   never repeated) or answered. It still requires the account whoami to match,
+   the SDK enrollment status to be `Complete`, and the owner step to prove the
+   owner is invited or joined. It creates nothing, enrolls nothing and
+   re-registers nothing; the key ledger is not written. Refused and parked:
+   an invite answer without its "possible" record, a completed step without
+   invite records, an unreadable or unsafe DM snapshot (`Recipients`).
+4. **Named parked reasons.** Fixed codes with a remedy: `enrollment_not_provable`
+   (keys are never re-created; inspect or retire), `account_not_provable`,
+   `owner_membership_not_provable` (accept the invitation to the DM room),
+   `transport_retry_exhausted`, `provision_failed` (names the stage). Every park
+   is logged once with stage, code and remedy.
+5. **Owner-visible surfacing.** The provision pass publishes each stuck
+   provision's state (`awaiting_owner`, `provision_retrying`,
+   `provision_parked`), `provision_reason` and `provision_remedy` on the
+   agent's console row. An owner who has not joined sees "accept the invitation
+   to room X"; a retrying provision says no action is needed; a parked one names
+   the operator action. Status only: no decision reads it.
+6. **Invariants kept.** No key is re-created, no uncertain write is replayed, no
+   fence is loosened, approvals are unchanged, and nothing is marked applied
+   without proof. Retire stays the last resort when the reason says the state
+   cannot be proven.
+
 ## Consequences
 
 Good, because retirement stops filling logs, the operator sees why cleanup is
@@ -111,3 +171,12 @@ the `LimitNOFILE` drop-in installed by hand on the server.
 - `revoked_engagement_matrix_store_is_closed`
 - `health_warns_when_open_descriptors_near_limit`
 - `service_unit_sets_limit_nofile_65536`
+- `only_transport_timeout_5xx_and_429_are_transient`
+- `backoff_doubles_and_is_capped`
+- `a_scheduled_retry_is_due_only_when_the_injected_clock_reaches_it`
+- `resume_proof_accepts_every_provable_invite_state`
+- `resume_proof_refuses_a_state_it_cannot_prove`
+- `a_parked_provision_names_its_reason_and_remedy`
+- `a_retrying_provision_tells_the_owner_it_needs_no_action`
+- `only_a_transient_park_is_rechecked_and_only_after_the_cap`
+- `native_provisioning_recovers_completed_keys_before_owner_invite` (no second enrollment, ledger untouched)
