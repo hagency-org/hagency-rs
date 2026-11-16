@@ -34,7 +34,11 @@ readiness = ["bin/probe"]
     for (name, body) in [
         (
             "probe",
-            format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", answer.display()),
+            format!(
+                "#!/bin/sh\ncat > '{}'\ncat '{}'\n",
+                root.join("probe-input").display(),
+                answer.display()
+            ),
         ),
         (
             "runtime",
@@ -48,6 +52,66 @@ readiness = ["bin/probe"]
     package
 }
 
+/// A harness that answers the host's control requests from a shell loop:
+/// every line it reads is logged; `agent/prepare` returns `prepared-agent`
+/// unless `harness-fail` exists beside the package.
+fn harness_package(root: &std::path::Path) -> PathBuf {
+    let package = root.join("harness-package");
+    fs::create_dir_all(package.join("bin")).unwrap();
+    fs::write(
+        package.join("hagency-plugin.toml"),
+        r#"schema = "hagency.plugin/v1"
+id = "example.harness"
+name = "Harness fixture"
+version = "1.0.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[harnesses]]
+id = "agent"
+command = ["bin/harness"]
+protocol = "hagency.harness/v1"
+
+[[harnesses.configuration]]
+id = "reference_target"
+label = "Target"
+description = "Frozen under the harness's own key name."
+kind = "text"
+default = "template-agent"
+"#,
+    )
+    .unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{log}'
+  id=${{line#*\"id\":\"}}; id=${{id%%\"*}}
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"protocol":"hagency.harness/v1","ready":true,"capabilities":[]}}}}\n' "$id" ;;
+    *'"method":"agent/prepare"'*)
+      if [ -e '{fail}' ]; then
+        printf '{{"jsonrpc":"2.0","id":"%s","error":{{"code":-32602,"message":"no such agent"}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":"%s","result":{{"target":"prepared-agent","ownership":"existing"}}}}\n' "$id"
+      fi ;;
+    *'"method":"agent/release"'*)
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"released":true}}}}\n' "$id" ;;
+    *'"method":"shutdown"'*)
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"accepted":true}}}}\n' "$id"
+      exit 0 ;;
+  esac
+done
+"#,
+        log = root.join("harness-log").display(),
+        fail = root.join("harness-fail").display(),
+    );
+    let path = package.join("bin/harness");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    package
+}
+
 struct Plugin {
     root: tempfile::TempDir,
     work: PathBuf,
@@ -56,6 +120,9 @@ struct Plugin {
 }
 impl Plugin {
     fn new(ready: bool) -> (Self, RunnerCapability) {
+        Self::build(ready, false)
+    }
+    fn build(ready: bool, harness: bool) -> (Self, RunnerCapability) {
         let root = tempfile::tempdir().unwrap();
         let work = root.path().join("work");
         hagency_store::private::directory(&work).unwrap();
@@ -82,6 +149,28 @@ impl Plugin {
         pool.reasoning = None;
         pool.roles = vec!["coding".into()];
         pool.runtime_plugin = Some(identity);
+        let mut default_template = None;
+        if harness {
+            let harness_record = service.link(&harness_package(root.path())).unwrap();
+            service.enable(&harness_record.id).unwrap();
+            let reference = hagency_plugin::HarnessPluginRef {
+                plugin_id: harness_record.id.clone(),
+                harness_id: "agent".into(),
+                package_sha256: harness_record.package_sha256.clone(),
+                settings_sha256: harness_record.settings_sha256.clone(),
+            };
+            default_template = Some(
+                service
+                    .resolve_harness_template(&reference, &BTreeMap::new())
+                    .unwrap(),
+            );
+            pool.harness_plugin = Some(hagency_core::project::HarnessPluginIdentity {
+                plugin_id: reference.plugin_id,
+                harness_id: reference.harness_id,
+                package_sha256: reference.package_sha256,
+                settings_sha256: reference.settings_sha256,
+            });
+        }
         db.put_plugin_runtime_qualification(&PluginRuntimeQualification {
             plugin_id: record.id.clone(),
             adapter_id: "fake".into(),
@@ -98,6 +187,10 @@ impl Plugin {
         })
         .unwrap();
         db.put_resource(&pool).unwrap();
+        if let Some(template) = &default_template {
+            db.set_resource_default_harness_template(&pool.id(), Some(template), 999)
+                .unwrap();
+        }
         let proof = proof(&request("allocation", "Worker", &pool, 100));
         let e = db.admit(&proof, 1000).unwrap();
         db.approve("approved", &proof, 1000).unwrap();
@@ -242,5 +335,67 @@ async fn native_plugin_runtime_not_ready_requeues_without_starting() {
         .wait()
         .await;
     assert_eq!(f.launches(), 1, "a ready probe lets the runtime start");
+    f.domain.shutdown().await.unwrap();
+}
+
+fn harness_log(f: &Plugin) -> String {
+    fs::read_to_string(f.root.path().join("harness-log")).unwrap_or_default()
+}
+
+/// The probe is asked about the target the harness prepares, in the shape of
+/// the turn's `harnessContext`, not about the frozen template key (which the
+/// harness names `reference_target`). The harness prepares and releases the
+/// agent for the probe, and nothing is launched by the probe itself.
+#[tokio::test]
+async fn native_plugin_readiness_probe_receives_the_prepared_harness_target() {
+    let (f, cap) = Plugin::build(true, true);
+    let _ = Operation::start(f.domain.clone(), cap, f.host(), limits())
+        .unwrap()
+        .wait()
+        .await;
+    let input: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(f.root.path().join("probe-input")).unwrap())
+            .unwrap();
+    assert_eq!(
+        input["harnessContext"],
+        json!({"target": "prepared-agent", "ownership": "existing"})
+    );
+    assert_eq!(
+        input["harnessTemplate"]["reference_target"],
+        "template-agent"
+    );
+    assert!(input["harnessTemplate"].get("target").is_none());
+    let log = harness_log(&f);
+    let prepare = log
+        .find("\"method\":\"agent/prepare\"")
+        .expect("prepared for the probe");
+    let release = log
+        .find("\"outcome\":\"readiness_probe\"")
+        .expect("released after the probe");
+    assert!(prepare < release, "{log}");
+    f.domain.shutdown().await.unwrap();
+}
+
+/// A harness that cannot say which agent the dispatch would use defers it as
+/// not ready, with the reason, before anything starts.
+#[tokio::test]
+async fn native_plugin_readiness_deferral_when_the_harness_cannot_prepare() {
+    let (f, cap) = Plugin::build(true, true);
+    fs::write(f.root.path().join("harness-fail"), "x").unwrap();
+    let report = Operation::start(f.domain.clone(), cap, f.host(), limits())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let Some(Failure::RuntimeNotReady { reason }) = &report.failure else {
+        panic!("{:?}", report.failure);
+    };
+    assert!(reason.contains("harness"), "{reason}");
+    assert_eq!(f.launches(), 0);
+    assert_eq!(f.dispatch().0, "queued");
+    assert!(
+        !f.root.path().join("probe-input").exists(),
+        "the probe is not run without a target"
+    );
     f.domain.shutdown().await.unwrap();
 }

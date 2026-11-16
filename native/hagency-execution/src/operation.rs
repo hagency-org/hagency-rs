@@ -2670,6 +2670,140 @@ async fn run_plugin_turn(
         .map_or_else(String::new, |session| session.guardian_stderr_tail());
     drive.map(|_| ())
 }
+/// What asking the harness for the dispatch's target found.
+enum HarnessResolution {
+    /// `harnessContext` for the probe: the prepared target, or null when the
+    /// runtime has no harness.
+    Context(serde_json::Value),
+    /// The harness could not say which agent this dispatch would use.
+    NotReady(String),
+}
+
+/// Ask the harness which agent it would prepare for this dispatch, then
+/// release it, before the dispatch starts. The answer has the same shape as
+/// the `harnessContext` the turn receives. Read-only for `existing`
+/// ownership; a harness that creates state on prepare undoes it on release.
+/// A harness that cannot answer defers the dispatch as not ready: nothing has
+/// started. An unproven harness stop is not deferred; it fails closed.
+async fn resolve_harness_context(
+    host: &Host,
+    plugin: &crate::host::PreparedPlugin,
+    workspace: &std::path::Path,
+    cancel: &Arc<AtomicBool>,
+    until: Instant,
+    report: &mut Report,
+) -> Result<HarnessResolution, Failure> {
+    let (Some(launch), Some(environment), Some(template)) = (
+        &plugin.harness_launch,
+        &plugin.harness_environment,
+        &plugin.harness_template,
+    ) else {
+        return Ok(HarnessResolution::Context(serde_json::Value::Null));
+    };
+    let not_ready = |what: &str| Ok(HarnessResolution::NotReady(format!("harness {what}")));
+    let mut harness = match hagency_runtime::owned::OwnedHarnessSession::spawn(
+        &host.guardian,
+        launch,
+        workspace.to_path_buf(),
+        environment.clone(),
+    ) {
+        Ok(harness) => harness,
+        Err(hagency_runtime::owned::StartError::Uncertain { cleanup, .. }) => {
+            report.cleanup = cleanup;
+            return Err(Failure::SpawnFailed);
+        }
+        Err(_) => return not_ready("could not start to resolve the target"),
+    };
+    let dispatch_id = plugin.dispatch_id.clone();
+    let answer = async {
+        checkpoint(cancel, until)?;
+        if harness
+            .request_value_with(
+                "initialize",
+                &hagency_plugin::HarnessRequest::Initialize {
+                    protocol: "hagency.harness/v1".into(),
+                    capabilities: vec![
+                        "snapshot".into(),
+                        "event".into(),
+                        "stop_attempt".into(),
+                        "open_console".into(),
+                    ],
+                },
+                Duration::from_secs(2),
+                |request| harness_control_receipt(request, cancel, &dispatch_id),
+            )
+            .await
+            .is_err()
+        {
+            return Ok::<_, Failure>(None);
+        }
+        let prepared = harness
+            .prepare_agent_with(
+                &hagency_plugin::HarnessRequest::PrepareAgent {
+                    allocation_id: plugin.allocation_id.clone(),
+                    dispatch_id: dispatch_id.clone(),
+                    agent_name: plugin.agent_name.clone(),
+                    workspace: workspace.to_string_lossy().into_owned(),
+                    template: template.clone(),
+                },
+                Duration::from_secs(2),
+                |request| harness_control_receipt(request, cancel, &dispatch_id),
+            )
+            .await
+            .ok();
+        if let Some(prepared) = &prepared {
+            release_harness_agent(
+                &mut harness,
+                &plugin.allocation_id,
+                &dispatch_id,
+                &prepared.target,
+                "readiness_probe",
+            )
+            .await;
+        }
+        Ok(prepared)
+    }
+    .await;
+    let _ = harness.shutdown(Duration::from_secs(2)).await;
+    report.cleanup = harness.stop();
+    if !stopped(report.cleanup) {
+        return Err(Failure::CleanupUnknown);
+    }
+    // The harness is gone; nothing of it is retained past the probe.
+    report.cleanup = Cleanup::Pending;
+    match answer? {
+        Some(prepared) => Ok(HarnessResolution::Context(serde_json::json!({
+            "target": prepared.target,
+            "ownership": prepared.ownership,
+        }))),
+        None => not_ready("could not prepare the agent to resolve the target"),
+    }
+}
+
+async fn probe_readiness(
+    service: hagency_plugin::PluginService,
+    launch: hagency_plugin::RuntimeLaunch,
+    plugin: &crate::host::PreparedPlugin,
+    context: serde_json::Value,
+    dispatch_id: &str,
+    cancel: &Arc<AtomicBool>,
+    until: Instant,
+) -> Result<hagency_plugin::RuntimeReadiness, Failure> {
+    let input = serde_json::json!({
+        "dispatchId": dispatch_id,
+        "harnessContext": context,
+        "harnessTemplate": plugin.harness_template.as_ref().map(|template| readiness_template(&template.values)),
+    });
+    bounded(
+        tokio::task::spawn_blocking(move || service.probe_runtime_readiness(&launch, &input)),
+        cancel,
+        until,
+    )
+    .await?
+    .map_err(|_| Failure::Worker)?
+    .map_err(|_| Failure::Admission)
+}
+
 async fn execute(
     domain: &DomainStore,
     cap: &RunnerCapability,
@@ -2742,22 +2876,35 @@ async fn execute(
     // down, its target is gone) defers the dispatch as never started: it is
     // requeued with a backoff and the thread says so, instead of the dispatch
     // being fenced with an unknown outcome and its session quarantined.
+    let launch_directory = launch.directory.clone();
     if let crate::host::PreparedRunner::Plugin(plugin) = &runner
         && let Some(service) = host.plugin_service()
     {
         let launch = plugin.runtime.clone();
-        let input = serde_json::json!({
-            "dispatchId": cap.dispatch_id,
-            "harnessTemplate": plugin.harness_template.as_ref().map(|template| readiness_template(&template.values)),
-        });
-        let readiness = bounded(
-            tokio::task::spawn_blocking(move || service.probe_runtime_readiness(&launch, &input)),
-            cancel,
-            until,
-        )
-        .await?
-        .map_err(|_| Failure::Worker)?
-        .map_err(|_| Failure::Admission)?;
+        // The probe gets the target the turn will get, so it is asked about
+        // the agent the harness resolves, not about a template key whose name
+        // the harness owns. The harness prepares and releases the agent before
+        // anything starts (ADR-199 P7b).
+        let resolved =
+            resolve_harness_context(&host, plugin, &launch_directory, cancel, until, report)
+                .await?;
+        let readiness = match resolved {
+            HarnessResolution::NotReady(reason) => {
+                hagency_plugin::RuntimeReadiness::NotReady(reason)
+            }
+            HarnessResolution::Context(context) => {
+                probe_readiness(
+                    service,
+                    launch,
+                    plugin,
+                    context,
+                    &cap.dispatch_id,
+                    cancel,
+                    until,
+                )
+                .await?
+            }
+        };
         if let hagency_plugin::RuntimeReadiness::NotReady(reason) = readiness {
             bounded(
                 domain.fail_before_start(cap.clone(), now_ms(), PLUGIN_NOT_READY_RETRY_MS),
