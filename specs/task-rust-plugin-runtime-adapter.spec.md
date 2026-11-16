@@ -41,14 +41,24 @@ approval, workspace, usage, cleanup, and settlement authority.
   the runtime advertised the `tool` capability at `initialize` and the host
   serves a task helper. The catalog is the Octos set (`owned_task_tools`: core
   task tools plus file tools when granted). Coordination tools (`delegate_task`
-  and the rest of `COORDINATION_TOOLS`) are NOT offered to plugins until plugin
-  approval routing exists, because relaying them would bypass owner approval.
+  and the rest of `COORDINATION_TOOLS`, ADR-196) are added only when the host
+  `coordination_tools` option is on, an approval host is configured, and the
+  runtime advertised `tool`; the host then sets `HAGENCY_COORDINATION_TOOLS=1`
+  on its own helper. If any condition is missing the catalog is the Octos set
+  and coordination names are never relayed. Graph tools are never offered.
 - Execute a `tool/call` once per `call_id` through the same task helper Octos
   uses, on the dispatch's task and capability, and answer with `tool/result`
   `{ok:true, output}` or `{ok:false, error}`. Refuse a duplicate `call_id`, a
   tool outside the offered catalog, and any `tool/call` when no catalog was
   offered. A helper that stopped answering makes later calls fail as outcome
   unknown. Plugin approval requests are still denied.
+- Gate every relayed coordination call except `comment_task` on an owner
+  approval before the helper runs (ADR-196): method `plugin/tool`, params
+  `threadId`, `turnId`, `itemId`, `toolName`, `input`, no reusable scope, so the
+  owner card offers `Approve once` and `Deny` only. Deny and owner-wait expiry
+  answer `tool/result` `ok:false` and never call the helper; a lost helper
+  answer after approval is outcome unknown. A repeated `call_id` raises no
+  second card. The host pre-approves nothing else.
 - Run a runtime's optional manifest `readiness` probe (package-relative argv,
   bounded, read-only, the runtime's own environment, no workspace) before the
   dispatch starts. `{"ready":false,"reason":...}`, malformed output, or a
@@ -117,7 +127,37 @@ Scenario: Plugin tools are the task helper's own catalog
   Test: native_plugin_tools_relay_to_the_task_helper
   Given the offline task helper
   When a plugin asks for its catalog and calls tools
-  Then it gets the Octos set without coordination tools, helper answers and refusals relay unchanged, and outside names never reach the helper
+  Then, with coordination not offered, it gets the Octos set, helper answers and refusals relay unchanged, and outside names never reach the helper
+
+Scenario: The coordination catalog is offered only under its three conditions
+  Test: native_plugin_advertising_tool_is_offered_the_coordination_catalog
+  Given a runtime that advertised `tool`
+  When `coordination_tools` and an approval host are both present
+  Then the catalog adds exactly the eight coordination names and no graph tool, and with either missing it is the Octos set
+
+Scenario: The owned helper profile serves coordination only with its marker
+  Test: native_owned_profile_serves_coordination_only_with_the_marker
+  Given the owned task helper profile
+  When `HAGENCY_COORDINATION_TOOLS=1` is set and when it is absent
+  Then `tools/list` adds the eight names only with the marker, graph tools are refused either way, and any other marker value is invalid
+
+Scenario: A plugin tool approval has no reusable scope
+  Test: native_plugin_tool_approval_has_no_reusable_scope
+  Given a `plugin/tool` approval request
+  When the owner approval scope is derived
+  Then it has no task or always scope and unknown keys are refused
+
+Scenario: A coordination call waits for the owner
+  Test: native_plugin_coordination_call_requires_owner_approval
+  Given a runtime that sends `tool/call` `delegate_task`
+  When the owner has not answered, approves once, denies, or lets the wait expire, or the call_id repeats
+  Then the helper runs only after Approve once and exactly once, deny and expiry answer `ok:false` without calling it, a repeat raises no second card, and without an approval host a forged call is refused
+
+Scenario: An approved delegation creates pending work for the assignee
+  Test: native_plugin_delegate_task_creates_pending_work_for_the_assignee
+  Given an approved `delegate_task` from a plugin dispatch to another active engagement
+  When the helper runs
+  Then the assignee has the intent and a pending task and the delegator's own task is unchanged
 
 Scenario: The runtime receives HOME and tools only when due
   Test: native_plugin_command_environment_carries_home_but_no_secret
