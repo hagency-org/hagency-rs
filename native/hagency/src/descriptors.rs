@@ -3,11 +3,11 @@
 //! module reads the live count and the soft `RLIMIT_NOFILE` and says when the
 //! count nears the limit, so `/health` and the log name it first. Unknown
 //! (a platform without `/proc`) is reported as unknown, never as healthy.
+use hagency_matrix::CancellationToken;
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use hagency_matrix::CancellationToken;
 
 /// Percentage of the soft limit above which the process is near it.
 const NEAR_PERCENT: u64 = 80;

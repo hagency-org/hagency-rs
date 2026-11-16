@@ -329,7 +329,10 @@ mod tests {
         );
         assert!(assets.get("/console/usage").is_some());
         assert_eq!(
-            &assets.get("/console/_next/static/chunk-7.js").unwrap().bytes[..],
+            &assets
+                .get("/console/_next/static/chunk-7.js")
+                .unwrap()
+                .bytes[..],
             b"console.log(7);"
         );
     }

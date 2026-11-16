@@ -387,6 +387,24 @@ async fn deliver_pending_replies(
     *pending = kept;
 }
 
+/// Logs a worker's wait state once per change, with the engagement id, so a
+/// quiet worker is distinguishable from a stopped one.
+#[derive(Default)]
+struct WaitLog {
+    last: Option<&'static str>,
+}
+impl WaitLog {
+    fn note(&mut self, state: &'static str, engagement: &str, detail: &str) {
+        if self.last != Some(state) {
+            self.last = Some(state);
+            tracing::info!(%engagement, state, "{detail}");
+        }
+    }
+    fn clear(&mut self) {
+        self.last = None;
+    }
+}
+
 async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failure> {
     let mut first = true;
     let engagement = input.profile.engagement_id().to_owned();
@@ -395,6 +413,10 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
     // through its refresh.
     let mut refresh_backoff = super::RETRY_BACKOFF_MIN;
     let mut pending_replies: Vec<PendingReply> = Vec::new();
+    // The dispatch this worker deferred (runtime not ready) and is waiting to
+    // claim again, and the last wait state it logged.
+    let mut deferred: Option<String> = None;
+    let mut wait = WaitLog::default();
     loop {
         if input.cancel.is_cancelled() {
             return Ok(None);
@@ -414,6 +436,11 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
         }
         // A fenced agent claims nothing (the store's gate); say so and wait.
         if custody(&input, &engagement).await {
+            wait.note(
+                "fenced",
+                &engagement,
+                "agent is fenced; it claims nothing until the operator resolves the fence",
+            );
             tokio::select! {
                 _ = input.cancel.cancelled() => return Ok(None),
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -532,6 +559,16 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
                 return Err(error);
             }
         }) else {
+            match &deferred {
+                Some(dispatch_id) => {
+                    wait.note(
+                        "deferred",
+                        &engagement,
+                        &format!("waiting for the deferred dispatch {dispatch_id} to come due; it is claimed again after its backoff"),
+                    );
+                }
+                None => wait.clear(),
+            }
             tokio::select! {
                 _ = input.cancel.cancelled() => return Ok(None),
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -612,7 +649,30 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
                 }
             }
         }
-        input.workspace.release(&completed.capability)?;
+        // A failed attempt may never have handed over a workspace (a runtime
+        // that was not ready, an admission refusal): nothing to release then,
+        // and the worker goes on. A completed one must still release it, and a
+        // refusal ends the worker, loudly.
+        let released = if completed.report.failure.is_some() {
+            input.workspace.release_if_registered(&completed.capability)
+        } else {
+            input.workspace.release(&completed.capability)
+        };
+        if let Err(error) = released {
+            tracing::error!(%engagement, dispatch_id = %completed.capability.dispatch_id, error = ?error,
+                "workspace release refused; the agent worker stops and the agent receives nothing until the service restarts");
+            return Err(error);
+        }
+        if let Some(hagency_execution::Failure::RuntimeNotReady { reason }) =
+            &completed.report.failure
+        {
+            tracing::warn!(%engagement, dispatch_id = %completed.capability.dispatch_id, %reason,
+                "plugin runtime not ready; the dispatch was requeued before any start and the worker keeps polling");
+            deferred = Some(completed.capability.dispatch_id.clone());
+        } else {
+            deferred = None;
+        }
+        wait.clear();
         drop(completed.report);
         input.status.phase("idle");
     }

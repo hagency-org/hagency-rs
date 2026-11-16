@@ -304,6 +304,10 @@ async fn native_plugin_runtime_not_ready_requeues_without_starting() {
         })
     );
     assert_eq!(f.launches(), 0, "the runtime never started");
+    assert!(
+        !report.retains_process_custody(),
+        "a deferred dispatch holds no process custody, so the worker is not fenced"
+    );
     let (state, not_before) = f.dispatch();
     assert_eq!(state, "queued");
     assert!(
