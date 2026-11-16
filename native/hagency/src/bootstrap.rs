@@ -1811,6 +1811,34 @@ impl Bootstrap {
         }
         Ok(())
     }
+    /// ADR-197: tell the plugin registry which package revisions live
+    /// engagements are frozen on, then collect the installed revisions nothing
+    /// references. A store that cannot answer collects nothing.
+    async fn collect_plugin_revisions(&self) {
+        let Some(plugins) = self.app.plugins() else {
+            return;
+        };
+        let references = match self.domain.engagement_runtime_references().await {
+            Ok(references) => references,
+            Err(_) => {
+                tracing::warn!(
+                    "[plugins] engagement package references unavailable; no revision collected"
+                );
+                return;
+            }
+        };
+        let collected = tokio::task::spawn_blocking(move || {
+            plugins.set_revision_references(references)?;
+            for record in plugins.list()? {
+                plugins.collect_obsolete(&record.id)?;
+            }
+            Ok::<(), hagency_plugin::PluginError>(())
+        })
+        .await;
+        if !matches!(collected, Ok(Ok(()))) {
+            tracing::warn!("[plugins] unreferenced revision collection did not complete");
+        }
+    }
     pub async fn serve(&mut self, shutdown: &CancellationToken) -> Result<(), Failure> {
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: bind_entered");
         let acceptor = TcpListener::new(self.listen)
@@ -1824,6 +1852,7 @@ impl Bootstrap {
         // loop `disabled` forever (brief 19). The handle is shared: bootstrap
         // keeps it to abort at shutdown, `/health` observes liveness.
         crate::descriptors::start(shutdown.clone());
+        self.collect_plugin_revisions().await;
         let (ceiling_sweep, sweep_tick) = start_ceiling_sweep(
             self.domain.clone(),
             shutdown.clone(),
