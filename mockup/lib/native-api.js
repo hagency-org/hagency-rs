@@ -581,6 +581,16 @@ export function validateEngagementReceipt(v) {
   if (!object(v, ['id', 'state', 'cleanup']) || !id(v.id) || !STATES.includes(v.state) || !CLEANUP.includes(v.cleanup)) throw new Error('invalid_native_response');
   return v;
 }
+/* ADR-199: identity cleanup still pending per agent — attempts, the last
+ * failure kind and the next attempt time. Bookkeeping only; never "applied". */
+export async function fetchCleanupState() {
+  const v = await request('/api/engagements/cleanup-state');
+  if (!object(v, ['cleanup']) || !Array.isArray(v.cleanup) || v.cleanup.length > 1024
+    || v.cleanup.some((c) => !object(c, ['id', 'state', 'attempts', 'lastError', 'nextAttemptAtMs'])
+      || !id(c.id) || c.state !== 'pending' || !number(c.attempts) || typeof c.lastError !== 'string'
+      || c.lastError.length > 256 || !number(c.nextAttemptAtMs))) throw new Error('invalid_native_response');
+  return v.cleanup;
+}
 /* Approve / refuse a pending engagement (board #16). Approve reaches the
  * SAME store verdict the project-side Matrix approval reaches; refuse rides
  * the existing /api/agents/{id}/refuse route and answers the rejected

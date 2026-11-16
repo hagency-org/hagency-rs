@@ -3,6 +3,7 @@ use hagency_store::{DomainStore, Error, Store};
 mod alerts;
 pub mod bootstrap;
 pub mod bot_commands;
+pub(crate) mod cleanup_state;
 pub mod console;
 pub(crate) mod file_service;
 pub(crate) mod fleet_views;

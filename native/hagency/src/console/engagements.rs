@@ -37,6 +37,7 @@ pub(super) fn router() -> Router {
                 .post(settle),
         )
         .push(Router::with_path("engagements/audit").get(audit))
+        .push(Router::with_path("engagements/cleanup-state").get(cleanup_state))
 }
 
 #[handler]
@@ -325,6 +326,24 @@ async fn cleanup_retry(req: &mut Request, depot: &mut Depot, res: &mut Response)
         return;
     }
     receipt(res, result);
+}
+
+/// ADR-199: per-agent identity cleanup state (attempts, last failure kind and
+/// next attempt time) for effects still pending. It reports the cleanup
+/// worker's own bookkeeping; an effect is never shown applied from here.
+#[handler]
+async fn cleanup_state(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    if req.uri().query().is_some() {
+        failed(res, Error::Invalid);
+        return;
+    }
+    if let Err(error) = recheck(depot) {
+        failed(res, error);
+        return;
+    }
+    res.render(Json(
+        serde_json::json!({"cleanup": crate::cleanup_state::board()}),
+    ));
 }
 
 /// The engagement's candidate resources for the console approve form
