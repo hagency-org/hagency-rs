@@ -914,3 +914,168 @@ fn native_plugin_runtime_readiness_is_package_relative() {
         .validate_package_root(dir.path())
         .expect("both entrypoints exist");
 }
+
+struct Revisions {
+    state: TempDir,
+    old: RuntimePluginRef,
+    new: RuntimePluginRef,
+    old_dir: std::path::PathBuf,
+}
+/// Two service-owned revisions of one runtime plugin in one state directory,
+/// the newer one active, as a restart after a plugin update leaves them.
+fn two_owned_revisions() -> Revisions {
+    fn runtime_package(version: &str) -> TempDir {
+        let (dir, manifest) = package();
+        fs::write(
+            dir.path().join("hagency-plugin.toml"),
+            format!(
+                "{}\n[[runtimes]]\nid = \"adapter\"\nframework = \"custom\"\ncommand = [\"runtime\"]\nprotocol = \"hagency.runtime/v1\"\n",
+                manifest.replace("1.0.0", version)
+            ),
+        )
+        .expect("runtime manifest");
+        fs::write(dir.path().join("runtime"), version).expect("runtime entrypoint");
+        dir
+    }
+    fn copy(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("install dir");
+        for name in ["hagency-plugin.toml", "runtime"] {
+            fs::copy(from.join(name), to.join(name)).expect("copy");
+        }
+    }
+    fn reference(digest: &str, settings: &str) -> RuntimePluginRef {
+        RuntimePluginRef {
+            plugin_id: "example.plugin".into(),
+            adapter_id: "adapter".into(),
+            package_sha256: digest.into(),
+            settings_sha256: settings.into(),
+        }
+    }
+    let (v1, v2) = (runtime_package("1.0.0"), runtime_package("1.1.0"));
+    let state = tempdir().expect("state");
+    let manager = PluginService::open(state.path()).expect("manager");
+    let old = manager.link(v1.path()).expect("link old");
+    let old_settings = manager.settings("example.plugin").expect("settings");
+    manager.enable("example.plugin").expect("enable");
+    let new = manager.link(v2.path()).expect("link new");
+    let new_settings = manager.settings("example.plugin").expect("settings");
+    drop(manager);
+    let installs = state.path().join("plugins/installs/example.plugin");
+    let old_dir = installs.join(format!("{}-{}", "a".repeat(40), old.package_sha256));
+    let new_dir = installs.join(format!("{}-{}", "b".repeat(40), new.package_sha256));
+    copy(v1.path(), &old_dir);
+    copy(v2.path(), &new_dir);
+    let path = state.path().join("plugins/registry.json");
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("registry")).expect("json");
+    let record = &mut registry["records"]["example.plugin"];
+    record["source"] = json!({"kind":"github","owner":"o","repo":"r","subdir":null,"commit":"b".repeat(40),"transport":"https"});
+    record["installDir"] = json!(new_dir);
+    record["restartRequired"] = json!(false);
+    record["revisions"][&old.package_sha256]["installDir"] = json!(old_dir);
+    record["revisions"][&new.package_sha256]["installDir"] = json!(new_dir);
+    fs::write(&path, serde_json::to_vec(&registry).expect("encode")).expect("write registry");
+    Revisions {
+        old: reference(&old.package_sha256, &old_settings.document.settings_sha256),
+        new: reference(&new.package_sha256, &new_settings.document.settings_sha256),
+        state,
+        old_dir,
+    }
+}
+
+#[test]
+fn engagement_upgrade_older_revision_stays_launchable_while_referenced() {
+    let r = two_owned_revisions();
+    let manager = PluginService::open(r.state.path()).expect("manager");
+    assert_eq!(
+        manager.inspect("example.plugin").unwrap().package_sha256,
+        r.new.package_sha256
+    );
+    // The engagement froze the old package: it still launches, from the old copy.
+    let launch = manager
+        .runtime_launch(&r.old, "custom")
+        .expect("old launch");
+    assert_eq!(launch.executable, r.old_dir.join("runtime"));
+    let lease = manager.claim_runtime_launch(&launch).expect("old lease");
+    assert_eq!(lease.package_sha256(), r.old.package_sha256);
+    drop(lease);
+    // The active package launches too.
+    manager
+        .runtime_launch(&r.new, "custom")
+        .expect("new launch");
+    // A new provisioning is never offered the old revision.
+    let qualification = RuntimeQualification {
+        runtime: r.old.clone(),
+        framework: "custom".into(),
+        model: "model".into(),
+        provider: "provider".into(),
+        reasoning: None,
+        evidence_digest: "a".repeat(64),
+        roles: vec!["review".into()],
+    };
+    assert!(matches!(
+        manager.qualify_runtime(&qualification),
+        Err(PluginError::Untrusted)
+    ));
+    assert!(matches!(
+        manager.claim_runtime(&qualification),
+        Err(PluginError::Untrusted)
+    ));
+    // A revision no engagement froze and the registry does not hold is refused.
+    let mut unknown = r.old.clone();
+    unknown.package_sha256 = "f".repeat(64);
+    assert!(matches!(
+        manager.runtime_launch(&unknown, "custom"),
+        Err(PluginError::Untrusted)
+    ));
+    // GC keeps the referenced revision and its files.
+    manager
+        .set_revision_references([("example.plugin".into(), r.old.package_sha256.clone(), 1)])
+        .expect("references");
+    manager.collect_obsolete("example.plugin").expect("collect");
+    assert!(r.old_dir.join("runtime").exists());
+    assert!(
+        manager
+            .inspect("example.plugin")
+            .unwrap()
+            .revisions
+            .contains_key(&r.old.package_sha256)
+    );
+    manager
+        .runtime_launch(&r.old, "custom")
+        .expect("still launchable");
+}
+
+#[test]
+fn engagement_upgrade_revision_collected_when_unreferenced() {
+    let r = two_owned_revisions();
+    let manager = PluginService::open(r.state.path()).expect("manager");
+    // Before the host reports references nothing non-active is collected.
+    manager.collect_obsolete("example.plugin").expect("collect");
+    assert!(r.old_dir.join("runtime").exists());
+    // A held lease keeps an unreferenced revision.
+    manager.set_revision_references([]).expect("references");
+    let launch = manager.runtime_launch(&r.old, "custom").expect("launch");
+    let lease = manager.claim_runtime_launch(&launch).expect("lease");
+    manager.collect_obsolete("example.plugin").expect("collect");
+    assert!(r.old_dir.join("runtime").exists());
+    drop(lease);
+    // Unreferenced and unleased: collected, files and registry entry.
+    manager.collect_obsolete("example.plugin").expect("collect");
+    assert!(!r.old_dir.exists());
+    assert!(
+        !manager
+            .inspect("example.plugin")
+            .unwrap()
+            .revisions
+            .contains_key(&r.old.package_sha256)
+    );
+    assert!(matches!(
+        manager.runtime_launch(&r.old, "custom"),
+        Err(PluginError::Untrusted)
+    ));
+    // The active revision is never collected, referenced or not.
+    manager
+        .runtime_launch(&r.new, "custom")
+        .expect("active launch");
+}

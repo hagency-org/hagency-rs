@@ -253,6 +253,10 @@ struct ManagerState {
     guardian: PathBuf,
     scheduler: Scheduler,
     leases: BTreeMap<(String, String), u32>,
+    /// ADR-197: live engagements frozen on `(plugin_id, package_sha256)`, set by
+    /// the host from the store. `None` until the host has said; then nothing
+    /// non-active is collected.
+    references: Option<BTreeMap<(String, String), u32>>,
     logs: BTreeMap<String, VecDeque<LogRecord>>,
     events: EventQueue,
     invocations: BTreeMap<String, PluginInvocation>,
@@ -544,26 +548,42 @@ impl PluginService {
         package_sha256: &str,
         settings_sha256: &str,
     ) -> Result<PathBuf, PluginError> {
-        let state = self.settings(id)?;
-        if state.document.package_sha256 != package_sha256 {
-            return Err(PluginError::Untrusted);
-        }
-        let document = if state.document.settings_sha256 == settings_sha256 {
-            state.document
+        let record = self.inspect(id)?;
+        let manifest = if record.package_sha256 == package_sha256 {
+            self.manifest_for(&record)?
         } else {
-            let path = settings::revision_dir(&self.settings_root(id)?, settings_sha256)
-                .join("settings.json");
-            let document: PluginSettingsDocument = serde_json::from_slice(&fs::read(path)?)?;
-            let record = self.inspect(id)?;
-            let manifest = self.manifest_for(&record)?;
-            settings::validate_document(&document, id, package_sha256, &manifest.settings)?;
-            document
+            // ADR-197: settings of an older revision an engagement froze. The
+            // settings revision is immutable and content-addressed; it is
+            // checked against that revision's own manifest.
+            let install_dir = self.revision_dir_for_launch(&record, package_sha256)?;
+            Manifest::parse(&fs::read(install_dir.join(MANIFEST_FILE))?)?
+        };
+        let document = if record.package_sha256 == package_sha256 {
+            let state = self.settings(id)?;
+            if state.document.package_sha256 != package_sha256 {
+                return Err(PluginError::Untrusted);
+            }
+            if state.document.settings_sha256 == settings_sha256 {
+                Some(state.document)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let document = match document {
+            Some(document) => document,
+            None => {
+                let path = settings::revision_dir(&self.settings_root(id)?, settings_sha256)
+                    .join("settings.json");
+                let document: PluginSettingsDocument = serde_json::from_slice(&fs::read(path)?)?;
+                settings::validate_document(&document, id, package_sha256, &manifest.settings)?;
+                document
+            }
         };
         if document.settings_sha256 != settings_sha256 {
             return Err(PluginError::Untrusted);
         }
-        let record = self.inspect(id)?;
-        let manifest = self.manifest_for(&record)?;
         let checked = settings::evaluate(
             id,
             package_sha256,
@@ -634,6 +654,7 @@ impl PluginService {
                 guardian,
                 scheduler: Scheduler::new(),
                 leases: BTreeMap::new(),
+                references: None,
                 logs: BTreeMap::new(),
                 events: EventQueue::default(),
                 invocations,
@@ -1082,6 +1103,15 @@ impl PluginService {
         Ok(())
     }
     pub fn acquire_lease(&self, id: &str) -> Result<PluginLease, PluginError> {
+        self.acquire_revision_lease(id, None)
+    }
+    /// Lease `digest` (an older installed revision an engagement is frozen on),
+    /// or the active revision when `digest` is `None`.
+    fn acquire_revision_lease(
+        &self,
+        id: &str,
+        digest: Option<&str>,
+    ) -> Result<PluginLease, PluginError> {
         let mut state = self
             .inner
             .lock()
@@ -1096,13 +1126,17 @@ impl PluginService {
         if record.stale {
             return Err(PluginError::Stale(id.into()));
         }
-        let digest = record.active_package_sha256.clone();
+        let digest = digest
+            .map(str::to_owned)
+            .unwrap_or_else(|| record.active_package_sha256.clone());
         let revision = record
             .revisions
             .get_mut(&digest)
-            .ok_or_else(|| PluginError::NotReady("active revision is missing".into()))?;
+            .ok_or_else(|| PluginError::NotReady("revision is missing".into()))?;
         revision.active_leases = revision.active_leases.saturating_add(1);
-        record.active_leases = record.active_leases.saturating_add(1);
+        if record.active_package_sha256 == digest {
+            record.active_leases = record.active_leases.saturating_add(1);
+        }
         *state.leases.entry((id.into(), digest.clone())).or_default() += 1;
         state.registry.persist()?;
         Ok(PluginLease {
@@ -1533,7 +1567,10 @@ impl PluginService {
     /// Re-check the runtime package identity before retaining its execution lease.
     pub fn claim_runtime_launch(&self, launch: &RuntimeLaunch) -> Result<PluginLease, PluginError> {
         let current = self.runtime_launch(&launch.runtime, &launch.framework)?;
-        let lease = self.acquire_lease(&launch.runtime.plugin_id)?;
+        let lease = self.acquire_revision_lease(
+            &launch.runtime.plugin_id,
+            Some(&launch.runtime.package_sha256),
+        )?;
         if lease.package_sha256() != current.runtime.package_sha256
             || launch.runtime.settings_sha256 != current.runtime.settings_sha256
         {
@@ -1703,29 +1740,31 @@ impl PluginService {
         if !record.enabled {
             return Err(PluginError::Disabled(record.id));
         }
-        if record.package_sha256 != runtime.package_sha256 {
-            return Err(PluginError::Untrusted);
-        }
+        // ADR-197: the dispatch path passes the package its engagement froze.
+        // That is the active package, or an older installed revision that the
+        // registry still keeps. Provisioning (`qualify_runtime`) stays
+        // active-only, so an older revision is never offered to a new agent.
+        let install_dir = self.revision_dir_for_launch(&record, &runtime.package_sha256)?;
         self.selected_settings(
             &record.id,
             &runtime.package_sha256,
             &runtime.settings_sha256,
         )?;
-        let manifest = Manifest::parse(&fs::read(record.install_dir.join(MANIFEST_FILE))?)?;
-        manifest.validate_package_root(&record.install_dir)?;
+        let manifest = Manifest::parse(&fs::read(install_dir.join(MANIFEST_FILE))?)?;
+        manifest.validate_package_root(&install_dir)?;
         let spec = manifest
             .runtimes
             .iter()
             .find(|spec| spec.id == runtime.adapter_id && spec.framework == framework)
             .ok_or(PluginError::Incompatible)?;
-        let executable = record.install_dir.join(&spec.command[0]);
+        let executable = install_dir.join(&spec.command[0]);
         let arguments = spec.command[1..].iter().map(OsString::from).collect();
         Ok(RuntimeLaunch {
             runtime: runtime.clone(),
             framework: framework.into(),
             executable,
             arguments,
-            package_dir: record.install_dir,
+            package_dir: install_dir,
             readiness: spec.readiness.clone(),
         })
     }
@@ -1862,27 +1901,71 @@ impl PluginService {
             .scheduler
             .snapshot(id))
     }
+    /// Remove installed revisions nothing needs. A non-active revision is kept
+    /// while it is leased or referenced by a live engagement (ADR-197). Before
+    /// the host has reported references (`set_revision_references`) every
+    /// registered revision is kept, so a missing report never collects a
+    /// package an engagement still needs.
     pub fn collect_obsolete(&self, id: &str) -> Result<(), PluginError> {
         let record = self.inspect(id)?;
         let root = self.state_dir()?.join("plugins/installs").join(id);
+        if !matches!(&record.source, PluginSource::Linked { .. }) {
+            let mut state = self
+                .inner
+                .lock()
+                .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?;
+            if let Some(references) = state.references.clone() {
+                let collectable: Vec<String> = state
+                    .registry
+                    .get(id)
+                    .map(|record| {
+                        record
+                            .revisions
+                            .iter()
+                            .filter(|(digest, revision)| {
+                                **digest != record.active_package_sha256
+                                    && revision.active_leases == 0
+                                    && state
+                                        .leases
+                                        .get(&(id.to_owned(), (*digest).clone()))
+                                        .copied()
+                                        .unwrap_or(0)
+                                        == 0
+                                    && references
+                                        .get(&(id.to_owned(), (*digest).clone()))
+                                        .copied()
+                                        .unwrap_or(0)
+                                        == 0
+                            })
+                            .map(|(digest, _)| digest.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !collectable.is_empty()
+                    && let Some(live) = state.registry.get_mut(id)
+                {
+                    for digest in &collectable {
+                        live.revisions.remove(digest);
+                    }
+                    state.registry.persist()?;
+                }
+            }
+        }
         if !root.is_dir() {
             return Ok(());
         }
+        let record = self.inspect(id)?;
         for entry in fs::read_dir(root)? {
             let entry = entry?;
             if entry.path() == record.install_dir {
                 continue;
             }
-            let mut retained = false;
-            for (digest, revision) in &record.revisions {
-                if revision.install_dir == entry.path()
-                    && (revision.active_leases != 0 || self.lease_count(id, digest)? != 0)
-                {
-                    retained = true;
-                    break;
-                }
-            }
-            if !retained {
+            // A directory of a revision the registry still holds is kept.
+            let registered = record
+                .revisions
+                .values()
+                .any(|revision| revision.install_dir == entry.path());
+            if !registered {
                 let _ = fs::remove_dir_all(entry.path());
             }
         }
@@ -2157,6 +2240,62 @@ impl PluginService {
             }
         }
         Ok(())
+    }
+    /// The install directory of `package_sha256` for a launch: the active
+    /// package, or an older installed revision the registry still keeps. An
+    /// older revision must be a service-owned copy whose files still hash to
+    /// its digest; a linked source is a live directory and has no older copy.
+    fn revision_dir_for_launch(
+        &self,
+        record: &PluginRecord,
+        package_sha256: &str,
+    ) -> Result<PathBuf, PluginError> {
+        if record.package_sha256 == package_sha256 {
+            return Ok(record.install_dir.clone());
+        }
+        let revision = record
+            .revisions
+            .get(package_sha256)
+            .ok_or(PluginError::Untrusted)?;
+        if matches!(&record.source, PluginSource::Linked { .. }) {
+            return Err(PluginError::Untrusted);
+        }
+        let (_, _, snapshot) =
+            package_manifest(&revision.install_dir).map_err(|_| PluginError::Untrusted)?;
+        if snapshot.digest != package_sha256 {
+            return Err(PluginError::Untrusted);
+        }
+        Ok(revision.install_dir.clone())
+    }
+    /// ADR-197: replace the engagement reference counts. Each entry is
+    /// `(plugin_id, package_sha256, live engagements frozen on it)`, read by
+    /// the host from the store. Until this is called, nothing non-active is
+    /// collected.
+    pub fn set_revision_references(
+        &self,
+        references: impl IntoIterator<Item = (String, String, u32)>,
+    ) -> Result<(), PluginError> {
+        let mut counts: BTreeMap<(String, String), u32> = BTreeMap::new();
+        for (plugin, package, count) in references {
+            let entry = counts.entry((plugin, package)).or_default();
+            *entry = entry.saturating_add(count);
+        }
+        self.inner
+            .lock()
+            .map_err(|_| PluginError::NotReady("manager lock poisoned".into()))?
+            .references = Some(counts);
+        Ok(())
+    }
+    /// Live engagements frozen on this revision; `None` before the host has
+    /// reported references.
+    pub fn revision_reference_count(&self, id: &str, digest: &str) -> Option<u32> {
+        let state = self.inner.lock().ok()?;
+        state.references.as_ref().map(|counts| {
+            counts
+                .get(&(id.into(), digest.into()))
+                .copied()
+                .unwrap_or(0)
+        })
     }
     fn lease_count(&self, id: &str, digest: &str) -> Result<u32, PluginError> {
         Ok(self
