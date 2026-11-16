@@ -154,8 +154,9 @@ Facts below were re-read in source, not taken from the incident notes.
    no binary and its launcher exited 127. The build runner also ignored the
    exit status: `run_supervised_command` returned `status: 0` for every exit,
    so a failed build counted as success. Decision: the build environment sets
-   `CARGO_TARGET_DIR=<package root>/target`; the supervised runner reports the
-   real exit status and `apply_install` fails with `PluginError::BuildFailed`
+   `CARGO_TARGET_DIR=<package root>/target`; build and launcher
+   probes report their real exit status (the Linux guardian reports none, so they
+   run under a small `sh` wrapper that prints it on stderr) and `apply_install` fails with `PluginError::BuildFailed`
    (`plugin_build_failed`) on a non-zero build; build stdout and stderr are
    recorded in the plugin logs on success and on failure (the failure message
    carries a bounded stderr tail); and after the build, before the copy, the
@@ -266,7 +267,7 @@ the `LimitNOFILE` drop-in installed by hand on the server.
 - `native_plugin_readiness_probe_receives_the_prepared_harness_target`
 - `native_plugin_readiness_deferral_when_the_harness_cannot_prepare`
 - `a_failed_attempt_that_never_registered_a_workspace_does_not_end_the_worker`
-- `a_registered_workspace_that_cannot_be_released_still_stops_the_worker`
+- `a_retired_workspace_access_still_refuses_release`
 - `cancelled_never_started_dispatch_is_requeued_not_superseded`
 - `refused_never_started_dispatch_tells_the_thread_it_was_dropped`
 - `started_dispatch_is_never_requeued_by_cancellation`
