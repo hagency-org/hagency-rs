@@ -105,9 +105,10 @@ impl Session {
         }
     }
     fn owned_tools(&self) -> Vec<&'static str> {
-        hagency_runtime::task_mcp::owned_task_tools(
+        hagency_runtime::task_mcp::owned_plugin_tools(
             self.context.file_tools(),
             self.context.receive_tools(),
+            self.context.coordination_tools(),
         )
     }
     /// One complete frame, without its newline. A fatal frame closes this session.
