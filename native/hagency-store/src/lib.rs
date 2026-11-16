@@ -22,31 +22,32 @@ pub use domain::resource_publication::{
 };
 pub use domain::uploads::UploadSettlement;
 pub use domain::{
-    ALERT_STATUSES, ActivityEvent, ActivityUpdate, AgentDefinition, AgentDefinitionInput,
-    AgentDetail, AgentDetailRoom, AgentFence, AgentRosterRow, AlertListFilter, AlertNote,
-    AlertPatch, AlertStats, AlertTransition, AttachmentTicket, AttemptClock, AttemptClockRow,
-    AttemptEvent, AttemptEventRow, AttemptPhase, CeilingAlert, CeilingReport, Contribution,
-    CorpusSweepOutcome, Credential, DeliveryEventRow, DeliveryFeedback, DeliveryWarning,
-    DirectTarget, DomainRepository, ENDED_LIMIT, EXECUTION_RETENTION_BATCH,
-    EXECUTION_RETENTION_DISPATCHES, EXECUTION_RETENTION_ROWS, Effect, EffectOutcome, EffectState,
-    EngagementLabel, EngagementPruneOutcome, EngagementRetentionStatus, ExecutionPruneOutcome,
-    FenceReason, IssueSideRegistration, IssueSideRegistrationRequest, KnownTokens,
-    MAX_ENGAGEMENT_USAGE_PERIODS, MAX_ENGAGEMENT_USAGE_SOURCES, MAX_OPEN_CEILING_ALERTS,
-    MAX_SOURCE_USAGE_RECEIPTS, MAX_TASK_COMMENTS, MAX_TASK_PAGE, MAX_USAGE_PERIODS,
-    MAX_USAGE_RECEIPTS, MAX_USAGE_SOURCES, MESSAGE_RETENTION_FLOOR, MentionState, MentionTarget,
-    NewOperatorMessage, OVER_BUDGET_NOTICE_KIND, OfferBook, OfferResource, OfferRole, OfferServing,
-    OperatorMessage, OperatorTask, OperatorTaskComment, OverBudgetNotice, OwnedClaimProfile,
-    OwnedClaimRoom, OwnedCompletion, OwnedDispatchScope, OwnedFailure, OwnedObservation,
-    OwnedProvisionScope, OwnedRuntimeLease, PEER_RECEIPT_CEILING, PEER_RETENTION_CEILING,
-    PEER_RETENTION_FLOOR, PeerRetentionStatus, PeerSweepOutcome, PendingInvite,
-    PluginRuntimeChoice, PluginRuntimeQualification, Preview, ProjectSide, QuotaStatus, Reminder,
-    ReminderReceipt, ReminderSweep, Representative, RetentionStatus, RoleOffer, RuntimeProfile,
-    RuntimeProfileRole, SideBudget, SideCommitment, SideCredential, SideProject, SideProjectRecord,
-    SideRecord, SourceUsage, SuppressOutcome, Suppression, SweepOutcome, TASK_GRANULARITIES,
-    TASK_PRIORITIES, TASK_STATUSES, TaskFilters, Tombstone, UploadAdmission, UploadClaim,
-    UploadIdentity, UploadPreparation, UploadSend, UsageCeiling, UsageEvidence, UsagePeriod,
-    UsagePeriodKind, UsageReceipt, UsageReport, UsageSource, UsageSummary, UsageTotals,
-    WhitelistEntry, allowed_transitions, operator_transitions, over_budget_notice_body,
+    ALERT_STATUSES, ActivityEvent, ActivityUpdate, AdmissionReason, AgentDefinition,
+    AgentDefinitionInput, AgentDetail, AgentDetailRoom, AgentFence, AgentRosterRow,
+    AlertListFilter, AlertNote, AlertPatch, AlertStats, AlertTransition, AttachmentTicket,
+    AttemptClock, AttemptClockRow, AttemptEvent, AttemptEventRow, AttemptPhase, CeilingAlert,
+    CeilingReport, Contribution, CorpusSweepOutcome, Credential, DeliveryEventRow,
+    DeliveryFeedback, DeliveryWarning, DirectTarget, DomainRepository, ENDED_LIMIT,
+    EXECUTION_RETENTION_BATCH, EXECUTION_RETENTION_DISPATCHES, EXECUTION_RETENTION_ROWS, Effect,
+    EffectOutcome, EffectState, EngagementLabel, EngagementPruneOutcome, EngagementRetentionStatus,
+    ExecutionPruneOutcome, FenceReason, IssueSideRegistration, IssueSideRegistrationRequest,
+    KnownTokens, MAX_ENGAGEMENT_USAGE_PERIODS, MAX_ENGAGEMENT_USAGE_SOURCES,
+    MAX_OPEN_CEILING_ALERTS, MAX_SOURCE_USAGE_RECEIPTS, MAX_TASK_COMMENTS, MAX_TASK_PAGE,
+    MAX_USAGE_PERIODS, MAX_USAGE_RECEIPTS, MAX_USAGE_SOURCES, MESSAGE_RETENTION_FLOOR,
+    MentionState, MentionTarget, NewOperatorMessage, OVER_BUDGET_NOTICE_KIND, OfferBook,
+    OfferResource, OfferRole, OfferServing, OperatorMessage, OperatorTask, OperatorTaskComment,
+    OverBudgetNotice, OwnedClaimProfile, OwnedClaimRoom, OwnedCompletion, OwnedDispatchScope,
+    OwnedFailure, OwnedObservation, OwnedProvisionScope, OwnedRuntimeLease, PEER_RECEIPT_CEILING,
+    PEER_RETENTION_CEILING, PEER_RETENTION_FLOOR, PeerRetentionStatus, PeerSweepOutcome,
+    PendingInvite, PluginRuntimeChoice, PluginRuntimeQualification, Preview, ProjectSide,
+    QuotaStatus, Reminder, ReminderReceipt, ReminderSweep, Representative, RetentionStatus,
+    RoleOffer, RuntimeProfile, RuntimeProfileRole, SideBudget, SideCommitment, SideCredential,
+    SideProject, SideProjectRecord, SideRecord, SourceUsage, SuppressOutcome, Suppression,
+    SweepOutcome, TASK_GRANULARITIES, TASK_PRIORITIES, TASK_STATUSES, TaskFilters, Tombstone,
+    UploadAdmission, UploadClaim, UploadIdentity, UploadPreparation, UploadSend, UsageCeiling,
+    UsageEvidence, UsagePeriod, UsagePeriodKind, UsageReceipt, UsageReport, UsageSource,
+    UsageSummary, UsageTotals, WhitelistEntry, allowed_transitions, operator_transitions,
+    over_budget_notice_body,
 };
 pub use domain::{OutcomeAction, OutcomeResolution};
 pub use domain::{PublishedCatalog, publication_fingerprint};
@@ -89,6 +90,12 @@ pub enum Error {
     NotFound,
     #[error("selected resource is withdrawn or does not qualify")]
     Unqualified,
+    /// ADR-198: the resource has a harness plugin but no valid template can be
+    /// resolved for the request. `code` is the stable reason that reaches the
+    /// requester (`harness_template_missing` / `harness_template_invalid`);
+    /// `message` names the fix and never carries setting values.
+    #[error("{message}")]
+    HarnessTemplate { code: &'static str, message: String },
     #[error("selected resource or declared shared seat has insufficient capacity")]
     InsufficientCapacity,
     #[error("cannot allocate against an agent with no declared ceiling")]

@@ -86,6 +86,21 @@ impl Fixture {
             pool.octos_profile = Some("coding".into());
         }
         db.put_resource(&pool).unwrap();
+        if let Some(identity) = pool.harness_plugin.as_ref() {
+            // ADR-198: a harness resource refuses an agent with no template.
+            let mut template = hagency_plugin::HarnessTemplateDocument {
+                schema: hagency_plugin::HARNESS_TEMPLATE_SCHEMA.into(),
+                plugin_id: identity.plugin_id.clone(),
+                harness_id: identity.harness_id.clone(),
+                package_sha256: identity.package_sha256.clone(),
+                settings_sha256: identity.settings_sha256.clone(),
+                template_sha256: String::new(),
+                values: Default::default(),
+            };
+            template.template_sha256 = hagency_plugin::harness_template_digest(&template).unwrap();
+            db.set_resource_default_harness_template(&pool.id(), Some(&template), 999)
+                .unwrap();
+        }
         let p = proof(&request("usage_request", "Worker", &pool, 100));
         let engagement = db.admit(&p, 1000).unwrap();
         db.approve("approve", &p, 1000).unwrap();

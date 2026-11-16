@@ -93,6 +93,11 @@ impl Fixture {
         // An empty word is no reasoning setting, as Claude resources carry.
         pool.reasoning = (!reasoning.is_empty()).then(|| reasoning.into());
         db.put_resource(&pool).unwrap();
+        if pool.harness_plugin.is_some() {
+            // ADR-198: a harness resource refuses an agent with no template.
+            db.set_resource_default_harness_template(&pool.id(), Some(&harness_template()), 999)
+                .unwrap();
+        }
         let proof = proof(&request("claim", "Worker", &pool, 100));
         let e = db.admit(&proof, 1000).unwrap();
         db.approve("approve", &proof, 1000).unwrap();

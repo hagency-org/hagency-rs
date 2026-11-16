@@ -126,6 +126,7 @@ pub fn store_error_label(error: &hagency_store::Error) -> &'static str {
         Generation => "generation",
         NotFound => "not_found",
         Unqualified => "unqualified",
+        HarnessTemplate { code, .. } => code,
         InsufficientCapacity => "insufficient_capacity",
         NoCeiling => "no_ceiling",
         OverCommit { .. } => "over_commit",

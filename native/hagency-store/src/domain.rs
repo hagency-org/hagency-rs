@@ -94,7 +94,8 @@ pub use reminders::{Reminder, ReminderReceipt, ReminderSweep};
 mod side_registration;
 pub use owned_completion::OwnedCompletion;
 pub use owned_dispatch::{
-    OwnedClaimProfile, OwnedClaimRoom, OwnedDispatchScope, OwnedFailure, OwnedObservation,
+    AdmissionReason, OwnedClaimProfile, OwnedClaimRoom, OwnedDispatchScope, OwnedFailure,
+    OwnedObservation,
 };
 pub use peers::{
     PEER_RECEIPT_CEILING, PEER_RETENTION_CEILING, PEER_RETENTION_FLOOR, PeerRetentionStatus,
@@ -138,7 +139,7 @@ pub struct DomainRepository {
     notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 74;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 75;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -399,6 +400,12 @@ pub struct EngagementLabel {
     pub spent_tokens: Option<u64>,
     /// ADR-186 §B2: an open quota hold — "paused: quota".
     pub quota_paused: bool,
+    /// ADR-198: a live agent on a harness-plugin resource whose frozen
+    /// template is null can never pass host admission. Named so the console
+    /// shows `cannot run: harness_template_missing`; repaired by rebind, not
+    /// by editing the frozen effect. Absent for every agent that can run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cannot_run: Option<&'static str>,
 }
 /// ADR-186 §B: one engagement's quota, as the pause reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1389,6 +1396,11 @@ impl DomainRepository {
                     ),
                     // Plugin usage sources accept the resource's validated framework identifier.
                     (74, include_str!("migrations/080-plugin-usage-sources.sql")),
+                    // ADR-198: operator-set resource default harness template.
+                    (
+                        75,
+                        include_str!("migrations/081-resource-default-harness-template.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
@@ -1406,6 +1418,7 @@ impl DomainRepository {
                     "SELECT allocated_tokens FROM engagements LIMIT 0",
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
                     "SELECT id,resource_id,name,role,enabled,created_at,harness_template FROM agent_definitions LIMIT 0",
+                    "SELECT resource_id,template,template_sha256,updated_at FROM resource_default_harness_templates LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
                     "SELECT engagement_id,room_id,state,joined_at,updated_at,notice_at FROM joined_rooms LIMIT 0",
                     "SELECT fleet_id,allocated_tokens,updated_at FROM side_allocations LIMIT 0",
@@ -1844,6 +1857,12 @@ impl DomainRepository {
                 (observed, accounted) => observed.or(accounted),
             };
             let quota_paused = quota_holds::paused(&self.db, &engagement.id)?;
+            let cannot_run = (matches!(
+                engagement.state,
+                EngagementState::Pending | EngagementState::Reserved | EngagementState::Active
+            ) && resource.harness_plugin.is_some()
+                && engagement.harness_template.is_none())
+            .then_some("harness_template_missing");
             labels.push(EngagementLabel {
                 matrix_profile: {let profile=self.matrix_agent_profile(&engagement.id)?; (profile["state"]!="default").then_some(profile)},
                 coordinator_managed:self.db.query_row("SELECT EXISTS(SELECT 1 FROM coordinator_engagements c JOIN engagements e ON e.fleet_id=c.id WHERE e.id=?1)",[&engagement.id],|r|r.get(0))?,
@@ -1861,6 +1880,7 @@ impl DomainRepository {
                 allocated_tokens,
                 spent_tokens,
                 quota_paused,
+                cannot_run,
             });
         }
         Ok(labels)
@@ -2413,21 +2433,12 @@ impl DomainRepository {
         if collision {
             return Err(Error::Conflict);
         }
-        let harness_template = tx
-            .query_row(
-                "SELECT harness_template FROM agent_definitions \
-                 WHERE resource_id=?1 AND name=?2 AND role=?3 AND enabled=1",
-                params![
-                    request.agent_definition.resource_id,
-                    request.agent_definition.name.as_str(),
-                    request.role,
-                ],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten()
-            .map(|value| serde_json::from_str(&value))
-            .transpose()?;
+        let harness_template = engagement_terms::resolve_harness_template(
+            &tx,
+            &resource,
+            request.agent_definition.name.as_str(),
+            &request.role,
+        )?;
         /*
          * Task #19 TS parity (lib/engagement-store.js:546-566): the routing
          * verdict is RECORDED, never used to refuse — TS stores the request

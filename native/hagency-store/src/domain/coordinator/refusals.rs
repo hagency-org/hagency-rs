@@ -205,6 +205,8 @@ impl DomainRepository {
             "project_unavailable",
             "resource_unavailable",
             "request_conflict",
+            "harness_template_missing",
+            "harness_template_invalid",
         ]
         .contains(&reason)
         {

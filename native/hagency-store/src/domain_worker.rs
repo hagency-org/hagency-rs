@@ -3496,6 +3496,26 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn resource_default_harness_template(
+        &self,
+        resource_id: String,
+    ) -> Result<Option<hagency_plugin::HarnessTemplateDocument>, Error> {
+        self.call(weight(&resource_id)?, move |db| {
+            db.resource_default_harness_template(&resource_id)
+        })
+        .await
+    }
+    pub async fn set_resource_default_harness_template(
+        &self,
+        resource_id: String,
+        template: Option<hagency_plugin::HarnessTemplateDocument>,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.call(weight(&resource_id)?, move |db| {
+            db.set_resource_default_harness_template(&resource_id, template.as_ref(), now)
+        })
+        .await
+    }
     pub async fn edit_agent_definition(
         &self,
         resource_id: String,

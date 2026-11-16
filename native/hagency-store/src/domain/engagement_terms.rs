@@ -60,7 +60,7 @@ fn valid_agent_name(name: &str) -> bool {
             .chars()
             .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
-fn validate_harness_template(
+pub(super) fn validate_harness_template(
     resource: &Resource,
     value: &HarnessTemplateDocument,
 ) -> Result<HarnessTemplateDocument, Error> {
@@ -97,6 +97,69 @@ fn validate_harness_template(
         return Err(Error::Conflict);
     }
     Ok(value.clone())
+}
+
+/// ADR-198: the harness template a new engagement freezes. A resource with a
+/// harness plugin never yields an agent that cannot run: the enabled
+/// definition matching name and role wins, then the operator's resource
+/// default, otherwise the request is refused with a named reason.
+pub(super) fn resolve_harness_template(
+    db: &Connection,
+    resource: &Resource,
+    name: &str,
+    role: &str,
+) -> Result<Option<HarnessTemplateDocument>, Error> {
+    let resource_id = resource.id();
+    let defined: Option<HarnessTemplateDocument> = db
+        .query_row(
+            "SELECT harness_template FROM agent_definitions \
+             WHERE resource_id=?1 AND name=?2 AND role=?3 AND enabled=1",
+            params![resource_id, name, role],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
+    if resource.harness_plugin.is_none() {
+        return Ok(defined);
+    }
+    let invalid = |source: &str| Error::HarnessTemplate {
+        code: "harness_template_invalid",
+        message: format!(
+            "the {source} harness template for resource {resource_id} does not match its harness plugin; save it again"
+        ),
+    };
+    if let Some(template) = defined {
+        return validate_harness_template(resource, &template)
+            .map(Some)
+            .map_err(|_| invalid(&format!("agent definition {name}")));
+    }
+    match read_default_harness_template(db, &resource_id)? {
+        Some(template) => validate_harness_template(resource, &template)
+            .map(Some)
+            .map_err(|_| invalid("default")),
+        None => Err(Error::HarnessTemplate {
+            code: "harness_template_missing",
+            message: format!(
+                "create agent definition {name} for role {role} on resource {resource_id}, or set a default harness template"
+            ),
+        }),
+    }
+}
+
+fn read_default_harness_template(
+    db: &Connection,
+    resource_id: &str,
+) -> Result<Option<HarnessTemplateDocument>, Error> {
+    db.query_row(
+        "SELECT template FROM resource_default_harness_templates WHERE resource_id=?1",
+        [resource_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| serde_json::from_str(&value).map_err(Error::from))
+    .transpose()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -435,6 +498,10 @@ impl DomainRepository {
         if live > 0 {
             return Err(Error::Conflict);
         }
+        tx.execute(
+            "DELETE FROM resource_default_harness_templates WHERE resource_id=?1",
+            [id],
+        )?;
         tx.execute("DELETE FROM resources WHERE id=?1", [id])?;
         tx.commit()?;
         Ok(resource.catalog())
@@ -466,6 +533,53 @@ impl DomainRepository {
     /// the embedded model policy; plugin resources use their plugin qualification.
     fn definition_qualifies(resource: &Resource, role: &str) -> bool {
         resource.qualifies(role)
+    }
+
+    /// The operator's default harness template for a resource, if set.
+    pub fn resource_default_harness_template(
+        &self,
+        resource_id: &str,
+    ) -> Result<Option<HarnessTemplateDocument>, Error> {
+        read_resource(&self.db, resource_id)?;
+        read_default_harness_template(&self.db, resource_id)
+    }
+
+    /// Sets (`Some`) or clears (`None`) the resource default harness template.
+    /// Existing engagements keep the template they froze at provisioning.
+    pub fn set_resource_default_harness_template(
+        &mut self,
+        resource_id: &str,
+        template: Option<&HarnessTemplateDocument>,
+        now: u64,
+    ) -> Result<(), Error> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let resource = read_resource(&tx, resource_id)?;
+        match template {
+            Some(template) => {
+                let template = validate_harness_template(&resource, template)?;
+                tx.execute(
+                    "INSERT INTO resource_default_harness_templates(resource_id,template,template_sha256,updated_at) \
+                     VALUES(?1,?2,?3,?4) ON CONFLICT(resource_id) DO UPDATE SET \
+                     template=excluded.template,template_sha256=excluded.template_sha256,updated_at=excluded.updated_at",
+                    params![
+                        resource_id,
+                        serde_json::to_string(&template)?,
+                        template.template_sha256,
+                        i64::try_from(now).unwrap_or(i64::MAX),
+                    ],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM resource_default_harness_templates WHERE resource_id=?1",
+                    [resource_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// TS resourceAgentDefinitions.edit, ported with its exact rules and

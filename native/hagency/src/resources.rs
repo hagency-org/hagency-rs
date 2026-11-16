@@ -39,6 +39,12 @@ pub(crate) fn router() -> Router {
                 .post(edit_definition),
         )
         .push(
+            Router::with_path("framework-presets/{id}/default-harness-template")
+                .get(default_harness_template)
+                .put(set_default_harness_template)
+                .delete(clear_default_harness_template),
+        )
+        .push(
             Router::with_path("framework-presets/{id}/agents/{definitionId}")
                 .put(edit_definition)
                 .delete(edit_definition),
@@ -522,6 +528,118 @@ fn plugin_failure(res: &mut Response, error: hagency_plugin::PluginError) {
         _ => (StatusCode::SERVICE_UNAVAILABLE, "plugin_unavailable"),
     };
     refusal(res, status, code);
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DefaultHarnessTemplateWrite {
+    #[serde(default)]
+    harness_template_values: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
+    harness_id: Option<String>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// ADR-198: the resource's default harness template, which a request with no
+/// matching agent definition freezes. Absent is `null`, never an empty value.
+#[handler]
+async fn default_harness_template(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let Some(id) = req.param::<String>("id") else {
+        refusal(res, StatusCode::BAD_REQUEST, "resource_required");
+        return;
+    };
+    match store.resource_default_harness_template(id).await {
+        Ok(template) => res.render(Json(serde_json::json!({"defaultHarnessTemplate":template}))),
+        Err(error) => failure(res, error),
+    }
+}
+
+/// Sets the default through the same plugin resolution an agent definition
+/// uses, so a template with a missing required setting is refused here, not at
+/// dispatch. Existing engagements keep the template they froze.
+#[handler]
+async fn set_default_harness_template(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let Some(id) = req.param::<String>("id") else {
+        refusal(res, StatusCode::BAD_REQUEST, "resource_required");
+        return;
+    };
+    let Some(write) = body::<DefaultHarnessTemplateWrite>(req, depot, res).await else {
+        return;
+    };
+    let resource = match store.resource_configuration(id.to_owned()).await {
+        Ok(resource) => resource,
+        Err(error) => {
+            failure(res, error);
+            return;
+        }
+    };
+    let Some(identity) = resource.harness_plugin.as_ref() else {
+        refusal(res, StatusCode::CONFLICT, "plugin_configuration_required");
+        return;
+    };
+    let Some(manager) = depot.get_typed::<App>().ok().and_then(|app| app.plugins()) else {
+        refusal(res, StatusCode::SERVICE_UNAVAILABLE, "plugin_unavailable");
+        return;
+    };
+    let harness = hagency_plugin::HarnessPluginRef {
+        plugin_id: identity.plugin_id.clone(),
+        harness_id: write
+            .harness_id
+            .clone()
+            .unwrap_or_else(|| identity.harness_id.clone()),
+        package_sha256: identity.package_sha256.clone(),
+        settings_sha256: identity.settings_sha256.clone(),
+    };
+    let values = write.harness_template_values.unwrap_or_default();
+    let template = match manager.resolve_harness_template(&harness, &values) {
+        Ok(template) => template,
+        Err(error) => {
+            plugin_failure(res, error);
+            return;
+        }
+    };
+    match store
+        .set_resource_default_harness_template(id, Some(template.clone()), now_ms())
+        .await
+    {
+        Ok(()) => res.render(Json(
+            serde_json::json!({"ok":true,"defaultHarnessTemplate":template}),
+        )),
+        Err(error) => failure(res, error),
+    }
+}
+
+#[handler]
+async fn clear_default_harness_template(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let Some(store) = domain(depot, res) else {
+        return;
+    };
+    let Some(id) = req.param::<String>("id") else {
+        refusal(res, StatusCode::BAD_REQUEST, "resource_required");
+        return;
+    };
+    match store
+        .set_resource_default_harness_template(id, None, now_ms())
+        .await
+    {
+        Ok(()) => res.render(Json(
+            serde_json::json!({"ok":true,"defaultHarnessTemplate":null}),
+        )),
+        Err(error) => failure(res, error),
+    }
 }
 
 /// TS mutateResourceAgentDefinition (backend-v2.js:15822-15833): POST creates,

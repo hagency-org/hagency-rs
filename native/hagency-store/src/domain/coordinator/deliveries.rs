@@ -101,6 +101,8 @@ impl DomainRepository {
             "project_unavailable",
             "resource_unavailable",
             "request_conflict",
+            "harness_template_missing",
+            "harness_template_invalid",
         ]
         .contains(&reason)
         {
@@ -174,6 +176,7 @@ pub fn terminal_reason(error: &Error) -> Option<&'static str> {
         Error::Conflict => Some("request_conflict"),
         Error::NotFound | Error::State => Some("project_unavailable"),
         Error::Unqualified => Some("resource_unavailable"),
+        Error::HarnessTemplate { code, .. } => Some(code),
         Error::Invalid(_) => Some("invalid_request"),
         _ => None,
     }
