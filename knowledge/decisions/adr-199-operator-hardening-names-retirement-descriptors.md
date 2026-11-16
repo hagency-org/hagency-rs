@@ -27,6 +27,27 @@ released), Hagency's refusal or notice must name the cause (`name_held_by_palpo`
 and the fix instead of a generic conflict. Where the cause lies is investigated
 in step ops-name-retire; this ADR fixes only the policy.
 
+#### Investigation result (step ops-name-retire)
+
+Hagency does not lock a revoked name. The collision check in
+`DomainRepository::admit` and the partial unique index `live_project_names`
+(`domain.sql`) cover only `pending`, `reserved` and `active`; `revoke` moves the
+engagement to `revoked` in the same transaction that schedules the retire effect,
+so the name is free immediately, whatever the retire effect state (`uncertain`
+while Palpo's `retire-agent` returns 503 included). The engagement id derives
+from `(fleet_id, request_id)` and the Matrix identity from the engagement id
+(`@{fleet}_{engagement}:{server}`), so a reused name never reuses an identity.
+The Palpo coordinator and Rinx request path are not in this repository (the
+checked-out Palpo crates hold no agent request handling), so a Palpo-side name
+check cannot be inspected here. Hagency therefore makes its own refusal exact:
+a live holder is refused with reason `agent_name_in_use` (was the generic
+`request_conflict`), and the message names the holding engagement, its state and
+the fix (retire it or choose another name). A refusal that shows
+`request_conflict` or no Hagency reason for a name whose engagements are all
+revoked comes from outside Hagency (Palpo or Rinx) and must be raised there.
+The `name_held_by_palpo` reason named earlier is not emitted, because Hagency
+cannot observe a Palpo hold. See `docs/guides/agent-retirement-and-names.md`.
+
 ### Retirement retry backoff and visible state
 
 `bootstrap/palpo_retirement.rs` retries every pending retire effect every 5
@@ -38,6 +59,11 @@ logged on the first failure and when the failure kind changes; repeats log at
 DEBUG. The console shows per-agent cleanup state (`pending`, attempt count, last
 error kind, next attempt time). An effect is never marked applied without
 Palpo's proof; a 503 or any non-proof answer leaves it pending.
+Implemented in `cleanup_state.rs` (injected clock) and
+`bootstrap/palpo_retirement.rs`; the console route is
+`GET /console/api/engagements/cleanup-state`, shown on revoked rows of the
+engagements page. The state is in memory, so it restarts at attempt 0 with the
+process; the effect itself stays durable in the store.
 
 ### Descriptor budget
 
@@ -76,7 +102,7 @@ the `LimitNOFILE` drop-in installed by hand on the server.
 ## Tests later steps must create
 
 - `revoked_name_can_be_requested_again_with_new_identity`
-- `name_refusal_names_palpo_hold_when_palpo_holds_it`
+- `name_refusal_names_palpo_hold_when_palpo_holds_it` (implemented as `name_refusal_names_the_live_holder_and_the_fix`; no Palpo hold is observable)
 - `retirement_backoff_doubles_to_cap_and_resets_on_success`
 - `retirement_503_is_never_marked_applied`
 - `retirement_warn_logged_once_per_failure_kind`
