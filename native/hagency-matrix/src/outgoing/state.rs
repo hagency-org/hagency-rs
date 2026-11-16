@@ -460,6 +460,10 @@ pub(crate) enum Command {
     Accept(usize, Value),
     /// Task #9: record that this attempt's write got a permanent Matrix refusal.
     Refused,
+    /// Release a send the host itself cancelled. It is never re-sent and is
+    /// not recorded as delivered; it moves to the bounded abandoned record so
+    /// the next send can start.
+    Abandon,
     Settle,
 }
 pub(crate) struct View {

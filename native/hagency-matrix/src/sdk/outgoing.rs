@@ -6,6 +6,9 @@ use crate::{
 use ruma::{OwnedUserId, api::client::to_device::send_event_to_device};
 use serde_json::{Value, json};
 
+/// How many released (host-cancelled) sends the journal keeps as evidence.
+const MAX_ABANDONED: usize = 16;
+
 impl Sdk {
     pub(super) async fn outgoing(&mut self, command: Command) -> Result<View, Error> {
         if self.approval {
@@ -231,6 +234,35 @@ impl Sdk {
                 let attempt = self.journal.outgoing.as_mut().ok_or(Error::Storage)?;
                 attempt.permanent_failure = true;
                 self.persist_outgoing().await?;
+            }
+            Command::Abandon => {
+                // Only a plaintext room write with no crypto leg in flight:
+                // an encrypted attempt may hold an olm key share whose send
+                // outcome is uncertain, which stays parked for a human.
+                let attempt = self.journal.outgoing.as_ref().ok_or(Error::Storage)?;
+                if attempt.route.encrypted
+                    || attempt.kind == state::Kind::File
+                    || attempt.writes.iter().any(|write| !write.room)
+                    || !matches!(
+                        attempt.phase,
+                        Phase::BeforeBegin | Phase::Ready | Phase::WritePossible
+                    )
+                {
+                    return Err(Error::OutcomeUnknown);
+                }
+                let original = self.journal.outgoing.take();
+                let abandoned = original.clone().ok_or(Error::Storage)?;
+                let dropped = (self.journal.outgoing_abandoned.len() >= MAX_ABANDONED)
+                    .then(|| self.journal.outgoing_abandoned.remove(0));
+                self.journal.outgoing_abandoned.push(abandoned);
+                if let Err(error) = self.persist_outgoing().await {
+                    self.journal.outgoing_abandoned.pop();
+                    if let Some(dropped) = dropped {
+                        self.journal.outgoing_abandoned.insert(0, dropped);
+                    }
+                    self.journal.outgoing = original;
+                    return Err(error);
+                }
             }
         }
         Ok(View {

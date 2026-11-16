@@ -1274,10 +1274,24 @@ async fn native_matrix_outgoing_scope_retirement_after_possible_persist_prevents
         .await;
         assert!(r.is_err());
         fake.quiesced(fake.requests(), &common::limits()).await;
-        assert_eq!(
-            c.resume_outgoing_custody(&cancel).await.unwrap().state,
-            OutgoingState::Uncertain
-        );
+        let resumed = c.resume_outgoing_custody(&cancel).await.unwrap();
+        if retire {
+            // A retired transport is not a host cancellation of this reply:
+            // the send stays parked for a human.
+            assert_eq!(resumed.state, OutgoingState::Uncertain);
+        } else {
+            // The host cancelled the reply itself: the journal slot is
+            // released without any HTTP write and without recording delivery,
+            // so the agent's next send is not blocked behind it forever.
+            assert_eq!(resumed.state, OutgoingState::Idle);
+            assert_ne!(state(&f, &claim.id), "delivered");
+            assert_eq!(
+                c.resume_outgoing_custody(&cancel).await.unwrap().state,
+                OutgoingState::Idle,
+                "the released send is never resumed again"
+            );
+        }
+        fake.quiesced(fake.requests(), &common::limits()).await;
         c.close().await.unwrap();
         f.store.shutdown().await.unwrap();
         fake.close().await;
