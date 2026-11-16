@@ -251,7 +251,12 @@ fn lost_event(
 }
 /// `writer` is the writer call settling the lease (`claim`, `reconcile`,
 /// `restart`), kept only in the `lost` event of a started or parked attempt.
-fn lose(tx: &Transaction<'_>, id: &str, now: u64, writer: &'static str) -> Result<(), Error> {
+pub(super) fn lose(
+    tx: &Transaction<'_>,
+    id: &str,
+    now: u64,
+    writer: &'static str,
+) -> Result<(), Error> {
     let d = dispatch(tx, id)?;
     if !["leased", "started", "parked"].contains(&d.state.as_str()) {
         return Ok(());

@@ -386,6 +386,25 @@ pub enum OwnedFailure {
     },
     PeerUnavailable,
 }
+/// What the thread is told when a never-started dispatch is dropped: that the
+/// message did not run, why in a fixed word, and that it can be sent again.
+fn dropped_notice(failure: &OwnedFailure) -> String {
+    let why = match failure {
+        OwnedFailure::Admission | OwnedFailure::AdmissionRefused { .. } => {
+            "the host refused to admit it"
+        }
+        OwnedFailure::Cancelled => "the host was stopped",
+        OwnedFailure::StartUnknown => "the host could not confirm that it started",
+        OwnedFailure::SpawnFailed => "its runtime could not be launched",
+        OwnedFailure::LostAuthority => "its authority was lost before it started",
+        OwnedFailure::UnsupportedRunner { .. } => "no runner exists for its framework",
+        OwnedFailure::PeerUnavailable => "the runner's peer was not available",
+        _ => "the host could not start it",
+    };
+    format!(
+        "This message was not started and was dropped: {why}. Nothing ran. Send it again to retry."
+    )
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnedObservation {
     Unstarted,
@@ -822,11 +841,33 @@ impl DomainRepository {
         )?;
         let result = if d.fence != cap.fence {
             OwnedObservation::Historical
+        } else if d.state == "leased" && matches!(failure, OwnedFailure::Cancelled) {
+            // The host was stopped (a restart or shutdown) after the claim and
+            // before anything started. Nothing ran, so the message is not
+            // dropped: the dispatch returns to the queue with its inputs and is
+            // claimed again, exactly as a lease the restart found (ADR-199 P7).
+            execution::lose(&tx, &cap.dispatch_id, now, "cancelled_before_start")?;
+            OwnedObservation::Unstarted
         } else if ["leased", "started", "parked"].contains(&d.state.as_str()) {
             if d.state == "leased" {
                 // Refused before anything started: say why, once, in the
                 // thread. Best effort in its own savepoint, like the notice
                 // below, so recording the failure never fails on it.
+                if !matches!(failure, OwnedFailure::AdmissionRefused { .. }) {
+                    tx.execute_batch("SAVEPOINT dropped_notice")?;
+                    match super::task_intents::waiting_notice(
+                        &tx,
+                        &cap.dispatch_id,
+                        "dispatch_dropped",
+                        &dropped_notice(&failure),
+                        now,
+                    ) {
+                        Ok(()) => tx.execute_batch("RELEASE dropped_notice")?,
+                        Err(_) => {
+                            tx.execute_batch("ROLLBACK TO dropped_notice; RELEASE dropped_notice")?
+                        }
+                    }
+                }
                 if let OwnedFailure::AdmissionRefused { reason } = &failure {
                     tx.execute_batch("SAVEPOINT admission_notice")?;
                     match super::task_intents::waiting_notice(
