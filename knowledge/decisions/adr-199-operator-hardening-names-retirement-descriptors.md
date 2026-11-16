@@ -141,6 +141,84 @@ Decision:
    without proof. Retire stays the last resort when the reason says the state
    cannot be proven.
 
+### Runtime liveness and plugin install, readiness and usage (P7)
+
+Observed live on 2026-11-16 (agent `qore-dev`). Each item was worked around by
+hand on the server; this section records the code decision so none recurs.
+Facts below were re-read in source, not taken from the incident notes.
+
+1. **Install proof (P7a).** `PluginService::apply_install` built the manifest
+   in the checkout (`prepared.root`, the plugin subdirectory) and copied only
+   that subdirectory. A plugin inside a Cargo workspace (herdr-runtime) writes
+   `target/` at the workspace root, outside the copied tree, so the install had
+   no binary and its launcher exited 127. The build runner also ignored the
+   exit status: `run_supervised_command` returned `status: 0` for every exit,
+   so a failed build counted as success. Decision: the build environment sets
+   `CARGO_TARGET_DIR=<package root>/target`; the supervised runner reports the
+   real exit status and `apply_install` fails with `PluginError::BuildFailed`
+   (`plugin_build_failed`) on a non-zero build; build stdout and stderr are
+   recorded in the plugin logs on success and on failure (the failure message
+   carries a bounded stderr tail); and after the build, before the copy, the
+   host proves the package can launch. Every command the manifest declares
+   already has to be a file in the package (`validate_package_root`). In
+   addition each runtime command, runtime `readiness` command and harness
+   command is run once from the package root with stdin closed and a short
+   deadline, as a launcher probe. Exit status 126 or 127, or a failure to
+   spawn, means the launcher did not find what it launches (herdr-runtime's
+   "is not built" exit 127) and fails the install with `plugin_build_failed`;
+   any other exit status proves the binary ran. A failed proof copies,
+   registers and enables nothing, and its output is in the plugin logs.
+2. **Probe input (P7b).** The readiness probe ran before the harness prepared
+   the agent and was given the frozen template values, while the contract and
+   herdr-runtime read `harnessTemplate.target`. Decision: before the probe the
+   host asks the harness to prepare and release the agent (`agent/prepare`,
+   then `agent/release` with outcome `readiness_probe`), under the same
+   allocation and dispatch ids, and passes the probe the same
+   `harnessContext {target, ownership}` the turn will get. The probe input is
+   `{"dispatchId", "harnessContext": {"target","ownership"} | null,
+   "harnessTemplate": <frozen values> | null}`. The harness is the only
+   authority on the target. Read-only for `existing` ownership; a harness that
+   creates state on prepare must undo it on release, which is already its
+   contract. A harness that cannot prepare or release defers the dispatch as
+   not ready with the harness error as the reason (never started). No
+   key aliasing in the host.
+3. **Worker liveness (P7c).** After `Failure::RuntimeNotReady` (dispatch
+   requeued with `not_before`), `run_continuous` called
+   `WorkspaceAccess::release` for a capability that never registered a
+   workspace; release returned `Failure::Registration`, the `?` ended the
+   worker without a log line, and nothing restarted it. Decision: a failed
+   attempt that never reached workspace registration releases nothing and the
+   worker continues; every worker exit logs the engagement id and error; each
+   wait state (fenced agent, deferred dispatch waiting for its `not_before`)
+   logs once per state change with the engagement id. No fence, custody or
+   cleanup check is relaxed: an attempt that registered a workspace still
+   must release it or the worker stops.
+4. **Restart requeue (P7d).** A dispatch that is `leased` and never started was
+   moved to `superseded` by `observe_owned_failure` for every failure,
+   including `Cancelled`, which is what a restart or shutdown produces. Its
+   inputs were released unprocessed and nothing answered the owner. Decision:
+   a never-started dispatch cancelled by the host (restart, shutdown) is
+   re-queued (`leased` to `queued`, attempt outcome `unstarted_requeued`) and
+   claimed again. Any other never-started refusal still supersedes, and now
+   also posts one `dispatch_dropped` notice in the thread naming the reason
+   (`AdmissionRefused` keeps its own notice). A started or parked dispatch is
+   never re-queued or replayed: never-silent-redo is unchanged.
+5. **Usage recording (P7e).** `run_plugin_turn` never fed the usage source:
+   plugin dispatches were bound unmetered and closed, and `turn/result.usage`
+   was dropped. The store also mapped only `claude`, `codex` and `octos` to a
+   metering framework. Decision: `hagency_metering::Framework::Plugin` and
+   `UsageObservation::plugin_runtime` carry the reported counts; the store maps
+   every other framework identifier to `Plugin`; the host records one
+   observation per turn from `turn/result.usage` (call id `plugin_turn_result`)
+   through the existing `record_usage_observation` path, always marked
+   incomplete, never inventing zero. A missing `usage` records nothing. A
+   failed write stays pending on the report for `retry_usage`, as for the
+   native runners.
+6. **Invariants kept.** Custody, fences, never-silent-redo, approvals and
+   capability secrecy are unchanged. No started dispatch is replayed. The probe
+   stays read-only and bounded. Usage is host-recorded evidence, not provider
+   authenticated.
+
 ## Consequences
 
 Good, because retirement stops filling logs, the operator sees why cleanup is
@@ -180,3 +258,18 @@ the `LimitNOFILE` drop-in installed by hand on the server.
 - `a_retrying_provision_tells_the_owner_it_needs_no_action`
 - `only_a_transient_park_is_rechecked_and_only_after_the_cap`
 - `native_provisioning_recovers_completed_keys_before_owner_invite` (no second enrollment, ledger untouched)
+- `build_environment_points_cargo_at_the_package_target_dir`
+- `supervised_command_reports_the_real_exit_status`
+- `failed_build_fails_install_with_a_captured_log`
+- `install_proof_fails_a_launcher_that_exits_127`
+- `install_proof_accepts_a_launcher_that_runs`
+- `native_plugin_readiness_probe_receives_the_prepared_harness_target`
+- `native_plugin_readiness_deferral_when_the_harness_cannot_prepare`
+- `a_failed_attempt_that_never_registered_a_workspace_does_not_end_the_worker`
+- `a_registered_workspace_that_cannot_be_released_still_stops_the_worker`
+- `cancelled_never_started_dispatch_is_requeued_not_superseded`
+- `refused_never_started_dispatch_tells_the_thread_it_was_dropped`
+- `started_dispatch_is_never_requeued_by_cancellation`
+- `plugin_turn_usage_is_recorded_against_the_dispatch_source`
+- `plugin_turn_without_usage_records_nothing`
+- `plugin_usage_observation_is_incomplete_and_maps_counts`
