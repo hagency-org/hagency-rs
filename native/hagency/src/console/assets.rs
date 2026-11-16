@@ -27,13 +27,15 @@ struct Entry {
 pub(super) struct Asset {
     pub(super) bytes: Bytes,
     pub(super) mime: String,
-    /// The validated file handle for a console folder; none for the
-    /// embedded console, whose bytes are part of the binary.
-    _proof: Option<Snapshot>,
 }
 pub(super) struct Assets {
     values: BTreeMap<String, Asset>,
-    _manifest: Option<Snapshot>,
+    /// One handle on the validated console folder (none for the embedded
+    /// console). Every asset is verified against the manifest digest at load
+    /// and served from owned bytes, so no per-file handle is retained: a later
+    /// change on disk cannot alter what is served, and the descriptor count
+    /// does not grow with the number of assets (ADR-199 P5).
+    _root: Option<Dir>,
 }
 
 mod embedded {
@@ -189,7 +191,6 @@ impl Assets {
             let asset = Asset {
                 bytes: Bytes::from_static(bytes),
                 mime: entry.mime,
-                _proof: None,
             };
             if values.insert(key(&entry.path), asset).is_some() {
                 return Err(Error::Assets);
@@ -200,13 +201,12 @@ impl Assets {
         }
         Ok(Self {
             values,
-            _manifest: None,
+            _root: None,
         })
     }
     pub(super) fn load(path: &Path) -> Result<Self, Error> {
         let dir = root(path)?;
-        let manifest_file = snapshot(&dir, "manifest.json", 128 * 1024)?;
-        let input = manifest(manifest_file.bytes())?;
+        let input = manifest(snapshot(&dir, "manifest.json", 128 * 1024)?.bytes())?;
         let mut total = 0usize;
         let mut values = BTreeMap::new();
         for entry in input.assets {
@@ -227,8 +227,8 @@ impl Assets {
             let asset = Asset {
                 bytes: Bytes::copy_from_slice(proof.bytes()),
                 mime: entry.mime,
-                _proof: Some(proof),
             };
+            drop(proof);
             if values.insert(key, asset).is_some() {
                 return Err(Error::Assets);
             }
@@ -238,7 +238,7 @@ impl Assets {
         }
         Ok(Self {
             values,
-            _manifest: Some(manifest_file),
+            _root: Some(dir),
         })
     }
     pub(super) fn get(&self, path: &str) -> Option<&Asset> {
@@ -260,5 +260,96 @@ impl Assets {
             return None;
         };
         self.values.get(&with_slash)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    fn open_fds() -> usize {
+        fs::read_dir("/proc/self/fd").unwrap().count()
+    }
+    fn private_dir(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fn write(root: &Path, path: &str, bytes: &[u8]) {
+        let file = root.join(path);
+        private_dir(file.parent().unwrap());
+        fs::write(&file, bytes).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn console_assets_hold_no_open_handles_after_load() {
+        const FILES: usize = 150;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("console");
+        private_dir(&root);
+        let mut entries = Vec::new();
+        let mut add = |path: String, bytes: Vec<u8>, mime: &str| {
+            write(&root, &path, &bytes);
+            let digest: String = Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            entries.push(serde_json::json!({
+                "path": path, "size": bytes.len(), "sha256": digest, "mime": mime
+            }));
+        };
+        add(
+            "usage/index.html".into(),
+            b"<html></html>".to_vec(),
+            "text/html; charset=utf-8",
+        );
+        for n in 0..FILES {
+            add(
+                format!("_next/static/chunk-{n}.js"),
+                format!("console.log({n});").into_bytes(),
+                "text/javascript; charset=utf-8",
+            );
+        }
+        write(
+            &root,
+            "manifest.json",
+            serde_json::json!({"version": 1, "assets": entries})
+                .to_string()
+                .as_bytes(),
+        );
+        let before = open_fds();
+        let assets = Assets::load(&root).unwrap();
+        let after = open_fds();
+        assert!(
+            after <= before + 2,
+            "load of {} assets kept descriptors: {before} -> {after}",
+            FILES + 1
+        );
+        assert!(assets.get("/console/usage").is_some());
+        assert_eq!(
+            &assets.get("/console/_next/static/chunk-7.js").unwrap().bytes[..],
+            b"console.log(7);"
+        );
+    }
+
+    #[test]
+    fn console_assets_still_refuse_a_digest_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("console");
+        private_dir(&root);
+        write(&root, "usage/index.html", b"<html></html>");
+        write(
+            &root,
+            "manifest.json",
+            serde_json::json!({"version": 1, "assets": [{
+                "path": "usage/index.html", "size": 13,
+                "sha256": "0".repeat(64), "mime": "text/html; charset=utf-8"
+            }]})
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(Assets::load(&root).is_err());
     }
 }
