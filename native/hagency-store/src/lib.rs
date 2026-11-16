@@ -16,6 +16,10 @@ pub mod private;
 pub mod task_context;
 pub use domain::PrivateApprovalCard;
 pub use domain::StaleMatrixSessionReceipt;
+pub use domain::engagement_rebind::{
+    EngagementUpgradeStatus, RebindRefusal, RebindResult, RolloutBlocker, RolloutPending,
+    RolloutStatus, RolloutStep, RuntimeRebindAudit,
+};
 pub use domain::engagement_runtime_upgrade::{EngagementRuntimeUpgrade, UpgradeState};
 pub use domain::resource_publication::{
     ResourcePublicationAccess, ResourcePublicationCommand, ResourcePublicationResult,

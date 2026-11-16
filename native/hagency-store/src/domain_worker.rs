@@ -3506,6 +3506,109 @@ impl DomainStore {
         })
         .await
     }
+    /// ADR-197: guarded rebind of one engagement to its marked runtime.
+    pub async fn rebind_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RebindResult, Error> {
+        self.call(1, move |db| {
+            db.rebind_engagement_runtime(&engagement_id, &actor, now)
+        })
+        .await
+    }
+    /// ADR-197: one-step rollback to the previous runtime.
+    pub async fn rollback_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RebindResult, Error> {
+        self.call(1, move |db| {
+            db.rollback_engagement_runtime(&engagement_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn pin_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RuntimeRebindAudit, Error> {
+        self.call(1, move |db| {
+            db.pin_engagement_runtime(&engagement_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn unpin_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RuntimeRebindAudit, Error> {
+        self.call(1, move |db| {
+            db.unpin_engagement_runtime(&engagement_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn engagement_upgrade_status(
+        &self,
+        engagement_id: String,
+    ) -> Result<crate::EngagementUpgradeStatus, Error> {
+        self.call(1, move |db| db.engagement_upgrade_status(&engagement_id))
+            .await
+    }
+    pub async fn start_resource_rollout(
+        &self,
+        resource_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RolloutStatus, Error> {
+        self.call(1, move |db| {
+            db.start_resource_rollout(&resource_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn rollout_step(
+        &self,
+        resource_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RolloutStep, Error> {
+        self.call(1, move |db| db.rollout_step(&resource_id, &actor, now))
+            .await
+    }
+    pub async fn record_canary_result(
+        &self,
+        resource_id: String,
+        passed: bool,
+        actor: String,
+        detail: Option<String>,
+        now: u64,
+    ) -> Result<crate::RolloutStatus, Error> {
+        self.call(1, move |db| {
+            db.record_canary_result(&resource_id, passed, &actor, detail.as_deref(), now)
+        })
+        .await
+    }
+    pub async fn resource_rollout_status(
+        &self,
+        resource_id: String,
+    ) -> Result<crate::RolloutStatus, Error> {
+        self.call(1, move |db| db.resource_rollout_status(&resource_id))
+            .await
+    }
+    pub async fn engagement_runtime_rebinds(
+        &self,
+        engagement_id: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<crate::RuntimeRebindAudit>, Error> {
+        self.call(1, move |db| {
+            db.engagement_runtime_rebinds(engagement_id.as_deref(), limit)
+        })
+        .await
+    }
     /// ADR-197: runtime packages frozen by live engagements.
     pub async fn engagement_runtime_references(&self) -> Result<Vec<(String, String, u32)>, Error> {
         self.call(1, move |db| db.engagement_runtime_references())
