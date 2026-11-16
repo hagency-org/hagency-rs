@@ -120,6 +120,32 @@ impl UsageObservation {
             octos_runtime_evidence: Some(evidence),
         })
     }
+    /// Pure numeric conversion (ADR-199 P7) of what a plugin runtime reported
+    /// for one turn. A count above the safe bound is unknown, never clamped,
+    /// and the observation is always incomplete: the plugin sums its own
+    /// transcript and the host cannot prove nothing was missed.
+    pub fn plugin_runtime(counts: TokenCounts) -> Result<Self, MeteringError> {
+        let bounded = |value: Option<u64>| value.filter(|n| *n <= crate::MAX_TOKEN_COUNT);
+        let totals = TokenCounts {
+            input: bounded(counts.input),
+            output: bounded(counts.output),
+            cache_write: bounded(counts.cache_write),
+            cache_read: bounded(counts.cache_read),
+        };
+        let encoded = serde_json::to_vec(&("hagency.runtime_usage.plugin", &totals))
+            .map_err(|_| MeteringError::InvalidRecord)?;
+        totals.display_volume()?;
+        Ok(Self {
+            framework: Framework::Plugin,
+            snapshot_digest: format!("{:x}", Sha256::digest(encoded)),
+            totals: Some(totals),
+            diagnostics: None,
+            failure: None,
+            runtime_evidence: None,
+            claude_runtime_evidence: None,
+            octos_runtime_evidence: None,
+        })
+    }
     pub fn octos_runtime_evidence(&self) -> Option<&crate::octos_usage::RuntimeEvidence> {
         self.octos_runtime_evidence.as_ref()
     }
@@ -139,7 +165,8 @@ impl UsageObservation {
         self.failure
     }
     pub fn incomplete(&self) -> bool {
-        if self.runtime_evidence.is_some()
+        if self.framework == Framework::Plugin
+            || self.runtime_evidence.is_some()
             || self.claude_runtime_evidence.is_some()
             || self.octos_runtime_evidence.is_some()
         {

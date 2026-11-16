@@ -2611,6 +2611,17 @@ async fn run_plugin_turn(
         }
         Err(_) => report.protocol = Protocol::Unknown,
     }
+    // The usage the plugin reported for this turn, recorded against the
+    // dispatch's usage source (ADR-199 P7). A write that is not confirmed
+    // stays pending on the report for `retry_usage`; it never changes the
+    // turn's own outcome.
+    if let Ok(turn) = &drive
+        && let Some(reported) = &turn.usage
+        && let Some(usage) = report.usage.as_mut()
+        && usage.observe_plugin_turn(reported)
+    {
+        let _ = bounded(usage.record_pending(), cancel, ceiling).await;
+    }
     let (kind, state) = match report.protocol {
         Protocol::Completed => ("dispatch.completed", "completed"),
         Protocol::Failed => ("dispatch.failed", "failed"),
@@ -2969,7 +2980,7 @@ async fn execute(
     let binding = bounded(
         async {
             if matches!(&runner, crate::host::PreparedRunner::Plugin(_)) {
-                UsageRun::bind_unmetered(domain.clone(), cap.clone(), started.clone()).await
+                UsageRun::bind_plugin(domain.clone(), cap.clone(), started.clone()).await
             } else {
                 UsageRun::bind(domain.clone(), cap.clone(), started.clone()).await
             }

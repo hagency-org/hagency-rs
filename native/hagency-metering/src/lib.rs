@@ -27,6 +27,9 @@ pub enum Framework {
     Codex,
     /// Runtime evidence only (ADR-193): Octos has no transcript parser.
     Octos,
+    /// Runtime evidence only (ADR-199 P7): a plugin runtime reports one usage
+    /// object per turn; there is no transcript to parse.
+    Plugin,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -197,7 +200,7 @@ pub fn parse_session(framework: Framework, snapshot: &str) -> Result<SessionRepo
         match framework {
             Framework::Claude => parser.claude(record)?,
             Framework::Codex => parser.codex(record)?,
-            Framework::Octos => return Err(MeteringError::InvalidRecord),
+            Framework::Octos | Framework::Plugin => return Err(MeteringError::InvalidRecord),
         }
     }
     if let Some(totals) = parser.totals {
@@ -217,7 +220,7 @@ pub fn parse_session(framework: Framework, snapshot: &str) -> Result<SessionRepo
                 models,
             }
         }
-        Framework::Octos => return Err(MeteringError::InvalidRecord),
+        Framework::Octos | Framework::Plugin => return Err(MeteringError::InvalidRecord),
         Framework::Codex => SessionDetails::Codex {
             turns: (parser.totals.is_some() && parser.turns_known).then_some(parser.turns),
             reasoning_output: parser.reasoning,

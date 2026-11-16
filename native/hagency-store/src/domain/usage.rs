@@ -20,7 +20,11 @@ fn framework(value: &str) -> Result<Framework, Error> {
         "claude" => Ok(Framework::Claude),
         "codex" => Ok(Framework::Codex),
         "octos" => Ok(Framework::Octos),
-        _ => Err(Error::Schema),
+        // Any other identifier is a plugin runtime's own framework (ADR-199).
+        other => {
+            valid_framework(other)?;
+            Ok(Framework::Plugin)
+        }
     }
 }
 fn valid_framework(value: &str) -> Result<(), Error> {

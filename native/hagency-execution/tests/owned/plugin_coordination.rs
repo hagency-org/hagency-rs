@@ -38,7 +38,7 @@ next() {{
   if read -r cid tool <&3; then
     printf '{{"jsonrpc":"2.0","method":"tool/call","params":{{"dispatchId":"%s","turnId":"%s","callId":"%s","tool":"%s","input":{{"call_id":"%s","note":"x"}}}}}}\n' "$d" "$t" "$cid" "$tool" "$cid"
   else
-    printf '{{"jsonrpc":"2.0","method":"turn/result","params":{{"dispatchId":"%s","turnId":"%s","outcome":"completed","finalText":"plugin done","error":null,"usage":null}}}}\n' "$d" "$t"
+    printf '{{"jsonrpc":"2.0","method":"turn/result","params":{{"dispatchId":"%s","turnId":"%s","outcome":"completed","finalText":"plugin done","error":null,"usage":%s}}}}\n' "$d" "$t" "$(cat '{usage}' 2>/dev/null || echo null)"
   fi
 }}
 while IFS= read -r line; do
@@ -63,6 +63,7 @@ done
 "#,
         plan = root.join("plan").display(),
         log = root.join("log").display(),
+        usage = root.join("usage").display(),
     );
     let path = package.join("bin/runtime");
     fs::write(&path, script).unwrap();
@@ -460,6 +461,70 @@ async fn native_plugin_coordination_is_not_offered_without_approvals() {
     );
     assert!(!f.log().contains("\"calls\""), "{}", f.log());
     assert_eq!(f.count("SELECT COUNT(*) FROM owner_approvals"), 0);
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+/// ADR-199 P7: the usage a plugin reports in `turn/result` is recorded against
+/// the dispatch's usage source, as incomplete evidence, and a missing `usage`
+/// records nothing (unknown is never zero).
+#[tokio::test]
+async fn plugin_turn_usage_is_recorded_against_the_dispatch_source() {
+    let (f, cap) = Plugin::new(&[]);
+    fs::write(
+        f.root.path().join("usage"),
+        r#"{"input":120,"output":30,"reasoning":null,"cacheRead":5,"cacheWrite":null}"#,
+    )
+    .unwrap();
+    let mut report = Operation::start(f.domain.clone(), cap, f.host(None), limits())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(report.protocol, Protocol::Completed, "{:?}", report.failure);
+    assert_eq!(f.count("SELECT COUNT(*) FROM usage_sources"), 1);
+    assert_eq!(f.count("SELECT COUNT(*) FROM usage_receipts"), 1);
+    let (framework, counts, incomplete): (String, String, bool) = f
+        .sql()
+        .query_row(
+            "SELECT framework,latest_counts,latest_incomplete FROM usage_sources",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(framework, "fake");
+    let counts: serde_json::Value = serde_json::from_str(&counts).unwrap();
+    assert_eq!(counts["input"], 120);
+    assert_eq!(counts["output"], 30);
+    assert_eq!(counts["cacheRead"], 5);
+    assert!(counts["cacheWrite"].is_null(), "unreported stays unknown");
+    assert!(
+        incomplete,
+        "a plugin's own transcript sum is never complete"
+    );
+    let status = report.usage_status();
+    assert_eq!((status.observed, status.acknowledged), (1, 1));
+    assert!(!status.pending);
+    assert!(status.incomplete);
+    assert!(report.retry_usage().await.is_ok());
+    assert_eq!(f.count("SELECT COUNT(*) FROM usage_receipts"), 1);
+    drop(report);
+    f.domain.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn plugin_turn_without_usage_records_nothing() {
+    let (f, cap) = Plugin::new(&[]);
+    let report = Operation::start(f.domain.clone(), cap, f.host(None), limits())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(report.protocol, Protocol::Completed, "{:?}", report.failure);
+    assert_eq!(f.count("SELECT COUNT(*) FROM usage_sources"), 1);
+    assert_eq!(f.count("SELECT COUNT(*) FROM usage_receipts"), 0);
+    let status = report.usage_status();
+    assert_eq!((status.observed, status.acknowledged), (0, 0));
     drop(report);
     f.domain.shutdown().await.unwrap();
 }
