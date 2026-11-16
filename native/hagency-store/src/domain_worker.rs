@@ -2136,6 +2136,18 @@ impl DomainStore {
         })
         .await
     }
+    /// Did the host itself cancel this undelivered notice write? Then a
+    /// resume may release its journal slot without re-sending it.
+    pub async fn verified_notice_send_cancelled(
+        &self,
+        id: String,
+        fence: u64,
+    ) -> Result<bool, Error> {
+        self.call(weight(&(&id, fence))?, move |db| {
+            db.verified_notice_send_cancelled(&id, fence)
+        })
+        .await
+    }
     pub async fn cancel_verified_task_notice(
         &self,
         id: String,
@@ -2231,6 +2243,17 @@ impl DomainStore {
     pub async fn command_notice_send_current(&self, id: String, fence: u64) -> Result<bool, Error> {
         self.call(weight(&(&id, fence))?, move |db| {
             db.command_notice_send_current(&id, fence)
+        })
+        .await
+    }
+    /// Did the host itself cancel this undelivered command answer?
+    pub async fn command_notice_send_cancelled(
+        &self,
+        id: String,
+        fence: u64,
+    ) -> Result<bool, Error> {
+        self.call(weight(&(&id, fence))?, move |db| {
+            db.command_notice_send_cancelled(&id, fence)
         })
         .await
     }
@@ -2417,6 +2440,13 @@ impl DomainStore {
     pub async fn final_reply_send_current(&self, id: String, fence: u64) -> Result<bool, Error> {
         self.call(weight(&(&id, fence))?, move |db| {
             db.final_reply_send_current(&id, fence)
+        })
+        .await
+    }
+    /// Did the host itself cancel this undelivered reply write?
+    pub async fn final_reply_send_cancelled(&self, id: String, fence: u64) -> Result<bool, Error> {
+        self.call(weight(&(&id, fence))?, move |db| {
+            db.final_reply_send_cancelled(&id, fence)
         })
         .await
     }
