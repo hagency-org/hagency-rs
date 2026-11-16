@@ -367,6 +367,7 @@ fn owned_failure_label(error: &hagency_execution::Failure) -> &'static str {
     use hagency_execution::Failure::*;
     match error {
         Admission => "admission",
+        AdmissionRefused(reason) => reason.as_str(),
         Cancelled => "cancelled",
         StartUnknown => "start_unknown",
         UsageBinding => "usage_binding",

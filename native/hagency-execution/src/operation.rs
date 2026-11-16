@@ -154,6 +154,9 @@ impl From<&hagency_store::Error> for AuthorityCause {
 pub enum Failure {
     #[error("host dispatch admission refused")]
     Admission,
+    /// Admission refused with a named cause (ADR-198), before anything started.
+    #[error("host dispatch admission refused: {}", .0.as_str())]
+    AdmissionRefused(hagency_store::AdmissionReason),
     #[error("host operation cancelled")]
     Cancelled,
     #[error("durable start response unknown; no child launched")]
@@ -215,6 +218,7 @@ impl Failure {
     fn observation(&self) -> OwnedFailure {
         match self {
             Self::Admission | Self::UsageBinding => OwnedFailure::Admission,
+            Self::AdmissionRefused(reason) => OwnedFailure::AdmissionRefused { reason: *reason },
             Self::Cancelled => OwnedFailure::Cancelled,
             Self::StartUnknown => OwnedFailure::StartUnknown,
             Self::SpawnFailed => OwnedFailure::SpawnFailed,

@@ -7,7 +7,10 @@ use common::*;
 use hagency_core::{
     commands::CommandNoticeRequest, ingress::*, messages::*, replies::*, task_intents::*, tasks::*,
 };
-use hagency_store::{DomainRepository, EffectOutcome, Error, OutcomeAction, OutcomeResolution};
+use hagency_store::{
+    AdmissionReason, DomainRepository, EffectOutcome, Error, OutcomeAction, OutcomeResolution,
+    OwnedFailure,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -1361,6 +1364,58 @@ fn native_runner_launch_retry_notice() {
         body,
         "Runner could not start, but no work was executed and no input was lost. The dispatch remains queued and will retry automatically."
     );
+}
+
+/// ADR-198: a dispatch the host refuses at admission says why in the thread,
+/// by a fixed named reason, and never shows setting values or secrets.
+#[test]
+fn room_notice_names_admission_reason_without_secrets() {
+    let mut f = Fixture::new(false);
+    let (_, seq, task) = setup_task(&mut f);
+    f.activate(1013);
+    f.db.enqueue_inbox_dispatch(&dispatch("first", &task), &[seq])
+        .unwrap();
+    let cap =
+        f.db.claim_dispatch("fixture_runner", 1015, 60000, 120000, 8)
+            .unwrap()
+            .unwrap();
+    f.db.observe_owned_failure(
+        &cap,
+        OwnedFailure::AdmissionRefused {
+            reason: AdmissionReason::HarnessTemplateMissing,
+        },
+        1016,
+    )
+    .unwrap();
+    let body: String = f
+        .sql()
+        .query_row(
+            "SELECT json_extract(config,'$.body') FROM task_notices WHERE json_extract(config,'$.kind')='admission_refused'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(body.contains("harness_template_missing"));
+    assert!(body.contains("nothing was sent"));
+    assert!(!body.to_lowercase().contains("interrupted"));
+    // Said once: a second observation of the same dispatch adds no notice.
+    f.db.observe_owned_failure(
+        &cap,
+        OwnedFailure::AdmissionRefused {
+            reason: AdmissionReason::HarnessTemplateMissing,
+        },
+        1017,
+    )
+    .unwrap();
+    let count: u64 = f
+        .sql()
+        .query_row(
+            "SELECT COUNT(*) FROM task_notices WHERE json_extract(config,'$.kind')='admission_refused'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 /// Task #61 row 2. The retained product tells the thread why a queued dispatch

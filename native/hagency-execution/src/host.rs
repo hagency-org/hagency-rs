@@ -703,17 +703,26 @@ impl Host {
         selected: Option<&hagency_plugin::HarnessTemplateDocument>,
     ) -> Result<hagency_plugin::HarnessTemplateDocument, super::Failure> {
         if let Some(template) = selected {
+            let mismatch = || {
+                super::Failure::AdmissionRefused(
+                    hagency_store::AdmissionReason::HarnessTemplateMismatch,
+                )
+            };
             let validated = manager
                 .validate_harness_template(template)
-                .map_err(|_| super::Failure::Admission)?;
+                .map_err(|_| mismatch())?;
             if validated != harness.clone() {
-                return Err(super::Failure::Admission);
+                return Err(mismatch());
             }
             return Ok(template.clone());
         }
         manager
             .resolve_harness_template(harness, &std::collections::BTreeMap::new())
-            .map_err(|_| super::Failure::Admission)
+            .map_err(|_| {
+                super::Failure::AdmissionRefused(
+                    hagency_store::AdmissionReason::HarnessTemplateMissing,
+                )
+            })
     }
 
     /// The scoped task helper a dispatch's host tools run on (ADR-193
@@ -832,16 +841,17 @@ impl Host {
                 };
                 let template =
                     Self::effective_harness_template(manager, &harness, scope.harness_template())?;
-                let harness_launch = manager
-                    .harness_launch(&harness)
-                    .map_err(|_| super::Failure::Admission)?;
+                let not_launchable = |_| {
+                    super::Failure::AdmissionRefused(
+                        hagency_store::AdmissionReason::PluginPackageNotLaunchable,
+                    )
+                };
+                let harness_launch = manager.harness_launch(&harness).map_err(not_launchable)?;
                 let harness_environment = manager
                     .harness_environment(&harness_launch, path.clone())
-                    .map_err(|_| super::Failure::Admission)?
+                    .map_err(not_launchable)?
                     .build();
-                let lease = manager
-                    .claim_harness(&harness)
-                    .map_err(|_| super::Failure::Admission)?;
+                let lease = manager.claim_harness(&harness).map_err(not_launchable)?;
                 (
                     Some(template),
                     Some(harness_launch),
@@ -1531,6 +1541,77 @@ mod tests {
                 Err(super::super::Failure::Admission)
             ));
         }
+    }
+    #[test]
+    fn host_admission_failure_carries_named_reason() {
+        let package = tempfile::tempdir().unwrap();
+        let bin = package.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            package.path().join("hagency-plugin.toml"),
+            r#"
+schema = "hagency.plugin/v1"
+id = "example.plugin"
+name = "Example"
+version = "1.0.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[harnesses]]
+id = "default"
+command = ["bin/harness"]
+protocol = "hagency.harness/v1"
+
+[[harnesses.configuration]]
+id = "target"
+label = "Target"
+description = "Target"
+kind = "text"
+required = true
+"#,
+        )
+        .unwrap();
+        std::fs::write(bin.join("harness"), b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            bin.join("harness"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let manager = hagency_plugin::PluginService::open(state.path()).unwrap();
+        let record = manager.link(package.path()).unwrap();
+        manager.enable(&record.id).unwrap();
+        let harness = hagency_plugin::HarnessPluginRef {
+            plugin_id: record.id,
+            harness_id: "default".into(),
+            package_sha256: record.package_sha256,
+            settings_sha256: record.settings_sha256,
+        };
+        // No frozen template and a required setting with no default: named.
+        assert_eq!(
+            Host::effective_harness_template(&manager, &harness, None).unwrap_err(),
+            super::super::Failure::AdmissionRefused(
+                hagency_store::AdmissionReason::HarnessTemplateMissing
+            )
+        );
+        // A frozen template that does not match the plugin: named differently.
+        let mut foreign = hagency_plugin::HarnessTemplateDocument {
+            schema: hagency_plugin::HARNESS_TEMPLATE_SCHEMA.into(),
+            plugin_id: harness.plugin_id.clone(),
+            harness_id: "default".into(),
+            package_sha256: "f".repeat(64),
+            settings_sha256: harness.settings_sha256.clone(),
+            template_sha256: String::new(),
+            values: Default::default(),
+        };
+        foreign.template_sha256 = hagency_plugin::harness_template_digest(&foreign).unwrap();
+        assert_eq!(
+            Host::effective_harness_template(&manager, &harness, Some(&foreign)).unwrap_err(),
+            super::super::Failure::AdmissionRefused(
+                hagency_store::AdmissionReason::HarnessTemplateMismatch
+            )
+        );
     }
     #[test]
     fn native_plugin_default_template_is_resolved_without_agent_override() {

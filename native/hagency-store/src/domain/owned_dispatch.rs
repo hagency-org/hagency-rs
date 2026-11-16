@@ -319,10 +319,56 @@ impl OwnedDispatchScope {
     }
 }
 
+/// Why the host refused a dispatch before anything started (ADR-198). A
+/// fixed vocabulary: it names the cause for the room notice and the console,
+/// and never carries settings values, paths or secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionReason {
+    /// The engagement froze no harness template and none resolves from defaults.
+    HarnessTemplateMissing,
+    /// The frozen harness template does not match the resource's harness plugin.
+    HarnessTemplateMismatch,
+    /// A plugin package the resource binds cannot be launched now.
+    PluginPackageNotLaunchable,
+}
+impl AdmissionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HarnessTemplateMissing => "harness_template_missing",
+            Self::HarnessTemplateMismatch => "harness_template_mismatch",
+            Self::PluginPackageNotLaunchable => "plugin_package_not_launchable",
+        }
+    }
+    /// The thread-visible notice. Admission is refused before a runner starts,
+    /// so the words say nothing was sent and nothing will be redone.
+    pub fn notice(self) -> String {
+        let cause = match self {
+            Self::HarnessTemplateMissing => {
+                "this agent has no harness template. An operator must set a default harness template on its resource or create an agent definition for it, then the agent must be rebound"
+            }
+            Self::HarnessTemplateMismatch => {
+                "the harness template this agent froze does not match its resource's harness plugin. An operator must review the resource's harness settings"
+            }
+            Self::PluginPackageNotLaunchable => {
+                "a plugin this agent's resource binds cannot be launched. An operator must check that plugin's status"
+            }
+        };
+        format!(
+            "Not started ({}): {cause}. No work was executed and nothing was sent to the runner; this dispatch will not be retried automatically.",
+            self.as_str()
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnedFailure {
     Admission,
+    /// Admission refused with a named cause (ADR-198).
+    AdmissionRefused {
+        reason: AdmissionReason,
+    },
     Cancelled,
     StartUnknown,
     SpawnFailed,
@@ -777,7 +823,26 @@ impl DomainRepository {
         let result = if d.fence != cap.fence {
             OwnedObservation::Historical
         } else if ["leased", "started", "parked"].contains(&d.state.as_str()) {
-            if d.state != "leased" {
+            if d.state == "leased" {
+                // Refused before anything started: say why, once, in the
+                // thread. Best effort in its own savepoint, like the notice
+                // below, so recording the failure never fails on it.
+                if let OwnedFailure::AdmissionRefused { reason } = &failure {
+                    tx.execute_batch("SAVEPOINT admission_notice")?;
+                    match super::task_intents::waiting_notice(
+                        &tx,
+                        &cap.dispatch_id,
+                        "admission_refused",
+                        &reason.notice(),
+                        now,
+                    ) {
+                        Ok(()) => tx.execute_batch("RELEASE admission_notice")?,
+                        Err(_) => tx.execute_batch(
+                            "ROLLBACK TO admission_notice; RELEASE admission_notice",
+                        )?,
+                    }
+                }
+            } else {
                 // A started run that failed has an unknown outcome: say so in the
                 // thread, as the retained product does. Only here, never in the
                 // fence itself, which a successful completion also passes through.
