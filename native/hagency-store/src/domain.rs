@@ -29,6 +29,7 @@ pub use agent_message_leftovers::{
     DeliveryEventRow, NewOperatorMessage, OperatorMessage, SuppressOutcome, Suppression, Tombstone,
 };
 mod approvals;
+pub(crate) mod engagement_rebind;
 mod engagement_retention;
 pub(crate) mod engagement_runtime_upgrade;
 mod engagement_terms;
@@ -140,7 +141,7 @@ pub struct DomainRepository {
     notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 76;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 77;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -1407,6 +1408,11 @@ impl DomainRepository {
                         76,
                         include_str!("migrations/082-engagement-runtime-upgrades.sql"),
                     ),
+                    // ADR-197: guarded rebind, rollout, rollback slot and audit.
+                    (
+                        77,
+                        include_str!("migrations/083-engagement-runtime-rebinds.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
@@ -1426,6 +1432,9 @@ impl DomainRepository {
                     "SELECT id,resource_id,name,role,enabled,created_at,harness_template FROM agent_definitions LIMIT 0",
                     "SELECT resource_id,template,template_sha256,updated_at FROM resource_default_harness_templates LIMIT 0",
                     "SELECT engagement_id,resource_id,state,target_runtime,marked_at,updated_at FROM engagement_runtime_upgrades LIMIT 0",
+                    "SELECT engagement_id,previous_runtime,rebound_at FROM engagement_runtime_rollbacks LIMIT 0",
+                    "SELECT resource_id,state,target_runtime,canary_engagement_id,canary_result,canary_rebound_at,detail,started_at,updated_at FROM engagement_runtime_rollouts LIMIT 0",
+                    "SELECT id,engagement_id,resource_id,action,old_package_sha256,new_package_sha256,old_settings_sha256,new_settings_sha256,actor,at,outcome,detail FROM engagement_runtime_rebinds LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
                     "SELECT engagement_id,room_id,state,joined_at,updated_at,notice_at FROM joined_rooms LIMIT 0",
                     "SELECT fleet_id,allocated_tokens,updated_at FROM side_allocations LIMIT 0",

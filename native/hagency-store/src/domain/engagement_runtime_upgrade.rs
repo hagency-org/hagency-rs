@@ -93,8 +93,10 @@ pub(super) fn mark_pending(tx: &Connection, resource: &Resource, now: u64) -> Re
         let frozen: Option<RuntimePluginIdentity> =
             frozen.map(|v| serde_json::from_str(&v)).transpose()?;
         if frozen.as_ref() == Some(target) {
+            // A pin holds the engagement on its package; it survives the target
+            // returning to that package.
             tx.execute(
-                "DELETE FROM engagement_runtime_upgrades WHERE engagement_id=?1",
+                "DELETE FROM engagement_runtime_upgrades WHERE engagement_id=?1 AND state<>'pinned'",
                 [&engagement_id],
             )?;
             continue;
@@ -157,10 +159,16 @@ impl DomainRepository {
     /// registry keeps these revisions launchable and never collects them.
     pub fn engagement_runtime_references(&self) -> Result<Vec<(String, String, u32)>, Error> {
         let mut statement = self.db.prepare(&format!(
-            "SELECT json_extract(f.payload,'$.resource.runtimePlugin.pluginId'),\
-             json_extract(f.payload,'$.resource.runtimePlugin.packageSha256'),COUNT(*) \
+            "SELECT plugin_id,package_sha256,SUM(n) FROM (\
+             SELECT json_extract(f.payload,'$.resource.runtimePlugin.pluginId') AS plugin_id,\
+             json_extract(f.payload,'$.resource.runtimePlugin.packageSha256') AS package_sha256,COUNT(*) AS n \
              FROM engagements e JOIN effects f ON f.engagement_id=e.id AND f.kind='provision' \
              WHERE e.state IN {LIVE} AND json_extract(f.payload,'$.resource.runtimePlugin.packageSha256') IS NOT NULL \
+             GROUP BY 1,2 \
+             UNION ALL \
+             SELECT json_extract(r.previous_runtime,'$.pluginId'),json_extract(r.previous_runtime,'$.packageSha256'),COUNT(*) \
+             FROM engagement_runtime_rollbacks r JOIN engagements e ON e.id=r.engagement_id \
+             WHERE e.state IN {LIVE} GROUP BY 1,2) \
              GROUP BY 1,2 ORDER BY 1,2"
         ))?;
         let rows = statement

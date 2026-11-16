@@ -60,6 +60,11 @@ const CASCADE: &[(&str, &str, &str)] = &[
         "SELECT engagement_id FROM engagement_prune_batch",
     ),
     (
+        "engagement_runtime_rollbacks",
+        "engagement_id",
+        "SELECT engagement_id FROM engagement_prune_batch",
+    ),
+    (
         "runner_outputs",
         "dispatch_id",
         "SELECT d.id FROM runner_dispatches d JOIN runner_sessions s ON s.id=d.session_id JOIN engagement_prune_batch b ON b.engagement_id=s.engagement_id",
