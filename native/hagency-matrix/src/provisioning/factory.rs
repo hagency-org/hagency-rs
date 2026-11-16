@@ -1147,6 +1147,15 @@ impl Collector {
             .map(|host| host.awaiting_owner_engagements())
             .unwrap_or_default()
     }
+    /// ADR-199 P6: reason and remedy of each stuck provision. Read-only.
+    pub fn provision_notes(&self) -> Vec<super::ProvisionNote> {
+        self.inner
+            .config
+            .provisioning
+            .as_ref()
+            .map(|host| host.provision_notes())
+            .unwrap_or_default()
+    }
     pub async fn close_provisioned_agents(&self) -> Result<(), Error> {
         let permit = self
             .inner

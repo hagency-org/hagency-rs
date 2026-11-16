@@ -39,7 +39,10 @@ pub use media_upload::{
 };
 pub use membership_sweep::{MEMBERSHIP_SWEEP_INTERVAL, MembershipSweep, SweepOutcome};
 pub use outgoing::{OutgoingState, OutgoingSummary};
-pub use provisioning::{PassReport, ProvisionedAgent, TokenProvisioningHost};
+pub use provisioning::{
+    MAX_PROVISION_RETRIES, PassReport, ProvisionNote, ProvisionedAgent, TokenProvisioningHost,
+    parked_reason, retry_delay_ms,
+};
 pub use receive::{ReceiveError, ReceivedAttachment, ReceivedScope};
 pub use representative_sync::{
     BoxFuture, CircuitBreak, EventMeta, HistoryPage, PageReader, PageSink, PendingVerdict,
@@ -109,6 +112,18 @@ pub enum Error {
     /// variant collapsed into this word and lost its cause.
     #[error("domain refused: {0}")]
     Domain(&'static str),
+}
+impl Error {
+    /// ADR-199 P6: a refusal that says nothing about the account, the keys or the
+    /// rooms, only that the server was not reached or was overloaded. The only
+    /// kind provisioning retries, and only at a step that is proven read-only
+    /// or idempotent (never an uncertain write).
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport | Self::Timeout | Self::Remote(429 | 500..=599)
+        )
+    }
 }
 /// The fixed word for a store refusal (ADR-175 pattern: a bounded category,
 /// never the store's own error text, which can name host paths).

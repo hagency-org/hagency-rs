@@ -119,7 +119,12 @@ impl Operation {
             .try_exists()
             .map_err(|_| Error::Storage)
     }
-    pub(super) async fn inspect_before_owner_invite(
+    /// ADR-199 P6: inspect a rooms custody for resumption. Complete identity,
+    /// ledger and rooms records are required. The owner invite may be absent,
+    /// possibly sent (inspected, never repeated: `joined_dm` proves the owner
+    /// is invited or joined) or answered. An answer without its "possible"
+    /// record, or a completed step without the invite records, is not provable.
+    pub(super) async fn inspect_for_resume(
         &self,
     ) -> Result<(Arc<Custody>, Vec<crate::HostRoom>), Error> {
         hagency_store::private::open(&self.root.join("agent-rooms"), false)
@@ -136,11 +141,7 @@ impl Operation {
         let records = tokio::task::spawn_blocking(move || inspect.values())
             .await
             .map_err(|_| Error::OutcomeUnknown)??;
-        if records[..6].iter().any(Option::is_none)
-            || records[COMPLETE].is_some()
-            || records[AGENT_ROOMS].is_none()
-            || records[OWNER_INVITE_POSSIBLE..].iter().any(Option::is_some)
-        {
+        if !resumable_records(&records) {
             return Err(Error::OutcomeUnknown);
         }
         let dm = self.stored_dm(&records, AGENT_ROOMS)?;
@@ -772,6 +773,8 @@ impl Operation {
             }
             (false, true) => return Err(Error::Storage),
         };
+        job.invite_proven
+            .store(true, std::sync::atomic::Ordering::Release);
         // The owner's join has no deadline. A first attempt polls to its own
         // budget, since owners usually join within seconds; a resumed attempt
         // looks once and hands the wait back to the next coordinator turn.
@@ -830,6 +833,18 @@ impl Operation {
         Ok(self.rooms(&dm))
     }
 }
+/// ADR-199 P6: whether the rooms custody proves a resumable state. Pure over the
+/// stored records so the proof conditions are testable without a server.
+pub(super) fn resumable_records(records: &[Option<Value>]) -> bool {
+    let invite = (
+        records[OWNER_INVITE_POSSIBLE].is_some(),
+        records[OWNER_INVITE_RESPONSE].is_some(),
+    );
+    records[..6].iter().all(Option::is_some)
+        && records[AGENT_ROOMS].is_some()
+        && invite != (false, true)
+        && (records[COMPLETE].is_none() || invite == (true, true))
+}
 /// Which half of the rooms step runs (ADR-184).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Phase {
@@ -853,6 +868,11 @@ struct Job {
     /// `result`: a resumed turn replays the rooms phase before the owner phase,
     /// and that replay's result must not erase the observation.
     awaiting: std::sync::atomic::AtomicBool,
+    /// ADR-199 P6: the owner invite is proven sent or inspected, so everything
+    /// after it only reads or replays and a transient failure may be retried.
+    invite_proven: std::sync::atomic::AtomicBool,
+    /// The last owner step ended in a retryable transient failure.
+    transient: std::sync::atomic::AtomicBool,
 }
 impl Jobs {
     pub fn rooms(&self) -> Result<Vec<HostRoom>, Error> {
@@ -868,6 +888,14 @@ impl Jobs {
             .as_ref()
             .cloned()
             .unwrap_or(Err(Error::Busy))
+    }
+    /// ADR-199 P6: the owner step's last failure was transient and retryable.
+    pub fn owner_step_retryable(&self) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some_and(|job| job.transient.load(std::sync::atomic::Ordering::Acquire))
     }
     pub fn check_rooms(&self, rooms: &[HostRoom]) -> Result<(), Error> {
         if self.0.lock().map_err(|_| Error::OutcomeUnknown)?.is_none() {
@@ -926,6 +954,8 @@ impl Jobs {
                     result: Mutex::new(None),
                     dm: Mutex::new(None),
                     awaiting: std::sync::atomic::AtomicBool::new(false),
+                    invite_proven: std::sync::atomic::AtomicBool::new(false),
+                    transient: std::sync::atomic::AtomicBool::new(false),
                 });
                 *guard = Some(job.clone());
                 job
@@ -952,15 +982,26 @@ impl Jobs {
             )
             .await
             .unwrap_or(Err(Error::Timeout));
+            // ADR-199 P6: a transient failure after the owner invite is proven
+            // only read or replayed state, so it is neither observed unknown
+            // nor cached as final; the owner step resumes like a wait.
+            let retryable = phase == Phase::Owner
+                && job.invite_proven.load(std::sync::atomic::Ordering::Acquire)
+                && result.as_ref().err().is_some_and(Error::is_transient);
+            job.transient
+                .store(retryable, std::sync::atomic::Ordering::Release);
             if let Err(error) = &result
                 && *error != Error::AwaitingOwner
             {
                 eprintln!(
-                    "provision room step failed: effect={} error={error:?}",
+                    "provision room step failed: effect={} error={error:?} retryable={retryable}",
                     job.operation.scope.effect.id
                 );
             }
-            let result = if result.as_ref().is_err_and(|e| *e != Error::AwaitingOwner)
+            let failure = result.as_ref().err().cloned();
+            let result = if result
+                .as_ref()
+                .is_err_and(|e| *e != Error::AwaitingOwner && !retryable)
                 && job
                     .operation
                     .scope
@@ -979,9 +1020,16 @@ impl Jobs {
             };
             if phase == Phase::Owner {
                 job.awaiting.store(
-                    result.as_ref().is_err_and(|e| *e == Error::AwaitingOwner),
+                    retryable || result.as_ref().is_err_and(|e| *e == Error::AwaitingOwner),
                     std::sync::atomic::Ordering::Release,
                 );
+            }
+            if retryable {
+                // Cached as a wait so the next run resumes; the caller still
+                // receives the real transient error.
+                *job.result.lock().map_err(|_| Error::OutcomeUnknown)? =
+                    Some(Err(Error::AwaitingOwner));
+                return Err(failure.unwrap_or(Error::Transport));
             }
             let response = result.as_ref().map(|_| ()).map_err(Clone::clone);
             *job.result.lock().map_err(|_| Error::OutcomeUnknown)? = Some(result);
@@ -1006,4 +1054,43 @@ async fn write(custody: &Arc<Custody>, stage: &'static str, value: Value) -> Res
     tokio::task::spawn_blocking(move || custody.write(stage, value))
         .await
         .map_err(|_| Error::OutcomeUnknown)?
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    fn records(present: &[usize]) -> Vec<Option<Value>> {
+        (0..10)
+            .map(|i| present.contains(&i).then_some(Value::Null))
+            .collect()
+    }
+    const BASE: [usize; 7] = [0, 1, 2, 3, 4, 5, AGENT_ROOMS];
+    #[test]
+    fn resume_proof_accepts_every_provable_invite_state() {
+        // No invite yet (the pre-ADR-199 P6 case).
+        assert!(resumable_records(&records(&BASE)));
+        // Invite possibly sent, response lost: inspected, never repeated.
+        let mut r = BASE.to_vec();
+        r.push(OWNER_INVITE_POSSIBLE);
+        assert!(resumable_records(&records(&r)));
+        // Invite answered; owner may have joined (rooms step complete).
+        r.push(OWNER_INVITE_RESPONSE);
+        assert!(resumable_records(&records(&r)));
+        r.push(COMPLETE);
+        assert!(resumable_records(&records(&r)));
+    }
+    #[test]
+    fn resume_proof_refuses_a_state_it_cannot_prove() {
+        // An answer without its "possible" record.
+        let mut r = BASE.to_vec();
+        r.push(OWNER_INVITE_RESPONSE);
+        assert!(!resumable_records(&records(&r)));
+        // Complete without any invite record.
+        let mut r = BASE.to_vec();
+        r.push(COMPLETE);
+        assert!(!resumable_records(&records(&r)));
+        // Missing rooms record, or an incomplete identity/ledger prefix.
+        assert!(!resumable_records(&records(&[0, 1, 2, 3, 4, 5])));
+        assert!(!resumable_records(&records(&[0, 1, 2, 3, 4, AGENT_ROOMS])));
+    }
 }

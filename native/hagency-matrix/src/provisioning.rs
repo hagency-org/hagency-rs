@@ -35,6 +35,90 @@ struct Job {
     effect: Mutex<Option<hagency_store::Effect>>,
     /// Wall-clock milliseconds since this provision first waited for its owner.
     awaiting_since: Mutex<Option<u64>>,
+    /// ADR-199 P6: bounded retry and named parking after a transient failure.
+    recovery: Mutex<Recovery>,
+}
+/// ADR-199 P6 retry/parking state of one provision job. Times are milliseconds on
+/// the host's injected clock.
+#[derive(Default)]
+struct Recovery {
+    /// Retries scheduled so far for a transient failure after the owner invite.
+    attempts: u32,
+    /// When the next retry is due; `None` when none is scheduled.
+    next_ms: Option<u64>,
+    /// Last transient error, for the status note.
+    last: Option<Error>,
+    /// Why the provision is parked, and since when.
+    parked: Option<Parked>,
+}
+#[derive(Clone)]
+struct Parked {
+    stage: &'static str,
+    error: Error,
+    since_ms: u64,
+}
+/// Retries of a transient failure after the owner invite before the
+/// provision is parked with a named reason.
+pub const MAX_PROVISION_RETRIES: u32 = 6;
+const RETRY_BASE_MS: u64 = 5_000;
+const RETRY_CAP_MS: u64 = 300_000;
+/// Delay before retry `attempt` (1-based): 5 s doubling, capped at 5 min.
+pub fn retry_delay_ms(attempt: u32) -> u64 {
+    RETRY_BASE_MS
+        .saturating_mul(1u64 << attempt.saturating_sub(1).min(16))
+        .min(RETRY_CAP_MS)
+}
+/// What an owner or operator needs to know about one stuck provision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionNote {
+    pub engagement: String,
+    /// `awaiting_owner`, `provision_retrying` or `provision_parked`.
+    pub state: &'static str,
+    /// Fixed reason code.
+    pub reason: &'static str,
+    /// The concrete next step, in plain words. Never carries a secret.
+    pub remedy: String,
+}
+/// The named reason and remedy for a provision that cannot proceed on its own.
+pub fn parked_reason(stage: &str, error: &Error) -> (&'static str, String) {
+    if error.is_transient() {
+        return (
+            "transport_retry_exhausted",
+            format!(
+                "provisioning failed at step {stage} after {MAX_PROVISION_RETRIES} retries ({error}); \
+                 operator: check the Matrix server, the service re-checks automatically; if it \
+                 never recovers, retire the agent"
+            ),
+        );
+    }
+    match (stage, error) {
+        ("inspect_enrollment", _) => (
+            "enrollment_not_provable",
+            "the agent's key ledger could not be proven complete; keys are never re-created. \
+             operator: inspect the agent's enrollment, or retire the agent"
+                .into(),
+        ),
+        ("inspect_account" | "inspect_home", _) => (
+            "account_not_provable",
+            format!(
+                "the agent's account or home could not be proven at step {stage} ({error}); \
+                 operator: check the Matrix server and the agent's state directory, or retire the agent"
+            ),
+        ),
+        (_, Error::Recipients) => (
+            "owner_membership_not_provable",
+            "the owner's membership in the agent's DM could not be read; accept the invitation \
+             to the agent's DM room, then the service retries"
+                .into(),
+        ),
+        _ => (
+            "provision_failed",
+            format!(
+                "provisioning failed at step {stage} ({error}); operator: read the service log \
+                 for this engagement, or retire the agent"
+            ),
+        ),
+    }
 }
 fn wall_ms() -> u64 {
     std::time::SystemTime::now()
@@ -61,6 +145,8 @@ pub struct TokenProvisioningHost {
     limits: Limits,
     roots: Vec<reqwest::Certificate>,
     jobs: Mutex<BTreeMap<String, Arc<Job>>>,
+    /// Milliseconds clock; replaced in tests so backoff never sleeps.
+    clock: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 struct RoomPlan {
     representative: String,
@@ -167,7 +253,13 @@ impl TokenProvisioningHost {
             limits,
             roots: vec![],
             jobs: Mutex::new(BTreeMap::new()),
+            clock: Arc::new(wall_ms),
         })
+    }
+    /// ADR-199 P6: replace the retry clock (tests inject time instead of sleeping).
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
     }
     pub fn with_root_pem(mut self, pem: &[u8]) -> Result<Self, Error> {
         if pem.len() > 16384 || self.roots.len() >= 4 {
@@ -365,6 +457,7 @@ impl TokenProvisioningHost {
                 result: Mutex::new(None),
                 effect: Mutex::new(Some(effect.clone())),
                 awaiting_since: Mutex::new(None),
+                recovery: Mutex::new(Recovery::default()),
             });
             jobs.insert(effect.id.clone(), job.clone());
             job
@@ -481,6 +574,41 @@ impl TokenProvisioningHost {
                 effect.id
             );
         }
+        // ADR-199 P6: a transient failure after the owner invite is retried with
+        // bounded backoff. The effect stays Started: nothing is observed
+        // unknown and nothing is replayed (the rooms step read back state).
+        if !activated
+            && let Err(error) = &result
+            && error.is_transient()
+            && job
+                .account
+                .lock()
+                .map_err(|_| Error::OutcomeUnknown)?
+                .as_ref()
+                .is_some_and(|account| account.owner_step_retryable())
+        {
+            let now = (self.clock)();
+            let mut recovery = job.recovery.lock().map_err(|_| Error::OutcomeUnknown)?;
+            if recovery.attempts < MAX_PROVISION_RETRIES {
+                recovery.attempts += 1;
+                recovery.next_ms = Some(now.saturating_add(retry_delay_ms(recovery.attempts)));
+                recovery.last = Some(error.clone());
+                eprintln!(
+                    "provision retry scheduled: effect={} attempt={}/{MAX_PROVISION_RETRIES} \
+                     in_ms={} error={error:?}",
+                    effect.id,
+                    recovery.attempts,
+                    retry_delay_ms(recovery.attempts)
+                );
+                return result;
+            }
+            recovery.next_ms = None;
+            recovery.parked = Some(Parked {
+                stage: "owner_invite",
+                error: error.clone(),
+                since_ms: now,
+            });
+        }
         let mut result = result;
         if activated && let Err(error) = result {
             result = Err(match &job.factory {
@@ -528,6 +656,11 @@ impl TokenProvisioningHost {
             .map_err(|_| Error::OutcomeUnknown)?
             .clone()
             .ok_or(Error::OutcomeUnknown)?;
+        // The scheduled retry is being taken now; settle schedules the next.
+        job.recovery
+            .lock()
+            .map_err(|_| Error::OutcomeUnknown)?
+            .next_ms = None;
         let mut activated = false;
         let result = self
             .continue_provision(domain, &effect, &account, job, cancel, &mut activated)
@@ -541,9 +674,89 @@ impl TokenProvisioningHost {
             *job.awaiting_since
                 .lock()
                 .map_err(|_| Error::OutcomeUnknown)? = None;
+            *job.recovery.lock().map_err(|_| Error::OutcomeUnknown)? = Recovery::default();
         }
         *job.result.lock().map_err(|_| Error::OutcomeUnknown)? = Some(result);
         response
+    }
+    /// ADR-199 P6: a retry is scheduled for this job and its time has come.
+    fn retry_due(&self, job: &Job) -> bool {
+        job.recovery
+            .lock()
+            .ok()
+            .and_then(|r| r.next_ms)
+            .is_some_and(|due| (self.clock)() >= due)
+    }
+    /// ADR-199 P6: a provision parked on a transient failure waits one cap
+    /// interval, then is inspected again.
+    fn recheck_due(&self, job: &Job) -> bool {
+        job.recovery
+            .lock()
+            .ok()
+            .and_then(|r| r.parked.clone())
+            .is_some_and(|p| {
+                p.error.is_transient() && (self.clock)() >= p.since_ms.saturating_add(RETRY_CAP_MS)
+            })
+    }
+    /// ADR-199 P6: why each stuck provision is stuck and what to do, for the
+    /// owner's console row. Read-only; fixed vocabulary, no secrets.
+    pub fn provision_notes(&self) -> Vec<ProvisionNote> {
+        let Ok(jobs) = self.jobs.lock() else {
+            return Vec::new();
+        };
+        let mut notes = Vec::new();
+        for (id, job) in jobs.iter() {
+            let Some(engagement) = id.strip_prefix("provision_") else {
+                continue;
+            };
+            let Ok(recovery) = job.recovery.lock() else {
+                continue;
+            };
+            let Ok(result) = job.result.lock() else {
+                continue;
+            };
+            let note = if let Some(parked) = &recovery.parked {
+                let (reason, remedy) = parked_reason(parked.stage, &parked.error);
+                Some(("provision_parked", reason, remedy))
+            } else if let Some(next) = recovery.next_ms {
+                let wait = next.saturating_sub((self.clock)()) / 1000;
+                Some((
+                    "provision_retrying",
+                    "transport_retrying",
+                    format!(
+                        "provisioning hit a temporary Matrix failure after the owner invite; \
+                         retry {}/{MAX_PROVISION_RETRIES} in about {wait}s; no action needed",
+                        recovery.attempts
+                    ),
+                ))
+            } else if matches!(result.as_ref(), Some(Err(Error::AwaitingOwner))) {
+                let room = job
+                    .account
+                    .lock()
+                    .ok()
+                    .and_then(|a| a.clone())
+                    .and_then(|a| a.created_agent_dm().ok().flatten());
+                Some((
+                    "awaiting_owner",
+                    "owner_not_joined",
+                    match room {
+                        Some(room) => format!("accept the invitation to room {room}"),
+                        None => "accept the invitation to the agent's room".into(),
+                    },
+                ))
+            } else {
+                None
+            };
+            if let Some((state, reason, remedy)) = note {
+                notes.push(ProvisionNote {
+                    engagement: engagement.to_owned(),
+                    state,
+                    reason,
+                    remedy,
+                });
+            }
+        }
+        notes
     }
     /// The provisions waiting for their owner, with the wall-clock millisecond
     /// each started waiting. Read-only; for the fleet's status.
@@ -601,14 +814,28 @@ impl TokenProvisioningHost {
         let uncertain = domain
             .uncertain_provisions(self.registration.fleet_id.clone())
             .await?;
+        let retrying: Vec<String> = self
+            .jobs
+            .lock()
+            .map_err(|_| Error::OutcomeUnknown)?
+            .iter()
+            .filter(|(_, job)| self.retry_due(job))
+            .filter_map(|(id, _)| id.strip_prefix("provision_").map(str::to_owned))
+            .collect();
         for engagement in uncertain {
-            if self
-                .jobs
-                .lock()
-                .map_err(|_| Error::OutcomeUnknown)?
-                .contains_key(&format!("provision_{engagement}"))
             {
-                continue;
+                let mut jobs = self.jobs.lock().map_err(|_| Error::OutcomeUnknown)?;
+                let id = format!("provision_{engagement}");
+                if let Some(job) = jobs.get(&id) {
+                    // ADR-199 P6: a provision parked on a transient failure is
+                    // looked at again after the longest backoff, from its
+                    // custody, instead of waiting for a service restart.
+                    if self.recheck_due(job) {
+                        jobs.remove(&id);
+                    } else {
+                        continue;
+                    }
+                }
             }
             match self.recover_enrolled(domain, &engagement, cancel).await {
                 Ok(()) => report.started.push(engagement),
@@ -618,7 +845,12 @@ impl TokenProvisioningHost {
                 Err(error) => report.failed.push((engagement, error)),
             }
         }
-        for engagement in waiting.into_iter().chain(setup_waiting).chain(pending) {
+        for engagement in waiting
+            .into_iter()
+            .chain(setup_waiting)
+            .chain(retrying)
+            .chain(pending)
+        {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -727,6 +959,11 @@ impl TokenProvisioningHost {
                 {
                     Some(Ok(_)) => return Ok(()),
                     Some(Err(Error::AwaitingOwner | Error::AwaitingSetup)) => Some(job.clone()),
+                    // ADR-199 P6: a scheduled retry resumes once it is due.
+                    Some(Err(error)) if self.retry_due(job) => {
+                        let _ = error;
+                        Some(job.clone())
+                    }
                     Some(Err(error)) => return Err(error.clone()),
                     None => return Err(Error::OutcomeUnknown),
                 },
@@ -764,6 +1001,7 @@ impl TokenProvisioningHost {
                 result: Mutex::new(None),
                 effect: Mutex::new(None),
                 awaiting_since: Mutex::new(None),
+                recovery: Mutex::new(Recovery::default()),
             });
             jobs.insert(id.clone(), job.clone());
             job
@@ -903,3 +1141,7 @@ impl TokenProvisioningHost {
             .clone()
     }
 }
+
+#[cfg(test)]
+#[path = "provisioning/retry_tests.rs"]
+mod retry_tests;

@@ -556,9 +556,16 @@ pub struct ProvisionedTokenAccount {
     roots: Vec<reqwest::Certificate>,
 }
 impl ProvisionedTokenAccount {
-    /// Recovery is restricted to a completed identity, completed key ledger,
-    /// and completed rooms BEFORE any owner invite or runtime could start.
-    pub(crate) async fn resume_before_owner_invite(
+    /// ADR-199 P6: the owner step's last failure was transient and retryable.
+    pub(crate) fn owner_step_retryable(&self) -> bool {
+        self.room_jobs.owner_step_retryable()
+    }
+    /// Recovery is restricted to a completed identity, completed key ledger
+    /// (enrollment Complete), and completed rooms. The owner invite may or may
+    /// not have happened (ADR-199 P6): the rooms custody is inspected, an invite
+    /// that may have crossed the wire is read back and never repeated, and
+    /// nothing is created, enrolled or re-keyed here.
+    pub(crate) async fn resume_enrolled(
         &mut self,
         representative: &str,
         anchors: Vec<(String, String)>,
@@ -590,7 +597,7 @@ impl ProvisionedTokenAccount {
             return Ok(());
         }
         let operation = rooms::Operation::new(self, original.clone(), representative, 1)?;
-        let (custody, rooms) = operation.inspect_before_owner_invite().await?;
+        let (custody, rooms) = operation.inspect_for_resume().await?;
         let config = self
             .host_config(1, self.key, rooms)?
             .with_fresh_account_enrollment(anchors)?;

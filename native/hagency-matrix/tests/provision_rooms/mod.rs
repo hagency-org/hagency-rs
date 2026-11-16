@@ -1986,12 +1986,7 @@ async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
         let work = async {
             let mut account = operation.execute(&cancel).await?;
             account
-                .resume_before_owner_invite(
-                    REP_TOKEN,
-                    vec![(OWNER.into(), anchor)],
-                    inspection,
-                    &cancel,
-                )
+                .resume_enrolled(REP_TOKEN, vec![(OWNER.into(), anchor)], inspection, &cancel)
                 .await?;
             Ok::<_, Error>(account)
         };
@@ -2010,7 +2005,9 @@ async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
         assert_eq!(server.peer.writes.len(), 5);
         assert_eq!(server.as_posts, 2);
         if unsafe_invite {
-            assert!(recovered.is_err());
+            // ADR-199 P6: an unreadable/unsafe DM after the invite is not provable;
+            // it stays parked on its named error and nothing is replayed.
+            assert_eq!(recovered.err(), Some(Error::Recipients));
             assert_eq!(
                 effect_row(&f),
                 Some(("provision".into(), "uncertain".into()))
