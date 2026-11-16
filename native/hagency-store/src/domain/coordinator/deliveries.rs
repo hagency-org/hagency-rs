@@ -101,6 +101,7 @@ impl DomainRepository {
             "project_unavailable",
             "resource_unavailable",
             "request_conflict",
+            "agent_name_in_use",
             "harness_template_missing",
             "harness_template_invalid",
         ]
@@ -174,6 +175,7 @@ pub fn terminal_reason(error: &Error) -> Option<&'static str> {
         }
         Error::LocalAuthority | Error::Generation => Some("authority_changed"),
         Error::Conflict => Some("request_conflict"),
+        Error::NameInUse { .. } => Some("agent_name_in_use"),
         Error::NotFound | Error::State => Some("project_unavailable"),
         Error::Unqualified => Some("resource_unavailable"),
         Error::HarnessTemplate { code, .. } => Some(code),

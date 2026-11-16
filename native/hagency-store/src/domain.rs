@@ -2428,10 +2428,26 @@ impl DomainRepository {
         {
             return Err(Error::Unqualified);
         }
-        let collision: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engagements WHERE fleet_id=?1 AND project_id=?2 AND name=?3 AND state IN ('pending','reserved','active'))",
-            params![request.fleet_id,request.target_project_id,request.agent_definition.name.as_str()], |r| r.get(0))?;
-        if collision {
-            return Err(Error::Conflict);
+        // ADR-199: only a live engagement holds a name. A revoked, rejected or
+        // failed one frees it; the new request has its own engagement id.
+        let holder: Option<(String, String)> = tx
+            .query_row(
+                "SELECT id,state FROM engagements WHERE fleet_id=?1 AND project_id=?2 AND name=?3 AND state IN ('pending','reserved','active')",
+                params![
+                    request.fleet_id,
+                    request.target_project_id,
+                    request.agent_definition.name.as_str()
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((holder, state)) = holder {
+            return Err(Error::NameInUse {
+                message: format!(
+                    "agent name '{}' is held by {state} engagement {holder} in this project; retire that engagement or choose another name",
+                    request.agent_definition.name.as_str()
+                ),
+            });
         }
         let harness_template = engagement_terms::resolve_harness_template(
             &tx,

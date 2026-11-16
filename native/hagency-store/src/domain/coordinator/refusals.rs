@@ -205,6 +205,7 @@ impl DomainRepository {
             "project_unavailable",
             "resource_unavailable",
             "request_conflict",
+            "agent_name_in_use",
             "harness_template_missing",
             "harness_template_invalid",
         ]

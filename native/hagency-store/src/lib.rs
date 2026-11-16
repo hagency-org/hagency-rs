@@ -96,6 +96,11 @@ pub enum Error {
     /// `message` names the fix and never carries setting values.
     #[error("{message}")]
     HarnessTemplate { code: &'static str, message: String },
+    /// ADR-199: a live engagement in the same project already holds the agent
+    /// name. Reaches the requester as `agent_name_in_use`; revoked engagements
+    /// never hold a name.
+    #[error("{message}")]
+    NameInUse { message: String },
     #[error("selected resource or declared shared seat has insufficient capacity")]
     InsufficientCapacity,
     #[error("cannot allocate against an agent with no declared ceiling")]

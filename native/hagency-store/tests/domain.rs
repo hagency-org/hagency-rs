@@ -330,7 +330,7 @@ fn domain_request_replay_and_publication() {
     let mut duplicate = request("two", "Édison", &pool, 100);
     assert!(matches!(
         db.admit(&proof(&duplicate), 1000),
-        Err(Error::Conflict)
+        Err(Error::NameInUse { .. })
     ));
     duplicate.target_project_id = "another_project".into();
     duplicate.target_room_id = "!another:example.test".into();
