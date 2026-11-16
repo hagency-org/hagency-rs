@@ -19,6 +19,7 @@ import { useEffect, useMemo, useState } from 'react';
 import PageHead from '@/components/PageHead';
 import NativeServerEngagements from '@/components/NativeServerEngagements';
 import NativeSettlement from '@/components/NativeSettlement';
+import NativeUpgrade from '@/components/NativeUpgrade';
 import NativeStatusStrip from '@/components/NativeStatusStrip';
 import { NativeAccessNotice } from '@/components/NativeUsage';
 import { useT } from '@/components/Prefs';
@@ -259,6 +260,7 @@ export default function NativeEngagements({ lead = null, pending = null, other =
                       </small>
                     )}{' '}
                     {e.coordinatorManaged && e.state === 'revoked' && <NativeSettlement agent={e} onSaved={data.refresh} />}
+                    {(e.state === 'reserved' || e.state === 'active') && <NativeUpgrade agent={e} />}
                     {/* Exile + confirm (AgentActions.jsx, lane apwait #45): the
                         confirmation names THIS row's id, so a slip on one row
                         can never retire another. Both fixes share the cell. */}

@@ -591,6 +591,25 @@ export async function fetchCleanupState() {
       || c.lastError.length > 256 || !number(c.nextAttemptAtMs))) throw new Error('invalid_native_response');
   return v.cleanup;
 }
+/* ADR-197: engagement runtime upgrade. Reads are open to any session; the
+ * mutations need the lifecycle scope. A refused rebind or rollback answers 409
+ * with the store's refusal word as the error code (`error.message`). */
+const json = { 'Content-Type': 'application/json' };
+const upgradePath = (engagementId, tail = '') => `/api/engagements/${encodeURIComponent(engagementId)}/upgrade${tail}`;
+const rolloutPath = (resourceId, tail = '') => `/api/resources/${encodeURIComponent(resourceId)}/rollout${tail}`;
+export async function fetchEngagementUpgrade(engagementId) {
+  const v = await request(upgradePath(engagementId));
+  if (!object(v, ['engagementId', 'resourceId', 'currentRuntime', 'targetRuntime', 'state', 'blocker', 'previousRuntime', 'audit']) || !id(v.engagementId) || !Array.isArray(v.audit)) throw new Error('invalid_native_response');
+  return v;
+}
+export const engagementUpgradeAct = (engagementId, action) => request(upgradePath(engagementId, `/${action}`), { method: 'POST' });
+export async function fetchResourceRollout(resourceId) {
+  const v = await request(rolloutPath(resourceId));
+  if (!object(v, ['resourceId', 'state', 'targetRuntime', 'canaryEngagementId', 'canaryResult', 'detail', 'pending']) || !Array.isArray(v.pending)) throw new Error('invalid_native_response');
+  return v;
+}
+export const resourceRolloutAct = (resourceId, action) => request(rolloutPath(resourceId, `/${action}`), { method: 'POST' });
+export const recordCanaryResult = (resourceId, passed, detail = null) => request(rolloutPath(resourceId, '/canary'), { method: 'POST', headers: json, body: JSON.stringify(detail ? { passed, detail } : { passed }) });
 /* Approve / refuse a pending engagement (board #16). Approve reaches the
  * SAME store verdict the project-side Matrix approval reaches; refuse rides
  * the existing /api/agents/{id}/refuse route and answers the rejected
