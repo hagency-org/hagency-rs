@@ -1805,6 +1805,7 @@ impl Bootstrap {
         // tick channel from the first request, or readiness would report the
         // loop `disabled` forever (brief 19). The handle is shared: bootstrap
         // keeps it to abort at shutdown, `/health` observes liveness.
+        crate::descriptors::start(shutdown.clone());
         let (ceiling_sweep, sweep_tick) = start_ceiling_sweep(
             self.domain.clone(),
             shutdown.clone(),

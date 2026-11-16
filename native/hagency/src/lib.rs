@@ -1,6 +1,7 @@
 use hagency_core::custody::{Delivery, MAX_DELIVERY_BYTES};
 use hagency_store::{DomainStore, Error, Store};
 mod alerts;
+pub mod descriptors;
 pub mod bootstrap;
 pub mod bot_commands;
 pub(crate) mod cleanup_state;
@@ -585,7 +586,14 @@ fn readiness(depot: &mut Depot, res: &mut Response, refuse: bool) {
     // signals: servers/agents from the fleet + palpo above, the other four
     // components stated as their honest native value (no sync alert/runtime
     // read exists at this boundary).
+    let (fd_pressure, fd_open, fd_limit) = descriptors::snapshot();
     let components_health = serde_json::json!({
+        "descriptors": {
+            "status": fd_pressure.word(),
+            "open": fd_open,
+            "softLimit": fd_limit,
+            "nearPercent": 80,
+        },
         "servers": {
             "status": if servers == 0 { "unknown" }
                 else if online_servers < servers { "degraded" }
@@ -645,6 +653,7 @@ fn readiness(depot: &mut Depot, res: &mut Response, refuse: bool) {
     } else if components_health["servers"]["status"] == "degraded"
         || components_health["agents"]["status"] == "degraded"
         || components_health["runtime"]["status"] == "degraded"
+        || components_health["descriptors"]["status"] == "degraded"
     {
         "degraded"
     } else if servers == 0 && agents == 0 {
