@@ -3496,6 +3496,21 @@ impl DomainStore {
         })
         .await
     }
+    /// ADR-197: engagements marked `upgrade_pending` (or pinned/halted).
+    pub async fn engagement_runtime_upgrades(
+        &self,
+        resource_id: Option<String>,
+    ) -> Result<Vec<crate::EngagementRuntimeUpgrade>, Error> {
+        self.call(1, move |db| {
+            db.engagement_runtime_upgrades(resource_id.as_deref())
+        })
+        .await
+    }
+    /// ADR-197: runtime packages frozen by live engagements.
+    pub async fn engagement_runtime_references(&self) -> Result<Vec<(String, String, u32)>, Error> {
+        self.call(1, move |db| db.engagement_runtime_references())
+            .await
+    }
     pub async fn resource_default_harness_template(
         &self,
         resource_id: String,

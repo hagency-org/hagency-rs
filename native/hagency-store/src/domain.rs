@@ -30,6 +30,7 @@ pub use agent_message_leftovers::{
 };
 mod approvals;
 mod engagement_retention;
+pub(crate) mod engagement_runtime_upgrade;
 mod engagement_terms;
 pub use approvals::card::PrivateApprovalCard;
 mod attachments;
@@ -139,7 +140,7 @@ pub struct DomainRepository {
     notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 75;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 76;
 
 impl DomainRepository {
     pub(super) fn drop_observed(self, probe: &std::sync::Arc<crate::shutdown::Probe>) {
@@ -1401,6 +1402,11 @@ impl DomainRepository {
                         75,
                         include_str!("migrations/081-resource-default-harness-template.sql"),
                     ),
+                    // ADR-197: engagements marked when a resource's runtime package changes.
+                    (
+                        76,
+                        include_str!("migrations/082-engagement-runtime-upgrades.sql"),
+                    ),
                 ],
                 sql: include_str!("domain.sql"),
                 verify: &[
@@ -1419,6 +1425,7 @@ impl DomainRepository {
                     "SELECT id,engagement_id,dispatch_id,spend,allocation,began_at,lifted_at,lifted_allocation FROM quota_holds LIMIT 0",
                     "SELECT id,resource_id,name,role,enabled,created_at,harness_template FROM agent_definitions LIMIT 0",
                     "SELECT resource_id,template,template_sha256,updated_at FROM resource_default_harness_templates LIMIT 0",
+                    "SELECT engagement_id,resource_id,state,target_runtime,marked_at,updated_at FROM engagement_runtime_upgrades LIMIT 0",
                     "SELECT owner_mxid,master_key,source,pinned_at,mismatch_key,mismatch_at FROM owner_anchors LIMIT 0",
                     "SELECT engagement_id,room_id,state,joined_at,updated_at,notice_at FROM joined_rooms LIMIT 0",
                     "SELECT fleet_id,allocated_tokens,updated_at FROM side_allocations LIMIT 0",
@@ -3210,6 +3217,7 @@ fn prepare_resource_write(
     accounts::association(tx, resource)?;
     let mut resource = resource.clone();
     bounded_row(tx, "resources", "id", &resource.id(), 2048)?;
+    let mut mark_runtime_change = false;
     let previous = match read_resource(tx, &resource.id()) {
         Ok(old) => Some(old),
         Err(Error::NotFound) => None,
@@ -3233,7 +3241,12 @@ fn prepare_resource_write(
     {
         let count:i64=tx.query_row("SELECT COUNT(*) FROM engagements WHERE resource_id=?1 AND state IN ('reserved','active')",[resource.id()],|r|r.get(0))?;
         if count != 0 {
-            return Err(Error::State);
+            // ADR-197: a change of the runtime package or settings alone is
+            // not refused; it marks the engagements `upgrade_pending`.
+            if !engagement_runtime_upgrade::is_runtime_revision_change(&old, &resource) {
+                return Err(Error::State);
+            }
+            mark_runtime_change = true;
         }
     }
     if let Some(runtime) = &resource.runtime_plugin {
@@ -3258,6 +3271,9 @@ fn prepare_resource_write(
         resource.roles = serde_json::from_str(&roles)?;
     } else {
         resource.roles = resource.eligible_roles();
+    }
+    if mark_runtime_change {
+        engagement_runtime_upgrade::mark_pending(tx, &resource, graphs::now_ms()?)?;
     }
     Ok(resource)
 }

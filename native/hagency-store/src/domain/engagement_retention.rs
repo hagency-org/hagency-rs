@@ -55,6 +55,11 @@ fn bounded(value: u64) -> Result<u64, Error> {
 /// id, so `rowid IN (SELECT id ...)` silently deleted nothing).
 const CASCADE: &[(&str, &str, &str)] = &[
     (
+        "engagement_runtime_upgrades",
+        "engagement_id",
+        "SELECT engagement_id FROM engagement_prune_batch",
+    ),
+    (
         "runner_outputs",
         "dispatch_id",
         "SELECT d.id FROM runner_dispatches d JOIN runner_sessions s ON s.id=d.session_id JOIN engagement_prune_batch b ON b.engagement_id=s.engagement_id",
