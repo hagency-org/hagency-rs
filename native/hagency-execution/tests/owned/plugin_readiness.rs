@@ -54,7 +54,8 @@ readiness = ["bin/probe"]
 
 /// A harness that answers the host's control requests from a shell loop:
 /// every line it reads is logged; `agent/prepare` returns `prepared-agent`
-/// unless `harness-fail` exists beside the package.
+/// unless `harness-fail` exists beside the package; `agent/release` fails
+/// when `harness-release-fail` exists.
 fn harness_package(root: &std::path::Path) -> PathBuf {
     let package = root.join("harness-package");
     fs::create_dir_all(package.join("bin")).unwrap();
@@ -96,7 +97,11 @@ while IFS= read -r line; do
         printf '{{"jsonrpc":"2.0","id":"%s","result":{{"target":"prepared-agent","ownership":"existing"}}}}\n' "$id"
       fi ;;
     *'"method":"agent/release"'*)
-      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"released":true}}}}\n' "$id" ;;
+      if [ -e '{release_fail}' ]; then
+        printf '{{"jsonrpc":"2.0","id":"%s","error":{{"code":-32603,"message":"release failed"}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":"%s","result":{{"released":true}}}}\n' "$id"
+      fi ;;
     *'"method":"shutdown"'*)
       printf '{{"jsonrpc":"2.0","id":"%s","result":{{"accepted":true}}}}\n' "$id"
       exit 0 ;;
@@ -105,6 +110,7 @@ done
 "#,
         log = root.join("harness-log").display(),
         fail = root.join("harness-fail").display(),
+        release_fail = root.join("harness-release-fail").display(),
     );
     let path = package.join("bin/harness");
     fs::write(&path, script).unwrap();
@@ -400,6 +406,31 @@ async fn native_plugin_readiness_deferral_when_the_harness_cannot_prepare() {
     assert!(
         !f.root.path().join("probe-input").exists(),
         "the probe is not run without a target"
+    );
+    f.domain.shutdown().await.unwrap();
+}
+
+/// A harness that prepared an agent for the probe but cannot release it leaves
+/// state the host cannot prove undone: the dispatch is deferred as not ready
+/// with the reason, the probe is not run and nothing starts.
+#[tokio::test]
+async fn native_plugin_readiness_deferral_when_the_harness_cannot_release() {
+    let (f, cap) = Plugin::build(true, true);
+    fs::write(f.root.path().join("harness-release-fail"), "x").unwrap();
+    let report = Operation::start(f.domain.clone(), cap, f.host(), limits())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let Some(Failure::RuntimeNotReady { reason }) = &report.failure else {
+        panic!("{:?}", report.failure);
+    };
+    assert!(reason.contains("release"), "{reason}");
+    assert_eq!(f.launches(), 0);
+    assert_eq!(f.dispatch().0, "queued");
+    assert!(
+        !f.root.path().join("probe-input").exists(),
+        "the probe is not run after an unproven release"
     );
     f.domain.shutdown().await.unwrap();
 }

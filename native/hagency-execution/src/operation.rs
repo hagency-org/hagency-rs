@@ -2357,8 +2357,8 @@ async fn release_harness_agent(
     dispatch_id: &str,
     target: &str,
     outcome: &str,
-) {
-    let _ = harness
+) -> bool {
+    harness
         .release_agent(
             &hagency_plugin::HarnessRequest::ReleaseAgent {
                 allocation_id: allocation_id.to_owned(),
@@ -2368,7 +2368,8 @@ async fn release_harness_agent(
             },
             Duration::from_secs(2),
         )
-        .await;
+        .await
+        .is_ok()
 }
 #[allow(clippy::too_many_arguments)]
 async fn run_plugin_turn(
@@ -2692,10 +2693,11 @@ enum HarnessResolution {
 
 /// Ask the harness which agent it would prepare for this dispatch, then
 /// release it, before the dispatch starts. The answer has the same shape as
-/// the `harnessContext` the turn receives. Read-only for `existing`
-/// ownership; a harness that creates state on prepare undoes it on release.
-/// A harness that cannot answer defers the dispatch as not ready: nothing has
-/// started. An unproven harness stop is not deferred; it fails closed.
+/// the `harnessContext` the turn receives. Not read-only: prepare may create
+/// state (`managed` ownership) and release must undo it. A harness that cannot
+/// prepare, or cannot release what it prepared, defers the dispatch as not
+/// ready with the reason, logged: nothing has started. An unproven harness
+/// stop is not deferred; it fails closed.
 async fn resolve_harness_context(
     host: &Host,
     plugin: &crate::host::PreparedPlugin,
@@ -2762,17 +2764,25 @@ async fn resolve_harness_context(
             )
             .await
             .ok();
-        if let Some(prepared) = &prepared {
-            release_harness_agent(
+        if let Some(prepared) = &prepared
+            && !release_harness_agent(
                 &mut harness,
                 &plugin.allocation_id,
                 &dispatch_id,
                 &prepared.target,
                 "readiness_probe",
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                dispatch_id = %dispatch_id,
+                target = %prepared.target,
+                ownership = ?prepared.ownership,
+                "harness did not release the agent it prepared for the readiness probe; dispatch deferred"
+            );
+            return Ok(Some(Err(())));
         }
-        Ok(prepared)
+        Ok(prepared.map(Ok))
     }
     .await;
     let _ = harness.shutdown(Duration::from_secs(2)).await;
@@ -2783,10 +2793,11 @@ async fn resolve_harness_context(
     // The harness is gone; nothing of it is retained past the probe.
     report.cleanup = Cleanup::Pending;
     match answer? {
-        Some(prepared) => Ok(HarnessResolution::Context(serde_json::json!({
+        Some(Ok(prepared)) => Ok(HarnessResolution::Context(serde_json::json!({
             "target": prepared.target,
             "ownership": prepared.ownership,
         }))),
+        Some(Err(())) => not_ready("could not release the agent prepared to resolve the target"),
         None => not_ready("could not prepare the agent to resolve the target"),
     }
 }
