@@ -365,24 +365,6 @@ fn settlement_failure(report: &mut Report, error: &hagency_store::Error) -> Fail
 /// claimed again. Long enough that a stopped provider is not polled hot.
 const PLUGIN_NOT_READY_RETRY_MS: u64 = 30_000;
 
-/// The harness template values a readiness probe reads. The probe runs before
-/// the harness prepares the agent, so it never sees the prepared
-/// `harnessContext.target`; the runtime contract reads `target` here. The
-/// reference harness names that value `reference_target` and prepares it into
-/// `target` unchanged, so expose it under `target` too when no `target` is
-/// set. Read-only probe input; the turn still uses the harness's own answer.
-fn readiness_template(
-    values: &std::collections::BTreeMap<String, serde_json::Value>,
-) -> std::collections::BTreeMap<String, serde_json::Value> {
-    let mut values = values.clone();
-    if !values.contains_key("target")
-        && let Some(target) = values.get("reference_target").cloned()
-    {
-        values.insert("target".into(), target);
-    }
-    values
-}
-
 const PLUGIN_TIMEOUTS: hagency_runtime::owned::PluginTimeouts =
     hagency_runtime::owned::PluginTimeouts {
         response: Duration::from_millis(2_000),
@@ -2814,7 +2796,7 @@ async fn probe_readiness(
     let input = serde_json::json!({
         "dispatchId": dispatch_id,
         "harnessContext": context,
-        "harnessTemplate": plugin.harness_template.as_ref().map(|template| readiness_template(&template.values)),
+        "harnessTemplate": plugin.harness_template.as_ref().map(|template| &template.values),
     });
     bounded(
         tokio::task::spawn_blocking(move || service.probe_runtime_readiness(&launch, &input)),
@@ -3642,33 +3624,9 @@ fn stop_detail(
 mod tests {
     use super::{
         Failure, Report, SettlementCause, activity_id, claude_activity, observes_completion,
-        octos_activity, readiness_template, runner_activity, settlement_failure,
+        octos_activity, runner_activity, settlement_failure,
     };
     use hagency_store::Error;
-
-    /// The readiness probe reads `harnessTemplate.target`; the reference
-    /// harness stores it as `reference_target`. An explicit `target` wins and
-    /// nothing else in the template changes.
-    #[test]
-    fn readiness_template_exposes_the_reference_target() {
-        let values = |pairs: &[(&str, &str)]| {
-            pairs
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), serde_json::json!(v)))
-                .collect::<std::collections::BTreeMap<_, _>>()
-        };
-        let reference = values(&[
-            ("reference_ownership", "existing"),
-            ("reference_target", "pane"),
-        ]);
-        let probed = readiness_template(&reference);
-        assert_eq!(probed["target"], "pane");
-        assert_eq!(probed["reference_target"], "pane");
-        assert_eq!(probed["reference_ownership"], "existing");
-        let explicit = values(&[("target", "own"), ("reference_target", "pane")]);
-        assert_eq!(readiness_template(&explicit)["target"], "own");
-        assert!(!readiness_template(&values(&[("other", "x")])).contains_key("target"));
-    }
 
     /// The runner's item events project into the activity vocabulary exactly
     /// as TS `codexActivity` (`router/src/runner-activity.ts:4-18`) maps them,
