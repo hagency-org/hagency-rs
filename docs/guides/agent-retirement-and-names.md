@@ -17,6 +17,6 @@
 
 - The console agent row shows `provision_reason` and `provision_remedy` for `awaiting_owner`, `provision_retrying` and `provision_parked`. Read the reason first.
 - `owner_not_joined`: the owner accepts the invitation to the named room. `transport_retrying`: wait, no action; retries run 5 s doubling to 5 min, at most 6. `transport_retry_exhausted`: check the Matrix/Palpo server; the service looks again after 5 minutes.
-- `owner_membership_not_provable`: the owner accepts the invitation, then the next pass proves it.
+- `owner_membership_not_provable`: the owner already joined the agent's DM before provisioning finished, or the DM is not safe to read. This state stays parked: neither the service nor a restart retries it, because the owner could have written before a new inbox cursor. Read the service log and inspect the DM. Today the only way to finish the agent is to retire it and request it again.
 - `enrollment_not_provable` or `account_not_provable`: the state cannot be proven and keys are never re-created. Retire the agent from the console only if the operator check finds no fix.
-- Resume needs no command: `provision_pass` and the restart path both use `resume_enrolled`. Never edit SQLite.
+- Resume needs no command: `provision_pass` and the restart path both use `resume_enrolled`. After a restart it resumes an owner who is only invited by the invite the rooms custody records (sent or answered), without inviting again or re-creating keys. Never edit SQLite.

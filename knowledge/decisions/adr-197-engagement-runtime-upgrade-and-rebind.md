@@ -33,8 +33,9 @@ consequences hit the operator on 2026-11-16 while bringing the Qore agent
    already keeps `revisions` per package sha. A revision that is not the active
    one remains launchable for an engagement whose frozen package names it. The
    registry keeps a reference count per (plugin_id, package_sha256) derived from
-   non-revoked engagements, and garbage-collects a non-active revision only when
-   its count reaches zero. Launching a non-active revision is allowed only for
+   non-revoked engagements (the frozen package, the rollback slot and the
+   marked upgrade target, whether `upgrade_pending`, `pinned` or `halted`), and
+   garbage-collects a non-active revision only when its count reaches zero. Launching a non-active revision is allowed only for
    the exact package an engagement is bound to; it is never offered to a new
    provisioning.
 2. **A resource runtime change marks engagements, not refuses.** A resource-level
@@ -48,7 +49,9 @@ consequences hit the operator on 2026-11-16 while bringing the Qore agent
    `framework`. The new package and role must pass the existing qualification
    check (the resource must still qualify for the engagement's role). A package
    with a different plugin, adapter or framework is not a rebind; it still needs
-   retire and reprovision.
+   retire and reprovision. The host also confirms the registry can launch the
+   target package for the engagement's framework; otherwise the rebind is
+   refused as `target_not_launchable` and nothing is frozen.
 4. **Idle boundary.** A rebind commits only in one store transaction that sees
    all of: no dispatch in `leased`, `started` or `parked`; no unresolved
    dispatch (outcome unknown, awaiting resolution); no pending outgoing custody
@@ -126,6 +129,8 @@ readiness (plugin 63ad201, 9292adf).
 - `engagement_rebind_refused_with_unresolved_dispatch`
 - `engagement_rebind_refused_with_pending_outgoing_custody`
 - `engagement_rebind_requires_same_plugin_adapter_framework_and_qualification`
+- `engagement_rebind_refuses_a_target_the_registry_cannot_launch`
+- `engagement_upgrade_target_counts_as_a_package_reference`
 - `engagement_rebind_applies_at_idle_and_keeps_identity`
 - `engagement_rollout_halts_after_failed_canary`
 - `engagement_rollback_restores_previous_package_one_step`

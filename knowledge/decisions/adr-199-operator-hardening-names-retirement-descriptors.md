@@ -115,19 +115,30 @@ Decision:
    the reason `transport_retry_exhausted`. A provision parked on a transient
    error is dropped from `self.jobs` after one cap interval so the next pass
    re-inspects it through the resume path. A parked state that is not transient
-   stays parked until an operator acts.
+   is never rechecked: neither the service nor a restart retries it, and its
+   remedy says so.
 3. **Resume proof.** `resume_enrolled` (formerly `resume_before_owner_invite`)
    accepts a rooms custody with the identity, key ledger and rooms records
    complete, whether the owner invite is absent, possibly sent (read back,
    never repeated) or answered. It still requires the account whoami to match,
    the SDK enrollment status to be `Complete`, and the owner step to prove the
    owner is invited or joined. It creates nothing, enrolls nothing and
-   re-registers nothing; the key ledger is not written. Refused and parked:
-   an invite answer without its "possible" record, a completed step without
-   invite records, an unreadable or unsafe DM snapshot (`Recipients`).
+   re-registers nothing; the key ledger is not written. After a restart the
+   recovery enrollment check accepts the owner's DM membership `invite` only
+   when the rooms custody records the owner invite, and the rooms replay takes
+   the recorded-invite branch (`invite_resumed`); the invite is never sent
+   again. Refused and parked: an invite answer without its "possible" record, a
+   completed step without invite records, an unreadable or unsafe DM snapshot,
+   and an owner who already joined the DM before the provision finished
+   (`Recipients`). A joined owner could have written before a new inbox cursor
+   is reserved, so that state stays parked; a restart does not recover it.
+   Recovering it without losing the owner's messages is a follow-up.
 4. **Named parked reasons.** Fixed codes with a remedy: `enrollment_not_provable`
    (keys are never re-created; inspect or retire), `account_not_provable`,
-   `owner_membership_not_provable` (accept the invitation to the DM room),
+   `owner_membership_not_provable` (the owner joined before the provision
+   finished, or the DM is unsafe; stays parked, no automatic retry; the
+   operator reads the log and inspects the DM; today the only way to finish
+   the agent is to retire it and request it again),
    `transport_retry_exhausted`, `provision_failed` (names the stage). Every park
    is logged once with stage, code and remedy.
 5. **Owner-visible surfacing.** The provision pass publishes each stuck
@@ -135,7 +146,9 @@ Decision:
    `provision_parked`), `provision_reason` and `provision_remedy` on the
    agent's console row. An owner who has not joined sees "accept the invitation
    to room X"; a retrying provision says no action is needed; a parked one names
-   the operator action. Status only: no decision reads it.
+   the operator action. Status only: no decision reads it. The requester is
+   not notified through the Palpo request result or Rinx: the reason and
+   remedy reach only the console agent row and the service log.
 6. **Invariants kept.** No key is re-created, no uncertain write is replayed, no
    fence is loosened, approvals are unchanged, and nothing is marked applied
    without proof. Retire stays the last resort when the reason says the state
@@ -178,11 +191,13 @@ Facts below were re-read in source, not taken from the incident notes.
    `harnessContext {target, ownership}` the turn will get. The probe input is
    `{"dispatchId", "harnessContext": {"target","ownership"} | null,
    "harnessTemplate": <frozen values> | null}`. The harness is the only
-   authority on the target. Read-only for `existing` ownership; a harness that
-   creates state on prepare must undo it on release, which is already its
-   contract. A harness that cannot prepare or release defers the dispatch as
-   not ready with the harness error as the reason (never started). No
-   key aliasing in the host.
+   authority on the target. The prepare/release pair is not read-only: for
+   `managed` ownership prepare may create state, and release must undo it,
+   which is already the harness contract. It runs before start and again on
+   every not-ready retry. A harness that cannot prepare, or cannot release what
+   it prepared, defers the dispatch as not ready with the reason (never
+   started); a failed release is logged with the dispatch id, target and
+   ownership, and the probe is not run. No key aliasing in the host.
 3. **Worker liveness (P7c).** After `Failure::RuntimeNotReady` (dispatch
    requeued with `not_before`), `run_continuous` called
    `WorkspaceAccess::release` for a capability that never registered a
@@ -216,8 +231,9 @@ Facts below were re-read in source, not taken from the incident notes.
    failed write stays pending on the report for `retry_usage`, as for the
    native runners.
 6. **Invariants kept.** Custody, fences, never-silent-redo, approvals and
-   capability secrecy are unchanged. No started dispatch is replayed. The probe
-   stays read-only and bounded. Usage is host-recorded evidence, not provider
+   capability secrecy are unchanged. No started dispatch is replayed. The readiness
+   probe command stays read-only and bounded; the harness prepare/release
+   around it is bounded and must release what it prepared (point 2). Usage is host-recorded evidence, not provider
    authenticated.
 
 ## Consequences
@@ -259,12 +275,16 @@ the `LimitNOFILE` drop-in installed by hand on the server.
 - `a_retrying_provision_tells_the_owner_it_needs_no_action`
 - `only_a_transient_park_is_rechecked_and_only_after_the_cap`
 - `native_provisioning_recovers_completed_keys_before_owner_invite` (no second enrollment, ledger untouched)
+- `native_provisioning_resumes_an_invited_owner_and_parks_a_joined_one_without_replaying_a_write`
+- `provision_retries_a_transient_failure_after_the_owner_invite_and_resumes`
+- `provision_parks_with_a_named_reason_after_the_retries_are_exhausted`
 - `build_environment_points_cargo_at_the_package_target_dir`
 - `supervised_command_reports_the_real_exit_status`
 - `failed_build_fails_install_with_a_captured_log`
 - `install_proof_fails_a_launcher_that_exits_127`
 - `install_proof_accepts_a_launcher_that_runs`
 - `native_plugin_readiness_probe_receives_the_prepared_harness_target`
+- `native_plugin_readiness_deferral_when_the_harness_cannot_release`
 - `native_plugin_readiness_deferral_when_the_harness_cannot_prepare`
 - `a_failed_attempt_that_never_registered_a_workspace_does_not_end_the_worker`
 - `a_retired_workspace_access_still_refuses_release`
