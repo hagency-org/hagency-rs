@@ -85,7 +85,7 @@ old behavior while keeping the named admission reasons.
 - `provision_resolves_template_from_matching_definition`
 - `provision_falls_back_to_resource_default_template`
 - `provision_refused_harness_template_missing_before_any_identity`
-- `provision_refused_harness_template_invalid_names_setting`
+- `provision_refused_harness_template_invalid_names_source`
 - `provision_refusal_reaches_palpo_request_result`
 - `resource_default_template_change_does_not_alter_existing_engagements`
 - `host_admission_failure_carries_named_reason`

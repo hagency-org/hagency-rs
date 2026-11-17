@@ -23,7 +23,7 @@ outcomes.
 - After approval acquire the exact revision lease and scheduler slot, then run
   once in the retained dispatch workspace under the guardian.
 - Require exactly `{content:[{type:"text",text}],isError}` within the bounded
-  response frame and return `plugin_tool_outcome_unknown` on response or cleanup
+  response frame and return `outcome_unknown` on response or cleanup
   uncertainty.
 - Denial, expiry, revocation, stale digest, or missing workspace MUST create no
   process and no marker file.

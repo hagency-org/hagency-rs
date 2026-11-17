@@ -126,7 +126,7 @@ readiness (plugin 63ad201, 9292adf).
 - `engagement_rebind_refused_with_unresolved_dispatch`
 - `engagement_rebind_refused_with_pending_outgoing_custody`
 - `engagement_rebind_requires_same_plugin_adapter_framework_and_qualification`
-- `engagement_rebind_keeps_identity_rooms_workspace_allocation_budget`
+- `engagement_rebind_applies_at_idle_and_keeps_identity`
 - `engagement_rollout_halts_after_failed_canary`
 - `engagement_rollback_restores_previous_package_one_step`
 - `engagement_pin_skips_rollout_and_holds_revision`
