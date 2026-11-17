@@ -19,6 +19,9 @@ use tokio::time::{Instant, timeout_at};
 
 pub(crate) struct Scope {
     recovering: bool,
+    /// ADR-199 P6: the rooms custody records the owner invite, so a recovery
+    /// may find the owner invited (never joined) in the agent's DM.
+    owner_invited: bool,
     effect: Effect,
     registration: Registration,
     request: ProjectRequest,
@@ -75,6 +78,7 @@ impl Scope {
         }
         Ok(Self {
             recovering: false,
+            owner_invited: false,
             effect,
             registration,
             request,
@@ -82,6 +86,11 @@ impl Scope {
     }
     pub(crate) fn for_recovery(mut self) -> Self {
         self.recovering = true;
+        self
+    }
+    /// ADR-199 P6: a recovery whose rooms custody records the owner invite.
+    pub(crate) fn with_recorded_owner_invite(mut self) -> Self {
+        self.owner_invited = true;
         self
     }
     pub(crate) async fn current(
@@ -147,9 +156,13 @@ impl Scope {
             if self.recovering
                 && matches!(target.privacy, RoomPrivacy::Direct { .. })
                 && owner_membership.is_some()
+                && !(self.owner_invited && owner_membership == Some(json!("invite")))
             {
                 // The pre-invite checkpoint must still precede the first DM.
                 // Never reserve a new cursor after the owner could have written.
+                // ADR-199 P6: an owner who is only invited, by the invite the
+                // rooms custody records, cannot have written yet; a joined
+                // owner could have, so that state stays parked.
                 return Err(Error::Recipients);
             }
             let (room, facts) = inner.room(target, value)?;

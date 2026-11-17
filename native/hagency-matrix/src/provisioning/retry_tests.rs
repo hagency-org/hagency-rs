@@ -167,7 +167,9 @@ fn a_parked_provision_names_its_reason_and_remedy() {
     assert_eq!(notes["en_b"].reason, "enrollment_not_provable");
     assert!(notes["en_b"].remedy.contains("never re-created"));
     assert_eq!(notes["en_c"].reason, "owner_membership_not_provable");
-    assert!(notes["en_c"].remedy.contains("accept the invitation"));
+    // A joined owner is not retried: the remedy must not promise a retry.
+    assert!(notes["en_c"].remedy.contains("stays parked"));
+    assert!(!notes["en_c"].remedy.contains("service retries"));
     assert!(notes.values().all(|n| n.state == "provision_parked"));
 }
 

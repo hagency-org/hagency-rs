@@ -484,6 +484,7 @@ impl TokenAccountProvision {
             context: self.context,
             token,
             representative_token: std::sync::Mutex::new(None),
+            invite_resumed: false,
             root: self.root,
             limits: self.limits,
             roots: self.roots,
@@ -551,6 +552,9 @@ pub struct ProvisionedTokenAccount {
     /// (bridge-matrix.js:10912-10918). Set once `create_agent_rooms` accepts
     /// it; never a new login.
     representative_token: std::sync::Mutex<Option<String>>,
+    /// ADR-199 P6: `resume_enrolled` proved a rooms custody that records the
+    /// owner invite, so the rooms step may replay it after a restart.
+    pub(super) invite_resumed: bool,
     root: PathBuf,
     limits: Limits,
     roots: Vec<reqwest::Certificate>,
@@ -597,7 +601,7 @@ impl ProvisionedTokenAccount {
             return Ok(());
         }
         let operation = rooms::Operation::new(self, original.clone(), representative, 1)?;
-        let (custody, rooms) = operation.inspect_for_resume().await?;
+        let (custody, rooms, owner_invited) = operation.inspect_for_resume().await?;
         let config = self
             .host_config(1, self.key, rooms)?
             .with_fresh_account_enrollment(anchors)?;
@@ -607,6 +611,11 @@ impl ProvisionedTokenAccount {
             &config,
         )?
         .for_recovery();
+        let scope = if owner_invited {
+            scope.with_recorded_owner_invite()
+        } else {
+            scope
+        };
         let collector = crate::Collector::new(config, original.domain.clone())?;
         let deadline = Instant::now() + self.limits.sdk;
         timeout_at(deadline, scope.current(&collector.inner, cancel))
@@ -639,6 +648,7 @@ impl ProvisionedTokenAccount {
             .await?;
         drop(custody);
         self.reattach = false;
+        self.invite_resumed = owner_invited;
         Ok(())
     }
     pub fn sender_mxid(&self) -> &str {

@@ -23,6 +23,8 @@ pub(super) struct Operation {
     /// A restart re-attaching rooms this custody already completed: replay the
     /// stored responses and read current state; never create, invite or join.
     reattach: bool,
+    /// ADR-199 P6: the recovery proved this custody, owner invite included.
+    invite_resumed: bool,
     request: ProjectRequest,
     binding: String,
     root: PathBuf,
@@ -100,6 +102,7 @@ impl Operation {
         Ok(Self {
             scope,
             reattach: account.reattach,
+            invite_resumed: account.invite_resumed,
             request,
             binding,
             root,
@@ -124,9 +127,10 @@ impl Operation {
     /// possibly sent (inspected, never repeated: `joined_dm` proves the owner
     /// is invited or joined) or answered. An answer without its "possible"
     /// record, or a completed step without the invite records, is not provable.
+    /// The returned flag is true when the custody records the owner invite.
     pub(super) async fn inspect_for_resume(
         &self,
-    ) -> Result<(Arc<Custody>, Vec<crate::HostRoom>), Error> {
+    ) -> Result<(Arc<Custody>, Vec<crate::HostRoom>, bool), Error> {
         hagency_store::private::open(&self.root.join("agent-rooms"), false)
             .map_err(|_| Error::Storage)?;
         let root = self.root.clone();
@@ -145,7 +149,8 @@ impl Operation {
             return Err(Error::OutcomeUnknown);
         }
         let dm = self.stored_dm(&records, AGENT_ROOMS)?;
-        Ok((custody, self.rooms(&dm)))
+        let invited = records[OWNER_INVITE_POSSIBLE].is_some();
+        Ok((custody, self.rooms(&dm), invited))
     }
     async fn writer(&self, cancel: &CancellationToken, deadline: Instant) -> Result<(), Error> {
         checkpoint(cancel, deadline)?;
@@ -531,11 +536,13 @@ impl Operation {
             && records[AGENT_ROOMS..].iter().all(Option::is_none);
         // An owner invite with no `complete` is either a wait for the owner or
         // a completed custody whose last record was lost; on disk they look
-        // the same. Only the job that observed the wait may replay it.
+        // the same. Only the job that observed the wait may replay it, or a
+        // recovery that proved this custody (ADR-199 P6).
         if !legacy
             && records[OWNER_INVITE_POSSIBLE].is_some()
             && records[COMPLETE].is_none()
             && !resuming
+            && !self.invite_resumed
         {
             return Err(Error::OutcomeUnknown);
         }

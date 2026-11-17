@@ -107,8 +107,11 @@ pub fn parked_reason(stage: &str, error: &Error) -> (&'static str, String) {
         ),
         (_, Error::Recipients) => (
             "owner_membership_not_provable",
-            "the owner's membership in the agent's DM could not be read; accept the invitation \
-             to the agent's DM room, then the service retries"
+            "the owner already joined the agent's DM before provisioning finished, or the DM is \
+             not safe to read (another member or wrong room settings); this state stays parked \
+             and neither the service nor a restart retries it. operator: read the service log for \
+             this engagement and inspect the agent's DM; today the only way to finish it is to \
+             retire the agent and request it again"
                 .into(),
         ),
         _ => (
@@ -1127,6 +1130,38 @@ impl TokenProvisioningHost {
             account.sender_mxid().to_owned(),
             account.device_id().to_owned(),
         ))
+    }
+    /// Retries scheduled, the next due time, and the parked stage, for tests.
+    #[cfg(test)]
+    pub(crate) fn observed_recovery(
+        &self,
+        engagement: &str,
+    ) -> (u32, Option<u64>, Option<&'static str>) {
+        let jobs = self.jobs.lock().unwrap();
+        let recovery = jobs
+            .get(&format!("provision_{engagement}"))
+            .unwrap()
+            .recovery
+            .lock()
+            .unwrap();
+        (
+            recovery.attempts,
+            recovery.next_ms,
+            recovery.parked.as_ref().map(|p| p.stage),
+        )
+    }
+    /// Make the scheduled retry due now without sleeping, for tests.
+    #[cfg(test)]
+    pub(crate) fn make_retry_due(&self, engagement: &str) {
+        let jobs = self.jobs.lock().unwrap();
+        let mut recovery = jobs
+            .get(&format!("provision_{engagement}"))
+            .unwrap()
+            .recovery
+            .lock()
+            .unwrap();
+        assert!(recovery.next_ms.is_some(), "no retry is scheduled");
+        recovery.next_ms = Some(0);
     }
     #[cfg(test)]
     pub(crate) fn observed_account_handle(&self, engagement: &str) -> Arc<ProvisionedTokenAccount> {
