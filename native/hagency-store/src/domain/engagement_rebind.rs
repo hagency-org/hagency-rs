@@ -36,6 +36,7 @@ pub enum RebindRefusal {
     OutgoingCustodyPending,
     PluginMismatch,
     Unqualified,
+    TargetNotLaunchable,
     NoPrevious,
 }
 impl RebindRefusal {
@@ -54,6 +55,7 @@ impl RebindRefusal {
             Self::OutgoingCustodyPending => "outgoing_custody_pending",
             Self::PluginMismatch => "plugin_mismatch",
             Self::Unqualified => "unqualified",
+            Self::TargetNotLaunchable => "target_not_launchable",
             Self::NoPrevious => "no_previous",
         }
     }
@@ -71,6 +73,11 @@ impl RebindRefusal {
         )
     }
 }
+
+/// Whether the plugin registry can still launch a package for a framework.
+/// The store cannot see the registry; the host answers, and a rebind to a
+/// package it cannot launch is refused (ADR-197).
+pub type Launchable<'a> = &'a dyn Fn(&RuntimePluginIdentity, &str) -> bool;
 
 /// One row of the append-only audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -495,6 +502,7 @@ fn rebind_in(
     actor: &str,
     now: u64,
     in_rollout: bool,
+    launchable: Launchable<'_>,
 ) -> Result<RebindResult, Error> {
     let frozen = read_frozen(tx, id)?;
     let current = frozen.runtime().cloned();
@@ -543,6 +551,13 @@ fn rebind_in(
     }
     if let Some(reason) = target_blocker(tx, &frozen, &current, &target)? {
         return refused(reason);
+    }
+    if frozen
+        .resource
+        .as_ref()
+        .is_none_or(|resource| !launchable(&target, &resource.framework))
+    {
+        return refused(RebindRefusal::TargetNotLaunchable);
     }
     set_frozen_runtime(tx, id, &target)?;
     tx.execute(
@@ -698,10 +713,11 @@ impl DomainRepository {
         engagement_id: &str,
         actor: &str,
         now: u64,
+        launchable: Launchable<'_>,
     ) -> Result<RebindResult, Error> {
         check(engagement_id, actor, now)?;
         let tx = self.immediate()?;
-        let result = rebind_in(&tx, engagement_id, actor, now, false)?;
+        let result = rebind_in(&tx, engagement_id, actor, now, false, launchable)?;
         tx.commit()?;
         Ok(result)
     }
@@ -868,10 +884,11 @@ impl DomainRepository {
         resource_id: &str,
         actor: &str,
         now: u64,
+        launchable: Launchable<'_>,
     ) -> Result<RolloutStep, Error> {
         check(resource_id, actor, now)?;
         let tx = self.immediate()?;
-        let step = rollout_step_in(&tx, resource_id, actor, now)?;
+        let step = rollout_step_in(&tx, resource_id, actor, now, launchable)?;
         tx.commit()?;
         Ok(step)
     }
@@ -1083,6 +1100,7 @@ fn rollout_step_in(
     resource_id: &str,
     actor: &str,
     now: u64,
+    launchable: Launchable<'_>,
 ) -> Result<RolloutStep, Error> {
     let mut rollout = read_rollout(tx, resource_id)?;
     let candidates = pending_rows(tx, resource_id)?;
@@ -1158,7 +1176,7 @@ fn rollout_step_in(
             });
             continue;
         }
-        let result = rebind_in(tx, &id, actor, now, true)?;
+        let result = rebind_in(tx, &id, actor, now, true, launchable)?;
         if let Some(reason) = result.refusal {
             debug_assert!(!reason.is_busy());
             blockers.push(RolloutBlocker {

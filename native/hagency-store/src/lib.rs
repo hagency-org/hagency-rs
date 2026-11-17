@@ -17,8 +17,8 @@ pub mod task_context;
 pub use domain::PrivateApprovalCard;
 pub use domain::StaleMatrixSessionReceipt;
 pub use domain::engagement_rebind::{
-    EngagementUpgradeStatus, RebindRefusal, RebindResult, RolloutBlocker, RolloutPending,
-    RolloutStatus, RolloutStep, RuntimeRebindAudit,
+    EngagementUpgradeStatus, Launchable, RebindRefusal, RebindResult, RolloutBlocker,
+    RolloutPending, RolloutStatus, RolloutStep, RuntimeRebindAudit,
 };
 pub use domain::engagement_runtime_upgrade::{EngagementRuntimeUpgrade, UpgradeState};
 pub use domain::resource_publication::{
@@ -60,7 +60,7 @@ pub use domain::{
     SessionOverrides, THREAD_DIRECTIVE_OPERATOR_REFUSAL, ThreadDirective, ThreadMode, confirmation,
     parse,
 };
-pub use domain_worker::DomainStore;
+pub use domain_worker::{DomainStore, SharedLaunchable};
 pub mod outbound;
 mod repository;
 mod shutdown;

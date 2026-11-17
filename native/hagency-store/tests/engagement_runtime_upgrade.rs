@@ -123,11 +123,15 @@ fn resource_runtime_change_marks_engagements_upgrade_pending() {
     assert_eq!(marked[0].state, UpgradeState::UpgradePending);
     assert_eq!(marked[0].target_runtime, runtime('d', 'e'));
     assert_eq!(marked[0].frozen_runtime, Some(runtime('a', 'b')));
-    // The engagement is not stopped and its frozen package is still referenced.
+    // The engagement is not stopped; its frozen package and its marked target
+    // are both referenced.
     assert_eq!(state_of(&f.db, &f.engagement), "active");
     assert_eq!(
         f.db.engagement_runtime_references().unwrap(),
-        vec![("example.runtime".to_owned(), "a".repeat(64), 1)]
+        vec![
+            ("example.runtime".to_owned(), "a".repeat(64), 1),
+            ("example.runtime".to_owned(), "d".repeat(64), 1)
+        ]
     );
     // A settings-only change of the same package marks too, and moves the target.
     let mut settings_only = changed.clone();

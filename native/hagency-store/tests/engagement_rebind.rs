@@ -51,6 +51,8 @@ fn template() -> HarnessTemplateDocument {
     template
 }
 const ACTOR: &str = "operator";
+/// The host answer for a registry that can launch every package.
+const LAUNCHABLE: fn(&RuntimePluginIdentity, &str) -> bool = |_, _| true;
 struct Fixture {
     root: tempfile::TempDir,
     db: DomainRepository,
@@ -153,7 +155,7 @@ impl Fixture {
     }
     fn rebind(&mut self, engagement: &str) -> hagency_store::RebindResult {
         self.db
-            .rebind_engagement_runtime(engagement, ACTOR, 2000)
+            .rebind_engagement_runtime(engagement, ACTOR, 2000, &LAUNCHABLE)
             .unwrap()
     }
     /// Everything that is identity, allocation or budget, with the frozen
@@ -374,12 +376,16 @@ fn engagement_rollout_halts_after_failed_canary() {
     let mut f = fixture(3);
     let ids = f.engagements.clone();
     f.mark();
-    let step = f.db.rollout_step(&f.pool.id(), ACTOR, 2000).unwrap();
+    let step =
+        f.db.rollout_step(&f.pool.id(), ACTOR, 2000, &LAUNCHABLE)
+            .unwrap();
     assert!(
         matches!(&step, RolloutStep::Rebound { engagement_id, canary: true } if *engagement_id == ids[0])
     );
     // Nothing else moves until the canary passes.
-    let step = f.db.rollout_step(&f.pool.id(), ACTOR, 2001).unwrap();
+    let step =
+        f.db.rollout_step(&f.pool.id(), ACTOR, 2001, &LAUNCHABLE)
+            .unwrap();
     assert!(
         matches!(&step, RolloutStep::AwaitingCanary { engagement_id } if *engagement_id == ids[0])
     );
@@ -389,7 +395,8 @@ fn engagement_rollout_halts_after_failed_canary() {
             .unwrap();
     assert_eq!(status.state, "halted");
     assert!(matches!(
-        f.db.rollout_step(&f.pool.id(), ACTOR, 2003).unwrap(),
+        f.db.rollout_step(&f.pool.id(), ACTOR, 2003, &LAUNCHABLE)
+            .unwrap(),
         RolloutStep::Halted
     ));
     // The rest stay pending on their old, still referenced package.
@@ -406,7 +413,8 @@ fn engagement_rollout_continues_after_canary_success() {
     let mut f = fixture(3);
     let ids = f.engagements.clone();
     f.mark();
-    f.db.rollout_step(&f.pool.id(), ACTOR, 2000).unwrap();
+    f.db.rollout_step(&f.pool.id(), ACTOR, 2000, &LAUNCHABLE)
+        .unwrap();
     // One task completes on the new package: the canary passes by itself.
     let session = f.session(&ids[0]);
     let dispatch = f.dispatch(&session, "completed");
@@ -416,16 +424,20 @@ fn engagement_rollout_continues_after_canary_success() {
             [&dispatch],
         )
         .unwrap();
-    let step = f.db.rollout_step(&f.pool.id(), ACTOR, 3000).unwrap();
+    let step =
+        f.db.rollout_step(&f.pool.id(), ACTOR, 3000, &LAUNCHABLE)
+            .unwrap();
     assert!(
         matches!(&step, RolloutStep::Rebound { engagement_id, canary: false } if *engagement_id == ids[1])
     );
     assert_eq!(f.frozen(&ids[0]), runtime('d', 'e'));
     assert_eq!(f.frozen(&ids[1]), runtime('d', 'e'));
     assert_eq!(f.frozen(&ids[2]), runtime('a', 'b'));
-    f.db.rollout_step(&f.pool.id(), ACTOR, 3001).unwrap();
+    f.db.rollout_step(&f.pool.id(), ACTOR, 3001, &LAUNCHABLE)
+        .unwrap();
     assert!(matches!(
-        f.db.rollout_step(&f.pool.id(), ACTOR, 3002).unwrap(),
+        f.db.rollout_step(&f.pool.id(), ACTOR, 3002, &LAUNCHABLE)
+            .unwrap(),
         RolloutStep::Complete
     ));
     assert!(f.db.engagement_runtime_upgrades(None).unwrap().is_empty());
@@ -438,7 +450,9 @@ fn engagement_rollout_skips_busy_engagement_and_retries_later() {
     f.mark();
     let session = f.session(&ids[0]);
     f.dispatch(&session, "started");
-    let step = f.db.rollout_step(&f.pool.id(), ACTOR, 2000).unwrap();
+    let step =
+        f.db.rollout_step(&f.pool.id(), ACTOR, 2000, &LAUNCHABLE)
+            .unwrap();
     assert!(
         matches!(&step, RolloutStep::Rebound { engagement_id, canary: true } if *engagement_id == ids[1])
     );
@@ -494,14 +508,17 @@ fn engagement_pin_skips_rollout_and_holds_revision() {
     );
     assert_eq!(refusal(&f.rebind(&ids[0])), Some(RebindRefusal::Pinned));
     // The rollout takes the other one as canary and never the pinned one.
-    let step = f.db.rollout_step(&f.pool.id(), ACTOR, 2000).unwrap();
+    let step =
+        f.db.rollout_step(&f.pool.id(), ACTOR, 2000, &LAUNCHABLE)
+            .unwrap();
     assert!(
         matches!(&step, RolloutStep::Rebound { engagement_id, .. } if *engagement_id == ids[1])
     );
     f.db.record_canary_result(&f.pool.id(), true, ACTOR, None, 2001)
         .unwrap();
     assert!(matches!(
-        f.db.rollout_step(&f.pool.id(), ACTOR, 2002).unwrap(),
+        f.db.rollout_step(&f.pool.id(), ACTOR, 2002, &LAUNCHABLE)
+            .unwrap(),
         RolloutStep::Complete
     ));
     assert_eq!(f.frozen(&ids[0]), runtime('a', 'b'));
@@ -517,4 +534,40 @@ fn engagement_pin_skips_rollout_and_holds_revision() {
     let audit = f.db.engagement_runtime_rebinds(Some(&ids[0]), 10).unwrap();
     let actions: Vec<&str> = audit.iter().map(|a| a.action.as_str()).collect();
     assert_eq!(actions, ["rebind", "unpin", "rebind", "pin"]);
+}
+
+#[test]
+fn engagement_upgrade_target_counts_as_a_package_reference() {
+    let mut f = fixture(1);
+    f.mark();
+    // The marked target is referenced before any rebind, so the registry does
+    // not collect it while the engagement waits to be rebound.
+    assert_eq!(
+        f.db.engagement_runtime_references().unwrap(),
+        vec![
+            ("example.runtime".to_owned(), "a".repeat(64), 1),
+            ("example.runtime".to_owned(), "d".repeat(64), 1)
+        ]
+    );
+}
+
+#[test]
+fn engagement_rebind_refuses_a_target_the_registry_cannot_launch() {
+    let mut f = fixture(1);
+    let id = f.engagements[0].clone();
+    f.mark();
+    let result =
+        f.db.rebind_engagement_runtime(&id, ACTOR, 2000, &|target, framework| {
+            assert_eq!((target, framework), (&runtime('d', 'e'), "herdr"));
+            false
+        })
+        .unwrap();
+    assert_eq!(refusal(&result), Some(RebindRefusal::TargetNotLaunchable));
+    assert_eq!(result.audit.outcome, "refused:target_not_launchable");
+    // Nothing changed: still frozen on the old package and still pending.
+    assert_eq!(f.frozen(&id), runtime('a', 'b'));
+    assert_eq!(
+        f.db.engagement_runtime_upgrades(None).unwrap()[0].state,
+        UpgradeState::UpgradePending
+    );
 }

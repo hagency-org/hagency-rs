@@ -155,8 +155,9 @@ impl DomainRepository {
     }
 
     /// `(plugin_id, package_sha256, live engagements)` for the runtime package
-    /// frozen in the provision effect of every live engagement. The plugin
-    /// registry keeps these revisions launchable and never collects them.
+    /// frozen in the provision effect of every live engagement, its rollback
+    /// slot, and its marked upgrade target (pending, pinned or halted). The
+    /// plugin registry keeps these revisions launchable and never collects them.
     pub fn engagement_runtime_references(&self) -> Result<Vec<(String, String, u32)>, Error> {
         let mut statement = self.db.prepare(&format!(
             "SELECT plugin_id,package_sha256,SUM(n) FROM (\
@@ -168,7 +169,12 @@ impl DomainRepository {
              UNION ALL \
              SELECT json_extract(r.previous_runtime,'$.pluginId'),json_extract(r.previous_runtime,'$.packageSha256'),COUNT(*) \
              FROM engagement_runtime_rollbacks r JOIN engagements e ON e.id=r.engagement_id \
-             WHERE e.state IN {LIVE} GROUP BY 1,2) \
+             WHERE e.state IN {LIVE} GROUP BY 1,2 \
+             UNION ALL \
+             SELECT json_extract(u.target_runtime,'$.pluginId'),json_extract(u.target_runtime,'$.packageSha256'),COUNT(*) \
+             FROM engagement_runtime_upgrades u JOIN engagements e ON e.id=u.engagement_id \
+             WHERE e.state IN {LIVE} AND json_extract(u.target_runtime,'$.packageSha256') IS NOT NULL \
+             GROUP BY 1,2) \
              GROUP BY 1,2 ORDER BY 1,2"
         ))?;
         let rows = statement

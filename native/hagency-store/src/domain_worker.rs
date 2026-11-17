@@ -38,6 +38,11 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 pub(crate) mod clock_fixtures;
 
 type Operation = Box<dyn FnOnce(&mut DomainRepository) + Send>;
+/// ADR-197: the host's answer to "can the registry launch this package for
+/// this framework", carried into the store worker for a rebind.
+pub type SharedLaunchable = std::sync::Arc<
+    dyn Fn(&hagency_core::project::RuntimePluginIdentity, &str) -> bool + Send + Sync,
+>;
 enum ReceiverPolicy {
     CancelIfDropped,
     RetainEnqueuedInvalidation,
@@ -3512,9 +3517,10 @@ impl DomainStore {
         engagement_id: String,
         actor: String,
         now: u64,
+        launchable: SharedLaunchable,
     ) -> Result<crate::RebindResult, Error> {
         self.call(1, move |db| {
-            db.rebind_engagement_runtime(&engagement_id, &actor, now)
+            db.rebind_engagement_runtime(&engagement_id, &actor, now, &*launchable)
         })
         .await
     }
@@ -3575,9 +3581,12 @@ impl DomainStore {
         resource_id: String,
         actor: String,
         now: u64,
+        launchable: SharedLaunchable,
     ) -> Result<crate::RolloutStep, Error> {
-        self.call(1, move |db| db.rollout_step(&resource_id, &actor, now))
-            .await
+        self.call(1, move |db| {
+            db.rollout_step(&resource_id, &actor, now, &*launchable)
+        })
+        .await
     }
     pub async fn record_canary_result(
         &self,

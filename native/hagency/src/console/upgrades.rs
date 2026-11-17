@@ -35,6 +35,30 @@ fn now() -> u64 {
         .unwrap_or_default()
 }
 
+/// ADR-197: a rebind only freezes a package the plugin registry can launch
+/// for the engagement's framework. No plugin service launches nothing.
+fn launchable(depot: &Depot) -> hagency_store::SharedLaunchable {
+    let plugins = depot
+        .get_typed::<crate::App>()
+        .ok()
+        .and_then(crate::App::plugins);
+    std::sync::Arc::new(move |target, framework| {
+        plugins.as_ref().is_some_and(|plugins| {
+            plugins
+                .runtime_launch(
+                    &hagency_plugin::RuntimePluginRef {
+                        plugin_id: target.plugin_id.clone(),
+                        adapter_id: target.adapter_id.clone(),
+                        package_sha256: target.package_sha256.clone(),
+                        settings_sha256: target.settings_sha256.clone(),
+                    },
+                    framework,
+                )
+                .is_ok()
+        })
+    })
+}
+
 fn store_error(res: &mut Response, error: hagency_store::Error) {
     let (status, code) = match error {
         hagency_store::Error::State => (StatusCode::CONFLICT, "upgrade_state_conflict"),
@@ -62,6 +86,7 @@ fn explain(word: &str) -> &'static str {
         "outgoing_custody_pending" => "an outgoing message is still pending",
         "plugin_mismatch" => "the target is a different plugin or adapter",
         "unqualified" => "the target package is not qualified for this agent",
+        "target_not_launchable" => "the target package is not installed or cannot be launched",
         "no_previous" => "there is no previous package to roll back to",
         _ => "the upgrade was refused",
     }
@@ -148,7 +173,7 @@ async fn rebind(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         return;
     };
     let result = store
-        .rebind_engagement_runtime(id, ACTOR.into(), now())
+        .rebind_engagement_runtime(id, ACTOR.into(), now(), launchable(depot))
         .await;
     rebound(depot, res, result);
 }
@@ -225,7 +250,9 @@ async fn rollout_step(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let Some(store) = domain(depot, res) else {
         return;
     };
-    let result = store.rollout_step(id, ACTOR.into(), now()).await;
+    let result = store
+        .rollout_step(id, ACTOR.into(), now(), launchable(depot))
+        .await;
     settled(depot, res, result);
 }
 
