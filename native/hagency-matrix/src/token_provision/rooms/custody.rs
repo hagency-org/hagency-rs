@@ -24,6 +24,9 @@ pub(super) const STAGES: &[&str] = &[
     "agent-rooms",
     "owner-invite-possible",
     "owner-invite-response",
+    // A project join the server refused (403) and that was sent again once the
+    // refusal's cause was removed. Written only for a successful join.
+    "join-retry-response",
 ];
 const PLAIN: usize = 32 * 1024;
 const ENVELOPE: usize = 256 * 1024;

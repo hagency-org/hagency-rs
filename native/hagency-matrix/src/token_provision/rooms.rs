@@ -507,8 +507,17 @@ impl Operation {
             serde_json::from_value(records[3].clone().ok_or(Error::Storage)?)
                 .map_err(|_| Error::Storage)?;
         let joined: SavedResponse =
-            serde_json::from_value(records[5].clone().ok_or(Error::Storage)?)
+            serde_json::from_value(records[JOIN_RESPONSE].clone().ok_or(Error::Storage)?)
                 .map_err(|_| Error::Storage)?;
+        // A refused join is complete only with its successful retry; a
+        // successful join never has one.
+        let joined = match (&records[JOIN_RETRY_RESPONSE], joined.status) {
+            (None, _) => joined,
+            (Some(retried), 403) => {
+                serde_json::from_value(retried.clone()).map_err(|_| Error::Storage)?
+            }
+            (Some(_), _) => return Err(Error::Storage),
+        };
         let dm = self.dm_id(&created)?;
         if success(&invited)?.as_object().is_none_or(|v| !v.is_empty())
             || success(&joined)?.get("room_id").and_then(Value::as_str)
@@ -518,6 +527,88 @@ impl Operation {
         {
             return Err(Error::Storage);
         }
+        Ok(dm)
+    }
+    /// A project join the server refused with 403 (`refused_join`), resumed once
+    /// the refusal's cause is gone, e.g. a room the homeserver had disabled.
+    /// The DM and the invite are proven from custody and never repeated; only
+    /// the join is sent again, and only while the agent is still invited (or
+    /// already joined): a Matrix join of an invited user is idempotent and the
+    /// refusal changed nothing on the server. Only a successful join is
+    /// recorded, write-once; another refusal leaves the custody as it was.
+    async fn retry_refused_join(
+        &self,
+        custody: &Arc<Custody>,
+        records: &[Option<Value>],
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<String, Error> {
+        for index in [0, 2, 4] {
+            if records[index].as_ref().is_none_or(|v| !v.is_null()) {
+                return Err(Error::Storage);
+            }
+        }
+        let created: SavedResponse =
+            serde_json::from_value(records[1].clone().ok_or(Error::Storage)?)
+                .map_err(|_| Error::Storage)?;
+        let invited: SavedResponse =
+            serde_json::from_value(records[3].clone().ok_or(Error::Storage)?)
+                .map_err(|_| Error::Storage)?;
+        let dm = self.dm_id(&created)?;
+        if success(&invited)?.as_object().is_none_or(|v| !v.is_empty()) {
+            return Err(Error::Storage);
+        }
+        let target = Some(self.request.target_room_id.as_str());
+        if let Some(retried) = &records[JOIN_RETRY_RESPONSE] {
+            // The retry succeeded and `agent-rooms` was not written yet.
+            let retried: SavedResponse =
+                serde_json::from_value(retried.clone()).map_err(|_| Error::Storage)?;
+            if success(&retried)?.get("room_id").and_then(Value::as_str) != target {
+                return Err(Error::Storage);
+            }
+            return Ok(dm);
+        }
+        let project = self.project(cancel, deadline).await?;
+        if !self.member(&project, "invite") && !self.member(&project, "join") {
+            return Err(Error::Recipients);
+        }
+        self.agent_current(cancel, deadline).await?;
+        let response = self
+            .post(
+                &self.agent_write,
+                &[
+                    "_matrix",
+                    "client",
+                    "v3",
+                    "join",
+                    &self.request.target_room_id,
+                ],
+                json!({}),
+                cancel,
+                deadline,
+            )
+            .await?;
+        if response.status != 200 {
+            eprintln!(
+                "provision project join retry refused: effect={} room={} {}",
+                self.scope.effect.id,
+                self.request.target_room_id,
+                refusal(&response)
+            );
+        }
+        if success(&response)?.get("room_id").and_then(Value::as_str) != target {
+            return Err(Error::Identity);
+        }
+        write(
+            custody,
+            "join-retry-response",
+            serde_json::to_value(&response).map_err(|_| Error::Storage)?,
+        )
+        .await?;
+        eprintln!(
+            "provision project join retried: effect={} room={}",
+            self.scope.effect.id, self.request.target_room_id
+        );
         Ok(dm)
     }
     /// ADR-184 step 1-2: the agent-only DM and the project join. The owner is
@@ -558,6 +649,12 @@ impl Operation {
             self.stored_dm(records, COMPLETE)?
         } else if records[..6].iter().all(Option::is_some) && records[AGENT_ROOMS].is_some() {
             self.stored_dm(records, AGENT_ROOMS)?
+        } else if refused_join(records) {
+            if self.reattach {
+                return Err(Error::Storage);
+            }
+            self.retry_refused_join(&custody, records, cancel, deadline)
+                .await?
         } else {
             if records.iter().any(Option::is_some) {
                 return Err(Error::OutcomeUnknown);
@@ -621,6 +718,14 @@ impl Operation {
                 serde_json::to_value(&response).map_err(|_| Error::Storage)?,
             )
             .await?;
+            if response.status != 200 {
+                eprintln!(
+                    "provision project invite refused: effect={} room={} {}",
+                    self.scope.effect.id,
+                    self.request.target_room_id,
+                    refusal(&response)
+                );
+            }
             // The refusal path (:14466-14482): classify, name the project remedy
             // when the read ESTABLISHED too little power, then refuse exactly as
             // `success()` would have.
@@ -658,6 +763,14 @@ impl Operation {
                 serde_json::to_value(&response).map_err(|_| Error::Storage)?,
             )
             .await?;
+            if response.status != 200 {
+                eprintln!(
+                    "provision project join refused: effect={} room={} {}",
+                    self.scope.effect.id,
+                    self.request.target_room_id,
+                    refusal(&response)
+                );
+            }
             if success(&response)?.get("room_id").and_then(Value::as_str)
                 != Some(self.request.target_room_id.as_str())
             {
@@ -864,6 +977,39 @@ const COMPLETE: usize = 6;
 const AGENT_ROOMS: usize = 7;
 const OWNER_INVITE_POSSIBLE: usize = 8;
 const OWNER_INVITE_RESPONSE: usize = 9;
+const JOIN_RESPONSE: usize = 5;
+const JOIN_RETRY_RESPONSE: usize = 10;
+/// A project join the server answered with 403 before any later stage was
+/// recorded: the server refused it, so nothing was joined, and the DM and the
+/// invite before it are recorded as answered. Pure over the stored records.
+pub(super) fn refused_join(records: &[Option<Value>]) -> bool {
+    records[..=JOIN_RESPONSE].iter().all(Option::is_some)
+        && records[COMPLETE..JOIN_RETRY_RESPONSE]
+            .iter()
+            .all(Option::is_none)
+        && records[JOIN_RESPONSE]
+            .clone()
+            .and_then(|v| serde_json::from_value::<SavedResponse>(v).ok())
+            .is_some_and(|r| r.status == 403)
+}
+/// The Matrix refusal of a write, for the log: status, `errcode` and `error`,
+/// bounded and stripped of control characters. Never a credential.
+fn refusal(response: &SavedResponse) -> String {
+    let field = |key: &str| {
+        response
+            .value
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_str)
+            .map(|s| s.chars().filter(|c| !c.is_control()).take(160).collect())
+            .unwrap_or_default()
+    };
+    let (errcode, error): (String, String) = (field("errcode"), field("error"));
+    format!(
+        "status={} errcode={errcode:?} error={error:?}",
+        response.status
+    )
+}
 #[derive(Default)]
 pub(super) struct Jobs(Mutex<Option<Arc<Job>>>);
 struct Job {
@@ -1067,9 +1213,58 @@ async fn write(custody: &Arc<Custody>, stage: &'static str, value: Value) -> Res
 mod resume_tests {
     use super::*;
     fn records(present: &[usize]) -> Vec<Option<Value>> {
-        (0..10)
+        (0..custody::STAGES.len())
             .map(|i| present.contains(&i).then_some(Value::Null))
             .collect()
+    }
+    fn refused(status: u16) -> Vec<Option<Value>> {
+        let mut r = records(&[0, 1, 2, 3, 4, JOIN_RESPONSE]);
+        r[JOIN_RESPONSE] = Some(json!({"status": status, "value": {"errcode": "M_FORBIDDEN"}}));
+        r
+    }
+    #[test]
+    fn refused_join_is_only_a_403_before_any_later_stage() {
+        assert!(refused_join(&refused(403)));
+        // A retry already recorded is still the same refused-join custody.
+        let mut r = refused(403);
+        r[JOIN_RETRY_RESPONSE] = Some(Value::Null);
+        assert!(refused_join(&r));
+        // Not a refusal: an answered join, a credential failure, a server error.
+        assert!(!refused_join(&refused(200)));
+        assert!(!refused_join(&refused(401)));
+        assert!(!refused_join(&refused(500)));
+        // A join with no recorded answer may have crossed the wire.
+        let mut r = refused(403);
+        r[JOIN_RESPONSE] = None;
+        assert!(!refused_join(&r));
+        // Any later stage means the join is not where the custody stopped.
+        for later in [
+            COMPLETE,
+            AGENT_ROOMS,
+            OWNER_INVITE_POSSIBLE,
+            OWNER_INVITE_RESPONSE,
+        ] {
+            let mut r = refused(403);
+            r[later] = Some(Value::Null);
+            assert!(!refused_join(&r));
+        }
+        // An unreadable stored answer is never a refusal.
+        let mut r = refused(403);
+        r[JOIN_RESPONSE] = Some(json!({"status": 403, "extra": 1}));
+        assert!(!refused_join(&r));
+    }
+    #[test]
+    fn refusal_names_the_matrix_error_without_control_characters() {
+        let response = SavedResponse {
+            status: 403,
+            value: Some(
+                json!({"errcode": "M_FORBIDDEN", "error": "This room is banned\non this homeserver."}),
+            ),
+        };
+        assert_eq!(
+            refusal(&response),
+            "status=403 errcode=\"M_FORBIDDEN\" error=\"This room is bannedon this homeserver.\""
+        );
     }
     const BASE: [usize; 7] = [0, 1, 2, 3, 4, 5, AGENT_ROOMS];
     #[test]
