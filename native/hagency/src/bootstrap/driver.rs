@@ -517,10 +517,11 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
                 } else {
                     input.status.refresh_refused();
                 }
-                tracing::warn!(
+                warn_retry(
+                    &engagement,
                     parked,
-                    retry_in_ms = refresh_backoff.as_millis() as u64,
-                    "Matrix refresh refused; the worker retries"
+                    input.status.matrix_error(),
+                    refresh_backoff,
                 );
                 tokio::select! {
                     _ = input.cancel.cancelled() => return Ok(None),
@@ -683,6 +684,28 @@ async fn run_continuous(input: Attempt<'_>) -> Result<Option<Box<Report>>, Failu
 const LAUNCH_RETRY_MS: u64 = 5_000;
 const LAUNCH_RETRY: Duration = Duration::from_millis(LAUNCH_RETRY_MS);
 
+/// One refusal line: the engagement and the error, so a looping worker is
+/// attributable from the log alone.
+pub(super) fn warn_refused(engagement: &str, what: &'static str, error: &hagency_matrix::Error) {
+    tracing::warn!(%engagement, ?error, "{what}");
+}
+/// The line before a refused refresh's backoff: the engagement, whether the
+/// worker is parked, and the refusal's class.
+pub(super) fn warn_retry(
+    engagement: &str,
+    parked: bool,
+    reason: Option<&str>,
+    backoff: std::time::Duration,
+) {
+    tracing::warn!(
+        %engagement,
+        parked,
+        ?reason,
+        retry_in_ms = backoff.as_millis() as u64,
+        "Matrix refresh refused; the worker retries"
+    );
+}
+
 /// Execute this engagement's retirement effect, if one is claimable, and say
 /// whether the worker must now stop. This is the ONE production executor of the
 /// `retire` effect (TS `lib/matrix-work-executor.js:13-49`): the console route
@@ -834,6 +857,7 @@ async fn run(input: Attempt<'_>) -> Result<Option<Completed>, Failure> {
         runner,
     } = input;
     status.begin_attempt();
+    let engagement = profile.engagement_id().to_owned();
     let refresh = collector.collect(cancel).await;
     // Fresh collect initializes the SDK. Failed refresh may only recover an old
     // protected receipt; it can never turn historical success into readiness.
@@ -868,7 +892,7 @@ async fn run(input: Attempt<'_>) -> Result<Option<Completed>, Failure> {
     }
     refresh.map_err(|e| {
         status.matrix_refusal(&e);
-        tracing::warn!(error = ?e, "Matrix refresh refused");
+        warn_refused(&engagement, "Matrix refresh refused", &e);
         if matches!(e, hagency_matrix::Error::OutcomeUnknown) {
             Failure::OutcomeUnknown
         } else {
@@ -884,7 +908,7 @@ async fn run(input: Attempt<'_>) -> Result<Option<Completed>, Failure> {
             .await
             .map_err(|error| {
                 status.matrix_refusal(&error);
-                tracing::warn!(error = ?error, "Matrix crypto enrollment refused");
+                warn_refused(&engagement, "Matrix crypto enrollment refused", &error);
                 if error == hagency_matrix::Error::OutcomeUnknown {
                     Failure::OutcomeUnknown
                 } else {
@@ -901,7 +925,7 @@ async fn run(input: Attempt<'_>) -> Result<Option<Completed>, Failure> {
     let (profile, intake_sessions, agent_inboxes) = if let RuntimeOwner::Factory(agent) = &*owner {
         let (profile, inboxes) = agent.inboxes(profile).await.map_err(|error| {
             status.matrix_refusal(&error);
-            tracing::warn!(error=?error,"factory inbox observation refused");
+            warn_refused(&engagement, "factory inbox observation refused", &error);
             Failure::Refresh
         })?;
         let mut sessions: Vec<String> = inboxes
