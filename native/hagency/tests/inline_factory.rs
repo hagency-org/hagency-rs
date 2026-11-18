@@ -778,6 +778,60 @@ async fn native_reattach_after_a_dm_generation_advance() {
     agent.close().await.unwrap();
     f.close().await;
 }
+/// ADR-200: a restart seeds a retired DM at generation + 1, but the seed still
+/// goes through the validator. When the owner has left the DM the validator
+/// refuses it: the room stays unavailable and the agent has no route.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn native_reattach_keeps_an_owner_left_dm_retired() {
+    let mut f = Fixture::new(false).await;
+    f.provision().await;
+    let id = f.engagement();
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    agent.close().await.unwrap();
+    f.base
+        .store
+        .invalidate_matrix_room(hagency_core::replies::MatrixRoomInvalidation {
+            engagement_id: id.clone(),
+            registration_generation: 1,
+            transport_generation: 1,
+            room_id: DM.into(),
+            generation: 2,
+            reason: hagency_core::replies::OBSERVATION_FAILED.into(),
+        })
+        .await
+        .unwrap();
+    let mut f = f.restart().await;
+    f.peer.owner = false;
+    f.peer.owner_left = true;
+    let outcome = {
+        let cancel = CancellationToken::new();
+        let reattach = f.collector.reattach_provisioned_agent(&id, &cancel);
+        tokio::pin!(reattach);
+        loop {
+            tokio::select! {
+                result = &mut reattach => break result,
+                request = f.fake.next() => f.peer.respond(request, &f.base).await,
+            }
+        }
+    };
+    let state = f
+        .base
+        .store
+        .matrix_room_state(id.clone(), DM.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!state.available, "{outcome:?}");
+    assert_eq!(state.generation, 2);
+    if outcome.is_ok() {
+        let agent = f.collector.take_provisioned_agent(&id).unwrap();
+        let profile = agent.claim_profile().await.unwrap();
+        assert!(agent.inboxes(profile).await.is_err());
+        agent.close().await.unwrap();
+    }
+    f.close().await;
+}
 /// ADR-200: a running agent whose DM scope was retired by a failed read
 /// recovers on its next collect, and `inboxes()` names the new DM session
 /// without a restart.
