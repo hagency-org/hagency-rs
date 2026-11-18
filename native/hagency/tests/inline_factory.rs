@@ -778,6 +778,124 @@ async fn native_reattach_after_a_dm_generation_advance() {
     agent.close().await.unwrap();
     f.close().await;
 }
+/// ADR-200: a running agent whose DM scope was retired by a failed read
+/// recovers on its next collect, and `inboxes()` names the new DM session
+/// without a restart.
+#[tokio::test]
+async fn native_running_agent_follows_a_dm_generation_advance() {
+    let mut f = Fixture::new(false).await;
+    f.provision().await;
+    let id = f.engagement();
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    let profile = agent.claim_profile().await.unwrap();
+    let (profile, inboxes) = agent.inboxes(profile).await.unwrap();
+    assert_eq!(inboxes[0].session_id, format!("session_{id}"));
+    f.base
+        .store
+        .invalidate_matrix_room(hagency_core::replies::MatrixRoomInvalidation {
+            engagement_id: id.clone(),
+            registration_generation: 1,
+            transport_generation: 1,
+            room_id: DM.into(),
+            generation: 2,
+            reason: hagency_core::replies::OBSERVATION_FAILED.into(),
+        })
+        .await
+        .unwrap();
+    {
+        let cancel = CancellationToken::new();
+        let collect = agent.collector().collect(&cancel);
+        tokio::pin!(collect);
+        loop {
+            tokio::select! {
+                result = &mut collect => { result.unwrap(); break; },
+                request = f.fake.next() => f.peer.respond(request, &f.base).await,
+            }
+        }
+    }
+    let state = f
+        .base
+        .store
+        .matrix_room_state(id.clone(), DM.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.available);
+    assert_eq!(state.generation, 3);
+    let (_, inboxes) = agent.inboxes(profile).await.unwrap();
+    assert_eq!(inboxes[0].session_id, format!("session_{id}_1_3"));
+    agent.close().await.unwrap();
+    f.close().await;
+}
+/// ADR-200: a shared project room whose generation advanced while the agent
+/// was away re-attaches to a current `project_{eng}_{tgen}_{rgen}` route.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn native_reattach_after_a_project_generation_advance() {
+    let mut f = Fixture::new(false).await;
+    f.provision().await;
+    let id = f.engagement();
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    let profile = agent.claim_profile().await.unwrap();
+    let (profile, before) = agent.inboxes(profile).await.unwrap();
+    drop(profile);
+    let first = f
+        .base
+        .store
+        .matrix_room_state(id.clone(), PROJECT.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        before
+            .iter()
+            .any(|i| i.session_id == format!("project_{id}_1_{}", first.generation))
+    );
+    agent.close().await.unwrap();
+    f.base
+        .store
+        .invalidate_matrix_room(hagency_core::replies::MatrixRoomInvalidation {
+            engagement_id: id.clone(),
+            registration_generation: 1,
+            transport_generation: 1,
+            room_id: PROJECT.into(),
+            generation: first.generation + 1,
+            reason: hagency_core::replies::OBSERVATION_FAILED.into(),
+        })
+        .await
+        .unwrap();
+    let mut f = f.restart().await;
+    {
+        let cancel = CancellationToken::new();
+        let reattach = f.collector.reattach_provisioned_agent(&id, &cancel);
+        tokio::pin!(reattach);
+        loop {
+            tokio::select! {
+                result = &mut reattach => { result.unwrap(); break; },
+                request = f.fake.next() => f.peer.respond(request, &f.base).await,
+            }
+        }
+    }
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    let state = f
+        .base
+        .store
+        .matrix_room_state(id.clone(), PROJECT.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.available);
+    assert!(state.generation > first.generation, "{}", state.generation);
+    let profile = agent.claim_profile().await.unwrap();
+    let (_, inboxes) = agent.inboxes(profile).await.unwrap();
+    let project = format!("project_{id}_1_{}", state.generation);
+    assert!(
+        inboxes.iter().any(|i| i.session_id == project),
+        "{inboxes:?}"
+    );
+    agent.close().await.unwrap();
+    f.close().await;
+}
 #[tokio::test]
 async fn native_provisioning_factory_first_dispatch() {
     for application_service in [false, true] {
