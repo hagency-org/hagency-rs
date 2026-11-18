@@ -2388,6 +2388,16 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn refresh_matrix_direct_room(
+        &self,
+        input: MatrixRoomObservation,
+        expected: Option<MatrixRoomState>,
+    ) -> Result<MatrixRoomObservation, Error> {
+        self.call(weight(&(&input, &expected))?, move |db| {
+            db.refresh_matrix_direct_room(&input, expected.as_ref(), writer_time()?)
+        })
+        .await
+    }
     pub async fn invalidate_matrix_room(&self, input: MatrixRoomInvalidation) -> Result<(), Error> {
         let bytes = weight(&input)?;
         self.call_with_policy(
