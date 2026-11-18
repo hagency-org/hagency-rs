@@ -43,7 +43,7 @@ A room retired because the owner left, the snapshot is unsafe, the privacy setti
 
 ## Consequences
 
-- Good: a lagging agent heals on its next collector pass, with no restart and no data rewrite. Every refusal names its engagement.
+- Good: a lagging agent heals on its next collector pass, with no restart and no data rewrite. Every refusal names its engagement. A refused refresh in a running worker logs two lines on purpose: `Matrix refresh refused` carries the error, and `Matrix refresh refused; the worker retries` carries the park state, the error class and the backoff.
 - Bad: the store has one more entry point, `refresh_matrix_direct_room`. After a restart, a DM retired for any reason is still re-observed at generation + 1, as before. A DM's session id now changes when its room generation does, so readers must not assume `session_{eng}` is current.
 
 ## Alternatives considered
