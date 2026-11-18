@@ -646,9 +646,15 @@ impl Operation {
         }
         let dm = if legacy {
             // Pre-ADR-184 custody: `complete` already includes the owner.
-            self.stored_dm(records, COMPLETE)?
+            let dm = self.stored_dm(records, COMPLETE)?;
+            job.rooms_replayed
+                .store(true, std::sync::atomic::Ordering::Release);
+            dm
         } else if records[..6].iter().all(Option::is_some) && records[AGENT_ROOMS].is_some() {
-            self.stored_dm(records, AGENT_ROOMS)?
+            let dm = self.stored_dm(records, AGENT_ROOMS)?;
+            job.rooms_replayed
+                .store(true, std::sync::atomic::Ordering::Release);
+            dm
         } else if refused_join(records) {
             if self.reattach {
                 return Err(Error::Storage);
@@ -1024,6 +1030,9 @@ struct Job {
     /// ADR-199 P6: the owner invite is proven sent or inspected, so everything
     /// after it only reads or replays and a transient failure may be retried.
     invite_proven: std::sync::atomic::AtomicBool,
+    /// The rooms phase replayed a completed rooms custody: it only reads
+    /// back state, so a transient failure there may be retried.
+    rooms_replayed: std::sync::atomic::AtomicBool,
     /// The last owner step ended in a retryable transient failure.
     transient: std::sync::atomic::AtomicBool,
 }
@@ -1108,6 +1117,7 @@ impl Jobs {
                     dm: Mutex::new(None),
                     awaiting: std::sync::atomic::AtomicBool::new(false),
                     invite_proven: std::sync::atomic::AtomicBool::new(false),
+                    rooms_replayed: std::sync::atomic::AtomicBool::new(false),
                     transient: std::sync::atomic::AtomicBool::new(false),
                 });
                 *guard = Some(job.clone());
@@ -1137,10 +1147,16 @@ impl Jobs {
             .unwrap_or(Err(Error::Timeout));
             // ADR-199 P6: a transient failure after the owner invite is proven
             // only read or replayed state, so it is neither observed unknown
-            // nor cached as final; the owner step resumes like a wait.
-            let retryable = phase == Phase::Owner
-                && job.invite_proven.load(std::sync::atomic::Ordering::Acquire)
-                && result.as_ref().err().is_some_and(Error::is_transient);
+            // nor cached as final; the owner step resumes like a wait. The
+            // same holds for the rooms phase replaying a completed custody:
+            // it creates, invites and joins nothing.
+            let read_only = match phase {
+                Phase::Owner => job.invite_proven.load(std::sync::atomic::Ordering::Acquire),
+                Phase::Rooms => job
+                    .rooms_replayed
+                    .load(std::sync::atomic::Ordering::Acquire),
+            };
+            let retryable = read_only && result.as_ref().err().is_some_and(Error::is_transient);
             job.transient
                 .store(retryable, std::sync::atomic::Ordering::Release);
             if let Err(error) = &result
