@@ -21,6 +21,8 @@ struct Server {
     /// ADR-184: the agent invited the owner to its DM (after enrollment).
     owner_invited: bool,
     inbox_cursor_reserved: bool,
+    /// The owner sent a message in the agent's DM after joining it.
+    owner_wrote: bool,
     posts: usize,
     owner_reads: usize,
     as_created: bool,
@@ -52,6 +54,7 @@ impl Server {
             owner: false,
             owner_invited: false,
             inbox_cursor_reserved: false,
+            owner_wrote: false,
             posts: 0,
             owner_reads: 0,
             as_created: false,
@@ -202,6 +205,30 @@ impl Server {
                     json!({"user_id":self.user,"device_id":self.device,"is_guest":false})
                 },
             );
+        }
+        if url.path().ends_with("/messages") {
+            // The DM's history, newest first, as a backward `/messages` page
+            // reaching the room's creation: clear senders, never decrypted.
+            assert!(!human && !rep && request.method == "GET");
+            assert!(request.target.contains("physically_created_agent_dm"));
+            let mut chunk = vec![];
+            if self.owner_wrote {
+                chunk.push(json!({"type":"m.room.encrypted","sender":OWNER,"content":{}}));
+            }
+            if self.owner_invited {
+                chunk.push(json!({"type":"m.room.member","state_key":OWNER,
+                    "sender":if self.owner {OWNER} else {self.user.as_str()},
+                    "content":{"membership":if self.owner {"join"} else {"invite"}}}));
+            }
+            for event in self.dm().as_array().unwrap().iter().rev() {
+                if event["state_key"] == OWNER {
+                    continue;
+                }
+                let mut event = event.clone();
+                event["sender"] = json!(self.user);
+                chunk.push(event);
+            }
+            return (200, json!({"chunk": chunk, "start": "s1"}));
         }
         if request.target.ends_with("/state") {
             assert!(!human);
@@ -1937,6 +1964,8 @@ async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
         }
         assert_eq!(server.peer.writes.len(), 5);
         assert_eq!(server.as_posts, 2);
+        // The owner joined and wrote in the DM: a new cursor could miss it.
+        server.owner_wrote = unsafe_invite;
         let before_rooms = server.posts;
         c.close().await.unwrap();
         drop(account);
@@ -2253,14 +2282,20 @@ async fn provision_parks_with_a_named_reason_after_the_retries_are_exhausted() {
 }
 
 #[tokio::test]
-async fn native_provisioning_resumes_an_invited_owner_and_parks_a_joined_one_without_replaying_a_write()
+async fn native_provisioning_resumes_an_invited_or_silent_joined_owner_and_parks_one_who_wrote_without_replaying_a_write()
  {
     // ADR-199 P6: a restart after the owner invite resumes from the custody.
     // `answered`: the invite response is stored. Otherwise the response is lost
     // after the invite was sent (possible, no answer): inspected, never repeated.
-    // `joined`: the owner joined the DM before the restart; the owner could
-    // have written, so no new inbox cursor is reserved: it stays parked.
-    for (answered, joined) in [(true, false), (false, false), (true, true)] {
+    // `joined`: the owner joined the DM before the restart. `wrote`: the owner
+    // also wrote there, so a new inbox cursor could miss it: it stays parked.
+    // A joined owner whose DM history proves no write resumes like an invited one.
+    for (answered, joined, wrote) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, true),
+        (true, true, false),
+    ] {
         let home = HomeFixture::new();
         let mut server = Server::new().await;
         let (mut f, mut fake, c) = ready_appservice(&home, &server).await;
@@ -2288,6 +2323,7 @@ async fn native_provisioning_resumes_an_invited_owner_and_parks_a_joined_one_wit
             let response = server.reply(&request).await;
             request.json(response.0, response.1);
             join.await.unwrap();
+            server.owner_wrote = wrote;
         }
         let account = observed_account(&f, &c);
         account.close_enrollment_sdk().await.unwrap();
@@ -2352,7 +2388,7 @@ async fn native_provisioning_resumes_an_invited_owner_and_parks_a_joined_one_wit
             account
                 .resume_enrolled(REP_TOKEN, vec![(OWNER.into(), anchor)], inspection, &cancel)
                 .await?;
-            if joined {
+            if wrote {
                 return Ok(None);
             }
             account.create_agent_rooms(REP_TOKEN, &cancel).await?;
@@ -2360,7 +2396,9 @@ async fn native_provisioning_resumes_an_invited_owner_and_parks_a_joined_one_wit
                 .enroll_created_rooms(1, [73; 32], vec![(OWNER.into(), anchor_again)], &cancel)
                 .await?;
             // The owner accepts, then the owner step reads the DM and never invites again.
-            owner_join(endpoint).await;
+            if !joined {
+                owner_join(endpoint).await;
+            }
             account.invite_owner(REP_TOKEN, &cancel).await?;
             Ok::<_, Error>(Some(account))
         };
@@ -2388,9 +2426,9 @@ async fn native_provisioning_resumes_an_invited_owner_and_parks_a_joined_one_wit
         assert_eq!(
             (server.posts, server.peer.writes.len(), server.as_posts),
             (posts, writes, as_posts),
-            "no second invite, key upload or account write (answered={answered} joined={joined})"
+            "no second invite, key upload or account write (answered={answered} joined={joined} wrote={wrote})"
         );
-        if joined {
+        if wrote {
             assert_eq!(account.err(), Some(Error::Recipients));
             assert!(!root.join("complete").exists());
         } else {
