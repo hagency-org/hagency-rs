@@ -724,6 +724,60 @@ async fn native_factory_readiness_requires_current_dm_and_project_routes() {
     agent.close().await.unwrap();
     f.close().await;
 }
+/// ADR-200: a DM scope that advanced while the agent was away (here to
+/// generation 3) re-attaches under a never-used DM session id; the retired
+/// `session_{eng}` is not rebound and the re-attach is not a Conflict.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn native_reattach_after_a_dm_generation_advance() {
+    let mut f = Fixture::new(false).await;
+    f.provision().await;
+    let id = f.engagement();
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    assert_eq!(agent.session().id, format!("session_{id}"));
+    agent.close().await.unwrap();
+    // The DM read failed once (retired at 2); re-attach seeds generation 3.
+    f.base
+        .store
+        .invalidate_matrix_room(hagency_core::replies::MatrixRoomInvalidation {
+            engagement_id: id.clone(),
+            registration_generation: 1,
+            transport_generation: 1,
+            room_id: DM.into(),
+            generation: 2,
+            reason: hagency_core::replies::OBSERVATION_FAILED.into(),
+        })
+        .await
+        .unwrap();
+    let mut f = f.restart().await;
+    {
+        let cancel = CancellationToken::new();
+        let reattach = f.collector.reattach_provisioned_agent(&id, &cancel);
+        tokio::pin!(reattach);
+        loop {
+            tokio::select! {
+                result = &mut reattach => { result.unwrap(); break; },
+                request = f.fake.next() => f.peer.respond(request, &f.base).await,
+            }
+        }
+    }
+    let agent = f.collector.take_provisioned_agent(&id).unwrap();
+    assert_eq!(agent.session().id, format!("session_{id}_1_3"));
+    let state = f
+        .base
+        .store
+        .matrix_room_state(id.clone(), DM.into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.available);
+    assert_eq!(state.generation, 3);
+    let profile = agent.claim_profile().await.unwrap();
+    let (_, inboxes) = agent.inboxes(profile).await.unwrap();
+    assert_eq!(inboxes[0].session_id, format!("session_{id}_1_3"));
+    agent.close().await.unwrap();
+    f.close().await;
+}
 #[tokio::test]
 async fn native_provisioning_factory_first_dispatch() {
     for application_service in [false, true] {
