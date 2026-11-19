@@ -137,3 +137,40 @@ readiness (plugin 63ad201, 9292adf).
 - `engagement_pin_skips_rollout_and_holds_revision`
 - `engagement_rebind_writes_audit_record`
 - `console_engagement_upgrade_routes_require_operator_auth`
+
+## Addendum: the provision receipt across a rebind
+
+A rebind rewrites `resource.runtimePlugin` in the complete provision effect.
+Re-attach proves that effect by recomputing the inline-factory receipt from it
+and comparing the result with `effects.outcome_digest`, which was written at
+provision time over the old payload. After a rebind the two differ, so the
+engagement was silently dropped from re-attach on every restart.
+
+Decision: keep the stored receipt and the exact-match rule. When the digest of
+the current payload does not match, the check reconstructs the one payload
+change a rebind can make from `engagement_runtime_rebinds` (append-only):
+
+- the rows of that engagement with `rebind`/`applied` or `rollback`/`rolled_back`,
+  in id order, must chain unbroken (each row's old package and settings sha equal
+  the previous row's new ones) and end at the payload's current package and
+  settings sha;
+- with the first row's old package and settings sha put back into
+  `resource.runtimePlugin`, the recomputed receipt must equal the stored one.
+
+Any other change (resource, request, plugin id, adapter id, a runtime the audit
+does not end at) fails the chain or the digest, so the invariant is not loosened:
+a payload still needs the receipt written over it, or the audit that explains it.
+
+Alternatives: storing the original payload or receipt at rebind time needs a
+schema change and does not cover the row already rebound live. Re-deriving the
+outcome digest inside the rebind transaction rewrites provisioning evidence with
+the same authority that changes the payload, so a tampered row could be
+re-blessed. The chosen check needs only columns the audit has always held
+(package and settings sha, old and new), so rows rebound before this fix are
+accepted as they are, with no DB edit. plugin id and adapter id are not in the
+audit; a rebind never changes them (`target_blocker`), and the digest covers
+them.
+
+Skipped engagements are never silent: `inline_factory_engagements` logs one
+warning per active engagement with a complete provision that it leaves out,
+naming the engagement and the reason.
