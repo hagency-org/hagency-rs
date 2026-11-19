@@ -161,6 +161,48 @@ fn native_private_approval_card_content() {
     }
 }
 
+/// A relayed plugin tool call (ADR-196): the card names the plugin runtime, the
+/// tool and the exact input, and offers Approve once and Deny only.
+#[test]
+fn native_plugin_tool_card_offers_approve_once_and_deny_only() {
+    let mut f = Fixture::new(true);
+    let mut input = f.input(0, 1);
+    input.method = hagency_core::execution::PLUGIN_TOOL_METHOD.into();
+    let c = &f.contexts[0];
+    input.params = json!({"threadId":c.thread_id,"turnId":c.turn_id,"itemId":"item_1","toolName":"delegate_task","input":{"call_id":"c1","assignee_engagement":"agent_b"}});
+    let request =
+        f.db.request_owner_approval(&f.caps[0], &input, 1010)
+            .unwrap();
+    assert!(!request.reusable_scope);
+    let card =
+        f.db.private_approval_card(&request.id, 11000, 1011)
+            .unwrap();
+    assert!(!card.target().reusable_scope);
+    let detail = &card.content()["com.agentchat.approval"];
+    assert_eq!(detail["runtime"], "plugin");
+    assert_eq!(detail["tool_name"], "delegate_task");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(detail["input_preview"].as_str().unwrap())
+            .unwrap(),
+        json!({"call_id":"c1","assignee_engagement":"agent_b"})
+    );
+    assert!(detail.get("reusable_scope").is_none());
+    let actions: Vec<_> = detail["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(actions, vec!["approve_once", "deny"]);
+    assert!(
+        card.content()["body"]
+            .as_str()
+            .unwrap()
+            .contains("delegate_task")
+    );
+    f.db.check_private_approval_card(&card, 1012).unwrap();
+}
+
 #[test]
 fn native_private_approval_card_authority() {
     for change in [

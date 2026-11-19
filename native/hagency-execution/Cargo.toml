@@ -11,6 +11,7 @@ hagency-core = { path = "../hagency-core" }
 hagency-store = { path = "../hagency-store" }
 hagency-runtime = { path = "../hagency-runtime" }
 hagency-platform = { path = "../hagency-platform" }
+hagency-plugin = { path = "../hagency-plugin" }
 hagency-metering = { path = "../hagency-metering" }
 hagency-files = { path = "../hagency-files" }
 cap-std = "=4.0.3"

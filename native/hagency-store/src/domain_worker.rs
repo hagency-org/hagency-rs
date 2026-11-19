@@ -38,6 +38,11 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 pub(crate) mod clock_fixtures;
 
 type Operation = Box<dyn FnOnce(&mut DomainRepository) + Send>;
+/// ADR-197: the host's answer to "can the registry launch this package for
+/// this framework", carried into the store worker for a rebind.
+pub type SharedLaunchable = std::sync::Arc<
+    dyn Fn(&hagency_core::project::RuntimePluginIdentity, &str) -> bool + Send + Sync,
+>;
 enum ReceiverPolicy {
     CancelIfDropped,
     RetainEnqueuedInvalidation,
@@ -2136,6 +2141,18 @@ impl DomainStore {
         })
         .await
     }
+    /// Did the host itself cancel this undelivered notice write? Then a
+    /// resume may release its journal slot without re-sending it.
+    pub async fn verified_notice_send_cancelled(
+        &self,
+        id: String,
+        fence: u64,
+    ) -> Result<bool, Error> {
+        self.call(weight(&(&id, fence))?, move |db| {
+            db.verified_notice_send_cancelled(&id, fence)
+        })
+        .await
+    }
     pub async fn cancel_verified_task_notice(
         &self,
         id: String,
@@ -2231,6 +2248,17 @@ impl DomainStore {
     pub async fn command_notice_send_current(&self, id: String, fence: u64) -> Result<bool, Error> {
         self.call(weight(&(&id, fence))?, move |db| {
             db.command_notice_send_current(&id, fence)
+        })
+        .await
+    }
+    /// Did the host itself cancel this undelivered command answer?
+    pub async fn command_notice_send_cancelled(
+        &self,
+        id: String,
+        fence: u64,
+    ) -> Result<bool, Error> {
+        self.call(weight(&(&id, fence))?, move |db| {
+            db.command_notice_send_cancelled(&id, fence)
         })
         .await
     }
@@ -2360,6 +2388,16 @@ impl DomainStore {
         })
         .await
     }
+    pub async fn refresh_matrix_direct_room(
+        &self,
+        input: MatrixRoomObservation,
+        expected: Option<MatrixRoomState>,
+    ) -> Result<MatrixRoomObservation, Error> {
+        self.call(weight(&(&input, &expected))?, move |db| {
+            db.refresh_matrix_direct_room(&input, expected.as_ref(), writer_time()?)
+        })
+        .await
+    }
     pub async fn invalidate_matrix_room(&self, input: MatrixRoomInvalidation) -> Result<(), Error> {
         let bytes = weight(&input)?;
         self.call_with_policy(
@@ -2417,6 +2455,13 @@ impl DomainStore {
     pub async fn final_reply_send_current(&self, id: String, fence: u64) -> Result<bool, Error> {
         self.call(weight(&(&id, fence))?, move |db| {
             db.final_reply_send_current(&id, fence)
+        })
+        .await
+    }
+    /// Did the host itself cancel this undelivered reply write?
+    pub async fn final_reply_send_cancelled(&self, id: String, fence: u64) -> Result<bool, Error> {
+        self.call(weight(&(&id, fence))?, move |db| {
+            db.final_reply_send_cancelled(&id, fence)
         })
         .await
     }
@@ -3466,6 +3511,148 @@ impl DomainStore {
         })
         .await
     }
+    /// ADR-197: engagements marked `upgrade_pending` (or pinned/halted).
+    pub async fn engagement_runtime_upgrades(
+        &self,
+        resource_id: Option<String>,
+    ) -> Result<Vec<crate::EngagementRuntimeUpgrade>, Error> {
+        self.call(1, move |db| {
+            db.engagement_runtime_upgrades(resource_id.as_deref())
+        })
+        .await
+    }
+    /// ADR-197: guarded rebind of one engagement to its marked runtime.
+    pub async fn rebind_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+        launchable: SharedLaunchable,
+    ) -> Result<crate::RebindResult, Error> {
+        self.call(1, move |db| {
+            db.rebind_engagement_runtime(&engagement_id, &actor, now, &*launchable)
+        })
+        .await
+    }
+    /// ADR-197: one-step rollback to the previous runtime.
+    pub async fn rollback_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RebindResult, Error> {
+        self.call(1, move |db| {
+            db.rollback_engagement_runtime(&engagement_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn pin_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RuntimeRebindAudit, Error> {
+        self.call(1, move |db| {
+            db.pin_engagement_runtime(&engagement_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn unpin_engagement_runtime(
+        &self,
+        engagement_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RuntimeRebindAudit, Error> {
+        self.call(1, move |db| {
+            db.unpin_engagement_runtime(&engagement_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn engagement_upgrade_status(
+        &self,
+        engagement_id: String,
+    ) -> Result<crate::EngagementUpgradeStatus, Error> {
+        self.call(1, move |db| db.engagement_upgrade_status(&engagement_id))
+            .await
+    }
+    pub async fn start_resource_rollout(
+        &self,
+        resource_id: String,
+        actor: String,
+        now: u64,
+    ) -> Result<crate::RolloutStatus, Error> {
+        self.call(1, move |db| {
+            db.start_resource_rollout(&resource_id, &actor, now)
+        })
+        .await
+    }
+    pub async fn rollout_step(
+        &self,
+        resource_id: String,
+        actor: String,
+        now: u64,
+        launchable: SharedLaunchable,
+    ) -> Result<crate::RolloutStep, Error> {
+        self.call(1, move |db| {
+            db.rollout_step(&resource_id, &actor, now, &*launchable)
+        })
+        .await
+    }
+    pub async fn record_canary_result(
+        &self,
+        resource_id: String,
+        passed: bool,
+        actor: String,
+        detail: Option<String>,
+        now: u64,
+    ) -> Result<crate::RolloutStatus, Error> {
+        self.call(1, move |db| {
+            db.record_canary_result(&resource_id, passed, &actor, detail.as_deref(), now)
+        })
+        .await
+    }
+    pub async fn resource_rollout_status(
+        &self,
+        resource_id: String,
+    ) -> Result<crate::RolloutStatus, Error> {
+        self.call(1, move |db| db.resource_rollout_status(&resource_id))
+            .await
+    }
+    pub async fn engagement_runtime_rebinds(
+        &self,
+        engagement_id: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<crate::RuntimeRebindAudit>, Error> {
+        self.call(1, move |db| {
+            db.engagement_runtime_rebinds(engagement_id.as_deref(), limit)
+        })
+        .await
+    }
+    /// ADR-197: runtime packages frozen by live engagements.
+    pub async fn engagement_runtime_references(&self) -> Result<Vec<(String, String, u32)>, Error> {
+        self.call(1, move |db| db.engagement_runtime_references())
+            .await
+    }
+    pub async fn resource_default_harness_template(
+        &self,
+        resource_id: String,
+    ) -> Result<Option<hagency_plugin::HarnessTemplateDocument>, Error> {
+        self.call(weight(&resource_id)?, move |db| {
+            db.resource_default_harness_template(&resource_id)
+        })
+        .await
+    }
+    pub async fn set_resource_default_harness_template(
+        &self,
+        resource_id: String,
+        template: Option<hagency_plugin::HarnessTemplateDocument>,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.call(weight(&resource_id)?, move |db| {
+            db.set_resource_default_harness_template(&resource_id, template.as_ref(), now)
+        })
+        .await
+    }
     pub async fn edit_agent_definition(
         &self,
         resource_id: String,
@@ -3473,6 +3660,9 @@ impl DomainStore {
         input: Option<serde_json::Value>,
         now: u64,
     ) -> Result<Option<AgentDefinition>, Error> {
+        let input = input
+            .map(serde_json::from_value::<crate::AgentDefinitionInput>)
+            .transpose()?;
         self.call(weight(&(&resource_id, &definition_id))?, move |db| {
             db.edit_agent_definition(&resource_id, definition_id.as_deref(), input.as_ref(), now)
         })
@@ -3500,6 +3690,18 @@ impl DomainStore {
     /// with entity payloads. One writer job, one bounded read.
     pub async fn console_entities(&self) -> Result<serde_json::Value, Error> {
         self.call(64, |db| db.console_entities()).await
+    }
+    /// Choose the language of every notice the store words from now on
+    /// (presentation only; one writer job).
+    pub async fn set_notice_language(
+        &self,
+        language: hagency_core::notice::NoticeLanguage,
+    ) -> Result<(), Error> {
+        self.call(8, move |db| {
+            db.set_notice_language(language);
+            Ok(())
+        })
+        .await
     }
     /// The read-only agent detail (board #22): one writer job, one bounded
     /// agent-keyed read — the projection is computed at the store, so the
@@ -5718,6 +5920,65 @@ impl DomainStore {
         self.call(weight(&proof.weight())?, move |db| {
             db.maintain_owned_approval_clock(&proof, writer_time)
         })
+        .await
+    }
+}
+impl DomainStore {
+    pub async fn put_plugin_runtime_qualification(
+        &self,
+        qualification: crate::PluginRuntimeQualification,
+    ) -> Result<(), Error> {
+        self.call(weight(&qualification)?, move |db| {
+            db.put_plugin_runtime_qualification(&qualification)
+        })
+        .await
+    }
+    pub async fn revoke_plugin_runtime_qualifications(
+        &self,
+        plugin_id: String,
+    ) -> Result<(), Error> {
+        self.call(weight(&plugin_id)?, move |db| {
+            db.revoke_plugin_runtime_qualifications(&plugin_id)
+        })
+        .await
+    }
+    pub async fn plugin_runtime_choices(
+        &self,
+        plugin_id: String,
+    ) -> Result<Vec<crate::PluginRuntimeChoice>, Error> {
+        self.call(weight(&plugin_id)?, move |db| {
+            db.plugin_runtime_choices(&plugin_id)
+        })
+        .await
+    }
+    pub async fn plugin_runtime_choices_all(
+        &self,
+    ) -> Result<Vec<crate::PluginRuntimeChoice>, Error> {
+        self.call(weight(&"plugin_runtime_choices_all")?, |db| {
+            db.plugin_runtime_choices_all()
+        })
+        .await
+    }
+    pub async fn plugin_runtime_qualification(
+        &self,
+        runtime: hagency_core::project::RuntimePluginIdentity,
+        framework: String,
+        model: String,
+        provider: String,
+        reasoning: Option<String>,
+    ) -> Result<Option<crate::PluginRuntimeQualification>, Error> {
+        self.call(
+            weight(&(&runtime, &framework, &model, &provider, &reasoning))?,
+            move |db| {
+                db.plugin_runtime_qualification(
+                    &runtime,
+                    &framework,
+                    &model,
+                    &provider,
+                    reasoning.as_deref(),
+                )
+            },
+        )
         .await
     }
 }

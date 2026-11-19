@@ -124,6 +124,7 @@ const NATIVE_SECTIONS = [
   { head: 'rail.secResource', rows: [{ key: 'setup', icon: 'check' }, { key: 'resources', icon: 'layers' }, { key: 'workforce', icon: 'users' }] },
   { head: 'rail.secEngagement', rows: [{ key: 'serverEngagements', icon: 'link' }, { key: 'engagements', icon: 'swap' }, { key: 'approvals', icon: 'check' }, { key: 'invites', icon: 'mail' }] },
   { head: 'rail.secMonitor', rows: [{ key: 'usage', icon: 'gauge' }, { key: 'alerts', icon: 'bell' }] },
+  { head: 'rail.secFleet', rows: [{ key: 'plugins', icon: 'list' }] },
 ];
 /* One 16px stroke icon set for the native rail (paths in a 24px box). */
 const ICON_PATHS = {
@@ -174,12 +175,12 @@ function NativeRail() {
     <div className="rail-fleet">{NATIVE_SECTIONS.map((sec) => <div key={sec.head}>
       <h2 className="rail-sec">{t(sec.head)}</h2>
       <ul className="rail-list">{sec.rows.map((row) => <li key={row.key}>
-        {['serverEngagements', 'setup', 'usage', 'resources', 'alerts', 'engagements', 'workforce', 'approvals', 'invites'].includes(row.key) ? <a className="fleet-row" href={nativeHref(row.key)} aria-current={nativeCurrent(path, row.key) ? 'page' : undefined}><RailIcon name={row.icon} /><span className="grow">{t(row.key === 'engagements' ? 'se.agentAllocations' : `nav.${row.key}`)}</span></a>
+        {['serverEngagements', 'setup', 'usage', 'resources', 'alerts', 'engagements', 'workforce', 'approvals', 'invites', 'plugins'].includes(row.key) ? <a className="fleet-row" href={nativeHref(row.key)} aria-current={nativeCurrent(path, row.key) ? 'page' : undefined}><RailIcon name={row.icon} /><span className="grow">{t(row.key === 'engagements' ? 'se.agentAllocations' : `nav.${row.key}`)}</span></a>
           : <span className="fleet-row" aria-disabled="true" title={t('nu.unavailableRoute')}><span className="ico">{row.icon}</span><span className="grow">{t(`nav.${row.key}`)}</span><span>—</span></span>}
       </li>)}</ul>
     </div>)}</div>
     {/* The session control belongs to the SHELL, not to a page: it used to sit
-        inside the Resource configuration panel, so six of the nine pages
+        inside the Resource configuration panel, so six of the ten pages
         offered no way to end access at all. Rendered here it is on every
         native page, exactly once. */}
     <div className="rail-session">

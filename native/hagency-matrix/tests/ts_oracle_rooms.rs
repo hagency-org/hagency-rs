@@ -257,12 +257,12 @@ fn native_fleet_approval_config_is_anchored_on_the_fleet() {
         registration_generation: f.identity.transport.registration_generation,
         bot_mxid: f.identity.transport.sender_mxid.clone(),
     };
-    assert!(HostApprovalConfig::for_fleet(f.config(endpoint), anchor.clone()).is_ok());
+    assert!(HostApprovalConfig::for_fleet(f.config(endpoint), anchor.clone(), vec![]).is_ok());
     let mut other_bot = anchor.clone();
     other_bot.bot_mxid = "@someone:example.test".into();
-    assert!(HostApprovalConfig::for_fleet(f.config(endpoint), other_bot).is_err());
+    assert!(HostApprovalConfig::for_fleet(f.config(endpoint), other_bot, vec![]).is_err());
     let mut other_generation = anchor.clone();
     other_generation.registration_generation += 1;
-    assert!(HostApprovalConfig::for_fleet(f.config(endpoint), other_generation).is_err());
+    assert!(HostApprovalConfig::for_fleet(f.config(endpoint), other_generation, vec![]).is_err());
     assert!(HostApprovalConfig::new(f.config(endpoint), vec![]).is_err());
 }

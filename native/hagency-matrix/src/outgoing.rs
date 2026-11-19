@@ -216,6 +216,22 @@ impl Inner {
         let owner = guard.as_ref().ok_or(Error::Storage)?;
         let view = owner.outgoing(Command::Read).await?;
         if let Source::Resume = source {
+            // A journaled send the host itself has since cancelled is no longer
+            // wanted by anyone. Re-sending it would be the silent redo ADR-059
+            // forbids, and parking it forever blocks every later send of this
+            // agent (its replies included). Release the slot instead: nothing
+            // is re-sent, nothing is recorded as delivered, and the domain row
+            // keeps its own `uncertain`/`cancelled` word as the evidence.
+            if let Some(attempt) = &view.attempt
+                && attempt.phase != Phase::Complete
+                && self.abandon_cancelled(owner, attempt).await?
+            {
+                return Ok(OutgoingSummary {
+                    id: Some(attempt.id.clone()),
+                    state: OutgoingState::Idle,
+                    replayed: true,
+                });
+            }
             return match view.attempt {
                 Some(attempt) if attempt.phase == Phase::Complete => {
                     self.settle_outgoing(owner, attempt, true).await
@@ -828,6 +844,43 @@ impl Inner {
             return Err(Error::Unsupported);
         }
         Ok(observation.joined)
+    }
+    /// Release the journaled send when the domain says the host cancelled it
+    /// and the journal holds no crypto leg (`Command::Abandon` re-checks).
+    /// False leaves the send exactly as it was: parked or resumable.
+    async fn abandon_cancelled(&self, owner: &Owner, attempt: &Attempt) -> Result<bool, Error> {
+        if attempt.route.encrypted
+            || attempt.writes.iter().any(|write| !write.room)
+            || !matches!(
+                attempt.phase,
+                Phase::BeforeBegin | Phase::Ready | Phase::WritePossible
+            )
+        {
+            return Ok(false);
+        }
+        let cancelled = match attempt.kind {
+            Kind::Final => {
+                self.domain
+                    .final_reply_send_cancelled(attempt.id.clone(), attempt.fence)
+                    .await?
+            }
+            Kind::Notice => {
+                self.domain
+                    .verified_notice_send_cancelled(attempt.id.clone(), attempt.fence)
+                    .await?
+            }
+            Kind::Command => {
+                self.domain
+                    .command_notice_send_cancelled(attempt.id.clone(), attempt.fence)
+                    .await?
+            }
+            Kind::File => false,
+        };
+        if !cancelled {
+            return Ok(false);
+        }
+        owner.outgoing(Command::Abandon).await?;
+        Ok(true)
     }
     async fn retire_outgoing_room(&self, route: &ReplyRoute) -> Result<(), Error> {
         observe!(OutgoingRetireRoom);

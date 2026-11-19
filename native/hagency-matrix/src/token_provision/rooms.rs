@@ -23,6 +23,8 @@ pub(super) struct Operation {
     /// A restart re-attaching rooms this custody already completed: replay the
     /// stored responses and read current state; never create, invite or join.
     reattach: bool,
+    /// ADR-199 P6: the recovery proved this custody, owner invite included.
+    invite_resumed: bool,
     request: ProjectRequest,
     binding: String,
     root: PathBuf,
@@ -37,6 +39,7 @@ impl Operation {
         account: &ProvisionedTokenAccount,
         scope: ProvisionScope,
         token: &str,
+        transport_generation: u64,
     ) -> Result<Self, Error> {
         if !(16..=4096).contains(&token.len()) || !token.bytes().all(|b| (33..=126).contains(&b)) {
             return Err(Error::Config);
@@ -60,7 +63,7 @@ impl Operation {
             "request":request.digest().map_err(|_|Error::Config)?,"representative":project::hash(token.as_bytes()),
             "agent_credential":project::hash(account.token.as_bytes()),"key":project::hash(&account.key)})).map_err(|_|Error::Config)?;
         let config = account.host_config(
-            1,
+            transport_generation,
             account.key,
             vec![HostRoom {
                 room_id: request.target_room_id.clone(),
@@ -99,6 +102,7 @@ impl Operation {
         Ok(Self {
             scope,
             reattach: account.reattach,
+            invite_resumed: account.invite_resumed,
             request,
             binding,
             root,
@@ -112,9 +116,21 @@ impl Operation {
             representative_write,
         })
     }
-    pub(super) async fn inspect_before_owner_invite(
+    pub(super) fn owner_response_exists(&self) -> Result<bool, Error> {
+        self.root
+            .join("owner-invite-response")
+            .try_exists()
+            .map_err(|_| Error::Storage)
+    }
+    /// ADR-199 P6: inspect a rooms custody for resumption. Complete identity,
+    /// ledger and rooms records are required. The owner invite may be absent,
+    /// possibly sent (inspected, never repeated: `joined_dm` proves the owner
+    /// is invited or joined) or answered. An answer without its "possible"
+    /// record, or a completed step without the invite records, is not provable.
+    /// The returned flag is true when the custody records the owner invite.
+    pub(super) async fn inspect_for_resume(
         &self,
-    ) -> Result<(Arc<Custody>, Vec<crate::HostRoom>), Error> {
+    ) -> Result<(Arc<Custody>, Vec<crate::HostRoom>, bool), Error> {
         hagency_store::private::open(&self.root.join("agent-rooms"), false)
             .map_err(|_| Error::Storage)?;
         let root = self.root.clone();
@@ -129,15 +145,12 @@ impl Operation {
         let records = tokio::task::spawn_blocking(move || inspect.values())
             .await
             .map_err(|_| Error::OutcomeUnknown)??;
-        if records[..6].iter().any(Option::is_none)
-            || records[COMPLETE].is_some()
-            || records[AGENT_ROOMS].is_none()
-            || records[OWNER_INVITE_POSSIBLE..].iter().any(Option::is_some)
-        {
+        if !resumable_records(&records) {
             return Err(Error::OutcomeUnknown);
         }
         let dm = self.stored_dm(&records, AGENT_ROOMS)?;
-        Ok((custody, self.rooms(&dm)))
+        let invited = records[OWNER_INVITE_POSSIBLE].is_some();
+        Ok((custody, self.rooms(&dm), invited))
     }
     async fn writer(&self, cancel: &CancellationToken, deadline: Instant) -> Result<(), Error> {
         checkpoint(cancel, deadline)?;
@@ -494,8 +507,17 @@ impl Operation {
             serde_json::from_value(records[3].clone().ok_or(Error::Storage)?)
                 .map_err(|_| Error::Storage)?;
         let joined: SavedResponse =
-            serde_json::from_value(records[5].clone().ok_or(Error::Storage)?)
+            serde_json::from_value(records[JOIN_RESPONSE].clone().ok_or(Error::Storage)?)
                 .map_err(|_| Error::Storage)?;
+        // A refused join is complete only with its successful retry; a
+        // successful join never has one.
+        let joined = match (&records[JOIN_RETRY_RESPONSE], joined.status) {
+            (None, _) => joined,
+            (Some(retried), 403) => {
+                serde_json::from_value(retried.clone()).map_err(|_| Error::Storage)?
+            }
+            (Some(_), _) => return Err(Error::Storage),
+        };
         let dm = self.dm_id(&created)?;
         if success(&invited)?.as_object().is_none_or(|v| !v.is_empty())
             || success(&joined)?.get("room_id").and_then(Value::as_str)
@@ -505,6 +527,88 @@ impl Operation {
         {
             return Err(Error::Storage);
         }
+        Ok(dm)
+    }
+    /// A project join the server refused with 403 (`refused_join`), resumed once
+    /// the refusal's cause is gone, e.g. a room the homeserver had disabled.
+    /// The DM and the invite are proven from custody and never repeated; only
+    /// the join is sent again, and only while the agent is still invited (or
+    /// already joined): a Matrix join of an invited user is idempotent and the
+    /// refusal changed nothing on the server. Only a successful join is
+    /// recorded, write-once; another refusal leaves the custody as it was.
+    async fn retry_refused_join(
+        &self,
+        custody: &Arc<Custody>,
+        records: &[Option<Value>],
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<String, Error> {
+        for index in [0, 2, 4] {
+            if records[index].as_ref().is_none_or(|v| !v.is_null()) {
+                return Err(Error::Storage);
+            }
+        }
+        let created: SavedResponse =
+            serde_json::from_value(records[1].clone().ok_or(Error::Storage)?)
+                .map_err(|_| Error::Storage)?;
+        let invited: SavedResponse =
+            serde_json::from_value(records[3].clone().ok_or(Error::Storage)?)
+                .map_err(|_| Error::Storage)?;
+        let dm = self.dm_id(&created)?;
+        if success(&invited)?.as_object().is_none_or(|v| !v.is_empty()) {
+            return Err(Error::Storage);
+        }
+        let target = Some(self.request.target_room_id.as_str());
+        if let Some(retried) = &records[JOIN_RETRY_RESPONSE] {
+            // The retry succeeded and `agent-rooms` was not written yet.
+            let retried: SavedResponse =
+                serde_json::from_value(retried.clone()).map_err(|_| Error::Storage)?;
+            if success(&retried)?.get("room_id").and_then(Value::as_str) != target {
+                return Err(Error::Storage);
+            }
+            return Ok(dm);
+        }
+        let project = self.project(cancel, deadline).await?;
+        if !self.member(&project, "invite") && !self.member(&project, "join") {
+            return Err(Error::Recipients);
+        }
+        self.agent_current(cancel, deadline).await?;
+        let response = self
+            .post(
+                &self.agent_write,
+                &[
+                    "_matrix",
+                    "client",
+                    "v3",
+                    "join",
+                    &self.request.target_room_id,
+                ],
+                json!({}),
+                cancel,
+                deadline,
+            )
+            .await?;
+        if response.status != 200 {
+            eprintln!(
+                "provision project join retry refused: effect={} room={} {}",
+                self.scope.effect.id,
+                self.request.target_room_id,
+                refusal(&response)
+            );
+        }
+        if success(&response)?.get("room_id").and_then(Value::as_str) != target {
+            return Err(Error::Identity);
+        }
+        write(
+            custody,
+            "join-retry-response",
+            serde_json::to_value(&response).map_err(|_| Error::Storage)?,
+        )
+        .await?;
+        eprintln!(
+            "provision project join retried: effect={} room={}",
+            self.scope.effect.id, self.request.target_room_id
+        );
         Ok(dm)
     }
     /// ADR-184 step 1-2: the agent-only DM and the project join. The owner is
@@ -523,11 +627,13 @@ impl Operation {
             && records[AGENT_ROOMS..].iter().all(Option::is_none);
         // An owner invite with no `complete` is either a wait for the owner or
         // a completed custody whose last record was lost; on disk they look
-        // the same. Only the job that observed the wait may replay it.
+        // the same. Only the job that observed the wait may replay it, or a
+        // recovery that proved this custody (ADR-199 P6).
         if !legacy
             && records[OWNER_INVITE_POSSIBLE].is_some()
             && records[COMPLETE].is_none()
             && !resuming
+            && !self.invite_resumed
         {
             return Err(Error::OutcomeUnknown);
         }
@@ -540,9 +646,21 @@ impl Operation {
         }
         let dm = if legacy {
             // Pre-ADR-184 custody: `complete` already includes the owner.
-            self.stored_dm(records, COMPLETE)?
+            let dm = self.stored_dm(records, COMPLETE)?;
+            job.rooms_replayed
+                .store(true, std::sync::atomic::Ordering::Release);
+            dm
         } else if records[..6].iter().all(Option::is_some) && records[AGENT_ROOMS].is_some() {
-            self.stored_dm(records, AGENT_ROOMS)?
+            let dm = self.stored_dm(records, AGENT_ROOMS)?;
+            job.rooms_replayed
+                .store(true, std::sync::atomic::Ordering::Release);
+            dm
+        } else if refused_join(records) {
+            if self.reattach {
+                return Err(Error::Storage);
+            }
+            self.retry_refused_join(&custody, records, cancel, deadline)
+                .await?
         } else {
             if records.iter().any(Option::is_some) {
                 return Err(Error::OutcomeUnknown);
@@ -606,6 +724,14 @@ impl Operation {
                 serde_json::to_value(&response).map_err(|_| Error::Storage)?,
             )
             .await?;
+            if response.status != 200 {
+                eprintln!(
+                    "provision project invite refused: effect={} room={} {}",
+                    self.scope.effect.id,
+                    self.request.target_room_id,
+                    refusal(&response)
+                );
+            }
             // The refusal path (:14466-14482): classify, name the project remedy
             // when the read ESTABLISHED too little power, then refuse exactly as
             // `success()` would have.
@@ -643,6 +769,14 @@ impl Operation {
                 serde_json::to_value(&response).map_err(|_| Error::Storage)?,
             )
             .await?;
+            if response.status != 200 {
+                eprintln!(
+                    "provision project join refused: effect={} room={} {}",
+                    self.scope.effect.id,
+                    self.request.target_room_id,
+                    refusal(&response)
+                );
+            }
             if success(&response)?.get("room_id").and_then(Value::as_str)
                 != Some(self.request.target_room_id.as_str())
             {
@@ -765,6 +899,8 @@ impl Operation {
             }
             (false, true) => return Err(Error::Storage),
         };
+        job.invite_proven
+            .store(true, std::sync::atomic::Ordering::Release);
         // The owner's join has no deadline. A first attempt polls to its own
         // budget, since owners usually join within seconds; a resumed attempt
         // looks once and hands the wait back to the next coordinator turn.
@@ -823,6 +959,18 @@ impl Operation {
         Ok(self.rooms(&dm))
     }
 }
+/// ADR-199 P6: whether the rooms custody proves a resumable state. Pure over the
+/// stored records so the proof conditions are testable without a server.
+pub(super) fn resumable_records(records: &[Option<Value>]) -> bool {
+    let invite = (
+        records[OWNER_INVITE_POSSIBLE].is_some(),
+        records[OWNER_INVITE_RESPONSE].is_some(),
+    );
+    records[..6].iter().all(Option::is_some)
+        && records[AGENT_ROOMS].is_some()
+        && invite != (false, true)
+        && (records[COMPLETE].is_none() || invite == (true, true))
+}
 /// Which half of the rooms step runs (ADR-184).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Phase {
@@ -835,6 +983,39 @@ const COMPLETE: usize = 6;
 const AGENT_ROOMS: usize = 7;
 const OWNER_INVITE_POSSIBLE: usize = 8;
 const OWNER_INVITE_RESPONSE: usize = 9;
+const JOIN_RESPONSE: usize = 5;
+const JOIN_RETRY_RESPONSE: usize = 10;
+/// A project join the server answered with 403 before any later stage was
+/// recorded: the server refused it, so nothing was joined, and the DM and the
+/// invite before it are recorded as answered. Pure over the stored records.
+pub(super) fn refused_join(records: &[Option<Value>]) -> bool {
+    records[..=JOIN_RESPONSE].iter().all(Option::is_some)
+        && records[COMPLETE..JOIN_RETRY_RESPONSE]
+            .iter()
+            .all(Option::is_none)
+        && records[JOIN_RESPONSE]
+            .clone()
+            .and_then(|v| serde_json::from_value::<SavedResponse>(v).ok())
+            .is_some_and(|r| r.status == 403)
+}
+/// The Matrix refusal of a write, for the log: status, `errcode` and `error`,
+/// bounded and stripped of control characters. Never a credential.
+fn refusal(response: &SavedResponse) -> String {
+    let field = |key: &str| {
+        response
+            .value
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_str)
+            .map(|s| s.chars().filter(|c| !c.is_control()).take(160).collect())
+            .unwrap_or_default()
+    };
+    let (errcode, error): (String, String) = (field("errcode"), field("error"));
+    format!(
+        "status={} errcode={errcode:?} error={error:?}",
+        response.status
+    )
+}
 #[derive(Default)]
 pub(super) struct Jobs(Mutex<Option<Arc<Job>>>);
 struct Job {
@@ -846,6 +1027,14 @@ struct Job {
     /// `result`: a resumed turn replays the rooms phase before the owner phase,
     /// and that replay's result must not erase the observation.
     awaiting: std::sync::atomic::AtomicBool,
+    /// ADR-199 P6: the owner invite is proven sent or inspected, so everything
+    /// after it only reads or replays and a transient failure may be retried.
+    invite_proven: std::sync::atomic::AtomicBool,
+    /// The rooms phase replayed a completed rooms custody: it only reads
+    /// back state, so a transient failure there may be retried.
+    rooms_replayed: std::sync::atomic::AtomicBool,
+    /// The last owner step ended in a retryable transient failure.
+    transient: std::sync::atomic::AtomicBool,
 }
 impl Jobs {
     pub fn rooms(&self) -> Result<Vec<HostRoom>, Error> {
@@ -861,6 +1050,14 @@ impl Jobs {
             .as_ref()
             .cloned()
             .unwrap_or(Err(Error::Busy))
+    }
+    /// ADR-199 P6: the owner step's last failure was transient and retryable.
+    pub fn owner_step_retryable(&self) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some_and(|job| job.transient.load(std::sync::atomic::Ordering::Acquire))
     }
     pub fn check_rooms(&self, rooms: &[HostRoom]) -> Result<(), Error> {
         if self.0.lock().map_err(|_| Error::OutcomeUnknown)?.is_none() {
@@ -892,7 +1089,7 @@ impl Jobs {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let mut resuming = false;
+        let mut resuming = phase == Phase::Owner && operation.owner_response_exists()?;
         let job = {
             let mut guard = self.0.lock().map_err(|_| Error::OutcomeUnknown)?;
             if let Some(job) = guard.as_ref() {
@@ -919,6 +1116,9 @@ impl Jobs {
                     result: Mutex::new(None),
                     dm: Mutex::new(None),
                     awaiting: std::sync::atomic::AtomicBool::new(false),
+                    invite_proven: std::sync::atomic::AtomicBool::new(false),
+                    rooms_replayed: std::sync::atomic::AtomicBool::new(false),
+                    transient: std::sync::atomic::AtomicBool::new(false),
                 });
                 *guard = Some(job.clone());
                 job
@@ -945,15 +1145,32 @@ impl Jobs {
             )
             .await
             .unwrap_or(Err(Error::Timeout));
+            // ADR-199 P6: a transient failure after the owner invite is proven
+            // only read or replayed state, so it is neither observed unknown
+            // nor cached as final; the owner step resumes like a wait. The
+            // same holds for the rooms phase replaying a completed custody:
+            // it creates, invites and joins nothing.
+            let read_only = match phase {
+                Phase::Owner => job.invite_proven.load(std::sync::atomic::Ordering::Acquire),
+                Phase::Rooms => job
+                    .rooms_replayed
+                    .load(std::sync::atomic::Ordering::Acquire),
+            };
+            let retryable = read_only && result.as_ref().err().is_some_and(Error::is_transient);
+            job.transient
+                .store(retryable, std::sync::atomic::Ordering::Release);
             if let Err(error) = &result
                 && *error != Error::AwaitingOwner
             {
                 eprintln!(
-                    "provision room step failed: effect={} error={error:?}",
+                    "provision room step failed: effect={} error={error:?} retryable={retryable}",
                     job.operation.scope.effect.id
                 );
             }
-            let result = if result.as_ref().is_err_and(|e| *e != Error::AwaitingOwner)
+            let failure = result.as_ref().err().cloned();
+            let result = if result
+                .as_ref()
+                .is_err_and(|e| *e != Error::AwaitingOwner && !retryable)
                 && job
                     .operation
                     .scope
@@ -972,9 +1189,16 @@ impl Jobs {
             };
             if phase == Phase::Owner {
                 job.awaiting.store(
-                    result.as_ref().is_err_and(|e| *e == Error::AwaitingOwner),
+                    retryable || result.as_ref().is_err_and(|e| *e == Error::AwaitingOwner),
                     std::sync::atomic::Ordering::Release,
                 );
+            }
+            if retryable {
+                // Cached as a wait so the next run resumes; the caller still
+                // receives the real transient error.
+                *job.result.lock().map_err(|_| Error::OutcomeUnknown)? =
+                    Some(Err(Error::AwaitingOwner));
+                return Err(failure.unwrap_or(Error::Transport));
             }
             let response = result.as_ref().map(|_| ()).map_err(Clone::clone);
             *job.result.lock().map_err(|_| Error::OutcomeUnknown)? = Some(result);
@@ -999,4 +1223,92 @@ async fn write(custody: &Arc<Custody>, stage: &'static str, value: Value) -> Res
     tokio::task::spawn_blocking(move || custody.write(stage, value))
         .await
         .map_err(|_| Error::OutcomeUnknown)?
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    fn records(present: &[usize]) -> Vec<Option<Value>> {
+        (0..custody::STAGES.len())
+            .map(|i| present.contains(&i).then_some(Value::Null))
+            .collect()
+    }
+    fn refused(status: u16) -> Vec<Option<Value>> {
+        let mut r = records(&[0, 1, 2, 3, 4, JOIN_RESPONSE]);
+        r[JOIN_RESPONSE] = Some(json!({"status": status, "value": {"errcode": "M_FORBIDDEN"}}));
+        r
+    }
+    #[test]
+    fn refused_join_is_only_a_403_before_any_later_stage() {
+        assert!(refused_join(&refused(403)));
+        // A retry already recorded is still the same refused-join custody.
+        let mut r = refused(403);
+        r[JOIN_RETRY_RESPONSE] = Some(Value::Null);
+        assert!(refused_join(&r));
+        // Not a refusal: an answered join, a credential failure, a server error.
+        assert!(!refused_join(&refused(200)));
+        assert!(!refused_join(&refused(401)));
+        assert!(!refused_join(&refused(500)));
+        // A join with no recorded answer may have crossed the wire.
+        let mut r = refused(403);
+        r[JOIN_RESPONSE] = None;
+        assert!(!refused_join(&r));
+        // Any later stage means the join is not where the custody stopped.
+        for later in [
+            COMPLETE,
+            AGENT_ROOMS,
+            OWNER_INVITE_POSSIBLE,
+            OWNER_INVITE_RESPONSE,
+        ] {
+            let mut r = refused(403);
+            r[later] = Some(Value::Null);
+            assert!(!refused_join(&r));
+        }
+        // An unreadable stored answer is never a refusal.
+        let mut r = refused(403);
+        r[JOIN_RESPONSE] = Some(json!({"status": 403, "extra": 1}));
+        assert!(!refused_join(&r));
+    }
+    #[test]
+    fn refusal_names_the_matrix_error_without_control_characters() {
+        let response = SavedResponse {
+            status: 403,
+            value: Some(
+                json!({"errcode": "M_FORBIDDEN", "error": "This room is banned\non this homeserver."}),
+            ),
+        };
+        assert_eq!(
+            refusal(&response),
+            "status=403 errcode=\"M_FORBIDDEN\" error=\"This room is bannedon this homeserver.\""
+        );
+    }
+    const BASE: [usize; 7] = [0, 1, 2, 3, 4, 5, AGENT_ROOMS];
+    #[test]
+    fn resume_proof_accepts_every_provable_invite_state() {
+        // No invite yet (the pre-ADR-199 P6 case).
+        assert!(resumable_records(&records(&BASE)));
+        // Invite possibly sent, response lost: inspected, never repeated.
+        let mut r = BASE.to_vec();
+        r.push(OWNER_INVITE_POSSIBLE);
+        assert!(resumable_records(&records(&r)));
+        // Invite answered; owner may have joined (rooms step complete).
+        r.push(OWNER_INVITE_RESPONSE);
+        assert!(resumable_records(&records(&r)));
+        r.push(COMPLETE);
+        assert!(resumable_records(&records(&r)));
+    }
+    #[test]
+    fn resume_proof_refuses_a_state_it_cannot_prove() {
+        // An answer without its "possible" record.
+        let mut r = BASE.to_vec();
+        r.push(OWNER_INVITE_RESPONSE);
+        assert!(!resumable_records(&records(&r)));
+        // Complete without any invite record.
+        let mut r = BASE.to_vec();
+        r.push(COMPLETE);
+        assert!(!resumable_records(&records(&r)));
+        // Missing rooms record, or an incomplete identity/ledger prefix.
+        assert!(!resumable_records(&records(&[0, 1, 2, 3, 4, 5])));
+        assert!(!resumable_records(&records(&[0, 1, 2, 3, 4, AGENT_ROOMS])));
+    }
 }

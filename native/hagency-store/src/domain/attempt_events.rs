@@ -155,20 +155,6 @@ impl OverBudgetNotice {
         }
     }
 }
-/// The notice body: fixed words around the elapsed time, never free text.
-/// It names the stop that exists in this port — the operator's stop of the
-/// agent — not a thread command the port does not take (checked in the
-/// retained product on 2026-09-23: no owner "stop" intake in the thread).
-pub fn over_budget_notice_body(elapsed_ms: u64) -> String {
-    let elapsed = if elapsed_ms >= 60_000 {
-        format!("{} min", elapsed_ms / 60_000)
-    } else {
-        format!("{} s", elapsed_ms / 1_000)
-    };
-    format!(
-        "Still running after {elapsed}. It continues until the runner finishes its turn; an operator can stop the agent from the console."
-    )
-}
 /// The serialized `detail` bound.
 const DETAIL_LIMIT: usize = 8192;
 /// Every string inside `detail` is cut here, on a char boundary.
@@ -299,6 +285,7 @@ impl DomainRepository {
     /// same attempt is unaffected. The caller counts a refusal; it never
     /// retries it and never lets it change the attempt's outcome.
     pub fn record_attempt_event(&mut self, event: &AttemptEvent, now: u64) -> Result<u64, Error> {
+        let language = self.notice_language;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -358,7 +345,13 @@ impl DomainRepository {
         };
         if let Some(activity) = activity_event {
             tx.execute_batch("SAVEPOINT activity_notice")?;
-            match super::activity::update_and_enqueue(&tx, &event.dispatch_id, &activity, now) {
+            match super::activity::update_and_enqueue(
+                &tx,
+                language,
+                &event.dispatch_id,
+                &activity,
+                now,
+            ) {
                 Ok(_) => tx.execute_batch("RELEASE activity_notice")?,
                 Err(_) => {
                     tx.execute_batch("ROLLBACK TO activity_notice; RELEASE activity_notice")?;
@@ -384,6 +377,7 @@ impl DomainRepository {
     ) -> Result<OverBudgetNotice, Error> {
         identifier(dispatch_id, 128)?;
         clock(now)?;
+        let language = self.notice_language;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -422,7 +416,7 @@ impl DomainRepository {
             &task,
             &root,
             OVER_BUDGET_NOTICE_KIND,
-            over_budget_notice_body(elapsed_ms),
+            super::notice_text::over_budget_notice_body(language, elapsed_ms),
             now,
         )?;
         tx.commit()?;

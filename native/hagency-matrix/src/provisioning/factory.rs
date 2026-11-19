@@ -211,10 +211,8 @@ impl ProvisionedAgent {
         }
         let inner = &self.collector.inner;
         let transport = inner.expected_transport().await?;
-        let mut inboxes = vec![AgentInboxPlan {
-            session_id: self.binding.id.clone(),
-            workspace_id: self.workspace.clone(),
-        }];
+        let mut inboxes = Vec::new();
+        let mut dm_resolved = false;
         let mut rooms = Vec::new();
         for room in &inner.config.rooms {
             let generation = inner.observed_room_generation(room).await?;
@@ -225,7 +223,28 @@ impl ProvisionedAgent {
             } else {
                 selected
             });
-            if !matches!(room.privacy, RoomPrivacy::Group {}) {
+            if matches!(room.privacy, RoomPrivacy::Direct { .. }) {
+                // The DM session is resolved every pass, like the project
+                // session: a bumped DM gets a never-used id (ADR-200).
+                if dm_resolved || room.room_id != self.binding.room_id {
+                    continue;
+                }
+                let binding = SessionBinding {
+                    id: dm_session_id(&transport.engagement_id, transport.generation, generation),
+                    engagement_id: transport.engagement_id.clone(),
+                    room_id: room.room_id.clone(),
+                    thread_root: None,
+                };
+                self.resolve_current(&binding, generation, &transport, &room.privacy)
+                    .await?;
+                inboxes.insert(
+                    0,
+                    AgentInboxPlan {
+                        session_id: binding.id,
+                        workspace_id: self.workspace.clone(),
+                    },
+                );
+                dm_resolved = true;
                 continue;
             }
             if inner.config.factory_rooms.is_none() {
@@ -240,33 +259,56 @@ impl ProvisionedAgent {
                 room_id: room.room_id.clone(),
                 thread_root: None,
             };
-            let resolved = inner
-                .domain
-                .resolve_verified_matrix_session(binding.clone())
+            self.resolve_current(&binding, generation, &transport, &room.privacy)
                 .await?;
-            if resolved.id != binding.id
-                || resolved.engagement_id != binding.engagement_id
-                || resolved.room_id != binding.room_id
-                || resolved.thread_root != binding.thread_root
-            {
-                return Err(Error::Conflict);
-            }
-            let route = inner.domain.matrix_intake_route(binding.id.clone()).await?;
-            if route.room_generation != generation
-                || route.transport_generation != transport.generation
-                || route.privacy != room.privacy
-            {
-                return Err(Error::Generation);
-            }
             inboxes.push(AgentInboxPlan {
                 session_id: binding.id,
                 workspace_id: self.workspace.clone(),
             });
         }
+        if !dm_resolved {
+            inboxes.insert(
+                0,
+                AgentInboxPlan {
+                    session_id: self.binding.id.clone(),
+                    workspace_id: self.workspace.clone(),
+                },
+            );
+        }
         self.joined_rooms(&transport, &mut rooms, &mut inboxes)
             .await?;
         let profile = profile.refresh_matrix_rooms(transport, rooms)?;
         Ok((profile, inboxes))
+    }
+    /// Resolve `binding` and require its route to be current at the observed
+    /// room and transport generation.
+    async fn resolve_current(
+        &self,
+        binding: &SessionBinding,
+        generation: u64,
+        transport: &hagency_core::replies::MatrixTransportObservation,
+        privacy: &RoomPrivacy,
+    ) -> Result<(), Error> {
+        let inner = &self.collector.inner;
+        let resolved = inner
+            .domain
+            .resolve_verified_matrix_session(binding.clone())
+            .await?;
+        if resolved.id != binding.id
+            || resolved.engagement_id != binding.engagement_id
+            || resolved.room_id != binding.room_id
+            || resolved.thread_root != binding.thread_root
+        {
+            return Err(Error::Conflict);
+        }
+        let route = inner.domain.matrix_intake_route(binding.id.clone()).await?;
+        if route.room_generation != generation
+            || route.transport_generation != transport.generation
+            || &route.privacy != privacy
+        {
+            return Err(Error::Generation);
+        }
+        Ok(())
     }
     /// ADR-188: the rooms this agent joined by invitation, read from the
     /// store on every pass. Each is observed on its own; a room that cannot
@@ -913,6 +955,13 @@ impl TokenProvisioningHost {
         }) {
             return Err(Error::Recipients);
         }
+        let dm_generation = collector
+            .inner
+            .config
+            .rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .map_or(1, |room| room.generation);
         *custody
             .collector
             .lock()
@@ -923,16 +972,11 @@ impl TokenProvisioningHost {
         domain
             .register_workspace(format!("work_{}", effect.engagement_id))
             .await?;
-        // The DM session of a later transport incarnation is a new session:
-        // the store never rebinds a session id whose route a fence retired,
-        // so generation 1 keeps the original id and every later one names its
-        // generation (as the project sessions already do).
+        // The DM session of a later transport incarnation or room generation
+        // is a new session: the store never rebinds a session id whose route
+        // a fence retired (see `dm_session_id`).
         let binding = SessionBinding {
-            id: if generation == 1 {
-                format!("session_{}", effect.engagement_id)
-            } else {
-                format!("session_{}_{generation}", effect.engagement_id)
-            },
+            id: dm_session_id(&effect.engagement_id, generation, dm_generation),
             engagement_id: effect.engagement_id.clone(),
             room_id,
             thread_root: None,
@@ -1147,6 +1191,15 @@ impl Collector {
             .map(|host| host.awaiting_owner_engagements())
             .unwrap_or_default()
     }
+    /// ADR-199 P6: reason and remedy of each stuck provision. Read-only.
+    pub fn provision_notes(&self) -> Vec<super::ProvisionNote> {
+        self.inner
+            .config
+            .provisioning
+            .as_ref()
+            .map(|host| host.provision_notes())
+            .unwrap_or_default()
+    }
     pub async fn close_provisioned_agents(&self) -> Result<(), Error> {
         let permit = self
             .inner
@@ -1169,6 +1222,18 @@ impl Collector {
 
 /// A reminder in an encrypted shared room is repeated at most this often.
 const RENOTICE_GAP_MS: u64 = 15 * 60 * 1000;
+
+/// The DM session id of an agent. Room generation 1 keeps the original names
+/// (`session_{eng}` for transport generation 1, `session_{eng}_{tgen}` after),
+/// so every healthy agent and stored row stays valid; a bumped DM names its
+/// generation, because the store never rebinds a retired session id.
+pub(crate) fn dm_session_id(engagement: &str, transport: u64, room: u64) -> String {
+    match (transport, room) {
+        (1, 1) => format!("session_{engagement}"),
+        (_, 1) => format!("session_{engagement}_{transport}"),
+        _ => format!("session_{engagement}_{transport}_{room}"),
+    }
+}
 
 /// ADR-188: one session per (engagement, transport generation, room
 /// generation, joined room), distinct from the legacy `invite_…` sessions.

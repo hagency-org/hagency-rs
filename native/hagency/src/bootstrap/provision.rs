@@ -12,6 +12,7 @@ use hagency_core::{
     replies::{MatrixRoomObservation, MatrixTransportObservation, RoomPrivacy},
     tasks::SessionBinding,
 };
+use hagency_plugin::{RuntimePluginRef, RuntimeQualification};
 use hagency_store::{DomainRepository, EffectOutcome, EffectState, Repository, private};
 use reqwest::{StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -561,6 +562,45 @@ async fn adopt(
     .map_err(|_| Error::State)?;
     let _custody = Repository::open(state).map_err(|_| Error::StateAt("custody_open"))?;
     let mut domain = DomainRepository::open(state).map_err(|_| Error::StateAt("domain_open"))?;
+    let _plugin_lease = if let Some(runtime) = &input.resource.runtime_plugin {
+        let provider = input
+            .resource
+            .provider
+            .clone()
+            .ok_or(Error::StateAt("plugin_runtime"))?;
+        let qualification = domain
+            .plugin_runtime_qualification(
+                runtime,
+                &input.resource.framework,
+                &input.resource.model,
+                &provider,
+                input.resource.reasoning.as_deref(),
+            )
+            .map_err(|_| Error::StateAt("plugin_runtime"))?
+            .ok_or(Error::StateAt("plugin_runtime"))?;
+        let manager = hagency_plugin::PluginService::open(state)
+            .map_err(|_| Error::StateAt("plugin_runtime"))?;
+        Some(
+            manager
+                .claim_runtime(&RuntimeQualification {
+                    runtime: RuntimePluginRef {
+                        plugin_id: qualification.plugin_id,
+                        adapter_id: qualification.adapter_id,
+                        settings_sha256: qualification.settings_sha256,
+                        package_sha256: qualification.package_sha256,
+                    },
+                    framework: qualification.framework,
+                    model: qualification.model,
+                    provider: qualification.provider,
+                    reasoning: qualification.reasoning,
+                    evidence_digest: qualification.evidence_digest,
+                    roles: qualification.roles,
+                })
+                .map_err(|_| Error::StateAt("plugin_runtime"))?,
+        )
+    } else {
+        None
+    };
     domain
         .register(&input.registration)
         .map_err(|_| Error::StateAt("registration"))?;

@@ -54,6 +54,29 @@ fn config_with_room(f: &common::Fixture, endpoint: &str, room: &str) -> HostConf
     .with_root_pem(include_bytes!("../fixtures/ca.pem"))
     .unwrap()
 }
+
+#[tokio::test]
+async fn native_fleet_approval_collector_keeps_admitted_engagements() {
+    let f = common::Fixture::new();
+    let anchor = FleetApprovalAnchor {
+        fleet_id: format!("hf_{}", "a".repeat(32)),
+        server_name: "example.test".into(),
+        registration_generation: 1,
+        bot_mxid: "@approval:example.test".into(),
+    };
+    let config = HostApprovalConfig::for_fleet(
+        config(&f, "http://127.0.0.1:1/"),
+        anchor,
+        vec!["engagement_from_request".into()],
+    )
+    .unwrap();
+    let collector = ApprovalCollector::new(config, f.store.clone()).unwrap();
+    assert_eq!(
+        collector.engagements.snapshot().unwrap(),
+        vec!["engagement_from_request"]
+    );
+    common::shutdown_domain(&f.store, "fleet membership regression").await;
+}
 async fn preflight(fake: &mut common::Fake) {
     let r = fake.next().await;
     assert!(r.target.ends_with("/whoami"));

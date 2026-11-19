@@ -769,6 +769,16 @@ impl Prepared {
                     fix: "the dispatch constraint must apply to the claim profile",
                 })?;
         }
+        let plugin_service = if config.factory_service.is_some() {
+            Some(
+                hagency_plugin::PluginService::open(state).map_err(|_| Failure::Config {
+                    field: "state-dir plugins",
+                    fix: "the plugin registry must open before factory hosts are prepared",
+                })?,
+            )
+        } else {
+            None
+        };
         let mut host = Host::new(
             own.clone(),
             config.executable.clone(),
@@ -781,6 +791,14 @@ impl Prepared {
             field: "agent-driver.json: executable/workspaces/file_limit",
             fix: "the execution host must construct from the executable, workspaces and file limit",
         })?;
+        if let Some(service) = plugin_service.clone() {
+            host = host
+                .with_plugin_service(service)
+                .map_err(|_| Failure::Config {
+                    field: "agent-driver.json: factory_service",
+                    fix: "the execution host must accept the qualified plugin service",
+                })?;
+        }
         let uses_local_codex = config.local_codex.is_some();
         if let Some(local) = config.local_codex {
             claim = claim
@@ -1211,20 +1229,28 @@ impl Prepared {
                     idle_ms: factory.idle_ms,
                 },
             )
-            .and_then(|plan| {
-                plan.with_file_access(config.file_limit, config.send_file, config.receive_file)
-            })
-            .map(|plan| {
-                if config.coordination_tools {
-                    plan.with_coordination_tools()
-                } else {
-                    plan
-                }
-            })
             .map_err(|_| Failure::Config {
                 field: "agent-driver.json: factory_service plan",
-                fix: "the warm plan must apply the file, coordination and receive capabilities",
+                fix: "the warm plan must construct from the executable and limits",
             })?;
+            warm = warm
+                .with_plugin_service(plugin_service.clone().ok_or(Failure::Config {
+                    field: "state-dir plugins",
+                    fix: "the factory plan requires the opened plugin service",
+                })?)
+                .map_err(|_| Failure::Config {
+                    field: "agent-driver.json: factory_service plan",
+                    fix: "the warm plan must accept the qualified plugin service",
+                })?;
+            warm = warm
+                .with_file_access(config.file_limit, config.send_file, config.receive_file)
+                .map_err(|_| Failure::Config {
+                    field: "agent-driver.json: factory_service plan",
+                    fix: "the warm plan must apply the file and receive capabilities",
+                })?;
+            if config.coordination_tools {
+                warm = warm.with_coordination_tools();
+            }
             if uses_local_codex {
                 warm = warm
                     .with_local_codex_from_host(&host)
@@ -1338,6 +1364,10 @@ struct FleetRuntimeConfig {
     matrix_sdk_timeout_ms: Option<u64>,
     idle_ms: u64,
     home: HomeConfiguration,
+    /// The language of the notices agents post into rooms: `en` (default),
+    /// `id` or `zh`. Presentation only.
+    #[serde(default)]
+    notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// What the fleet service builds its provisioning host and agents from.
 pub(super) struct FleetRuntime {
@@ -1345,6 +1375,7 @@ pub(super) struct FleetRuntime {
     pub(super) homes: hagency_store::agent_home::ManagedHomePlan,
     pub(super) setup: super::fleet::Setup,
     pub(super) matrix_limits: hagency_matrix::Limits,
+    pub(super) notice_language: hagency_core::notice::NoticeLanguage,
 }
 /// Whether this state directory configures an imported fleet's runtime.
 pub(super) fn fleet_runtime_configured(state: &Path) -> bool {
@@ -1499,6 +1530,11 @@ pub(super) fn load_fleet_runtime(
         idle_ms: config.idle_ms,
     };
     let approvals = approval_host(config.approval_owner_wait_ms, limits)?;
+    let plugin_service =
+        hagency_plugin::PluginService::open(state).map_err(|_| Failure::Config {
+            field: "state-dir plugins",
+            fix: "the plugin registry must open before fleet factory hosts are prepared",
+        })?;
     let plan = match codex {
         Some(executable) => hagency_execution::WarmHostPlan::new(
             own,
@@ -1530,6 +1566,12 @@ pub(super) fn load_fleet_runtime(
         .map_err(|_| Failure::Config {
             field: "fleet-runtime.json: plan",
             fix: "the warm plan must apply the file, coordination and receive capabilities",
+        })?;
+    warm = warm
+        .with_plugin_service(plugin_service)
+        .map_err(|_| Failure::Config {
+            field: "fleet-runtime.json: plugin service",
+            fix: "the warm plan must accept the opened plugin service",
         })?;
     if let Some(host) = &codex_host {
         warm = warm
@@ -1609,6 +1651,7 @@ pub(super) fn load_fleet_runtime(
         fix: "the home root, task client and at most 16 projects must form a managed home plan",
     })?;
     Ok(FleetRuntime {
+        notice_language: config.notice_language,
         warm,
         homes,
         setup: super::fleet::Setup {
@@ -1686,6 +1729,40 @@ mod fleet_runtime_tests {
             "127.0.0.1:13300".parse().unwrap(),
             "https://matrix.example.test",
         )
+    }
+    #[test]
+    fn native_fleet_runtime_reads_its_notice_language() {
+        let f = fixture();
+        let (claude, digest) = executable(&f, "claude");
+        let mut document = document(&f);
+        document["claude"] = serde_json::json!({"executable": claude, "executable_sha256": digest});
+        let Ok(loaded) = load(&f, &document) else {
+            panic!("default document loads");
+        };
+        assert_eq!(
+            loaded.notice_language,
+            hagency_core::notice::NoticeLanguage::En,
+            "an existing file without the field keeps working, in English"
+        );
+        for (value, expected) in [
+            ("id", hagency_core::notice::NoticeLanguage::Id),
+            ("zh", hagency_core::notice::NoticeLanguage::Zh),
+            ("en", hagency_core::notice::NoticeLanguage::En),
+        ] {
+            document["notice_language"] = serde_json::json!(value);
+            let Ok(loaded) = load(&f, &document) else {
+                panic!("a known language loads");
+            };
+            assert_eq!(loaded.notice_language, expected);
+        }
+        for refused in [
+            serde_json::json!("fr"),
+            serde_json::json!("ID"),
+            serde_json::json!(1),
+        ] {
+            document["notice_language"] = refused;
+            assert!(load(&f, &document).is_err());
+        }
     }
     #[test]
     fn native_fleet_runtime_may_run_claude_only() {

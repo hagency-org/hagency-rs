@@ -72,6 +72,8 @@ impl Routes {
                 "not_started"
                     | "not_attached"
                     | "awaiting_owner"
+                    | "provision_retrying"
+                    | "provision_parked"
                     | "closed"
                     | "retiring"
                     | "refresh_refused"
@@ -120,7 +122,7 @@ impl Routes {
         if let Ok(mut entries) = self.entries.lock()
             && entries
                 .get(engagement)
-                .is_some_and(|entry| entry.status.state() == "awaiting_owner")
+                .is_some_and(|entry| is_provision_row(entry.status.state()))
         {
             entries.remove(engagement);
         }
@@ -131,7 +133,7 @@ impl Routes {
             .map(|entries| {
                 entries
                     .iter()
-                    .filter(|(_, entry)| entry.status.state() == "awaiting_owner")
+                    .filter(|(_, entry)| is_provision_row(entry.status.state()))
                     .map(|(engagement, _)| engagement.clone())
                     .collect()
             })
@@ -261,6 +263,12 @@ impl Provider {
                 .map_err(|_| hagency_matrix::Error::OutcomeUnknown)??;
                 host.take_agent(engagement)
             }
+        }
+    }
+    fn provision_notes(&self) -> Vec<hagency_matrix::ProvisionNote> {
+        match self {
+            Self::Coordinator(c) => c.provision_notes(),
+            Self::Fleet { host, .. } => host.provision_notes(),
         }
     }
     fn awaiting_owner_engagements(&self) -> Vec<(String, u64)> {
@@ -523,18 +531,20 @@ impl Service {
                 .reattach(&self.domain, &engagement, cancel)
                 .await;
             match attached {
-                Ok(agent) => {
-                    if self.admit(agent, notices.clone(), true).await.is_ok() {
-                        tracing::info!(%engagement, "factory agent re-attached");
-                    } else {
-                        tracing::warn!(%engagement, "re-attached factory agent did not start");
-                    }
-                }
-                Err(hagency_matrix::Error::Busy) => {
-                    // This process already owns the provision (the coordinator
-                    // completed it before the fleet started): ordinary
-                    // discovery takes it, exactly once, as it always did.
-                    tracing::debug!(%engagement, "factory agent already owned here; left to discovery");
+                Ok(agent) => match self.admit(agent, notices.clone(), true).await {
+                    Ok(()) => tracing::info!(%engagement, "factory agent re-attached"),
+                    Err(error) => tracing::warn!(
+                        %engagement, ?error,
+                        "re-attached factory agent did not start"
+                    ),
+                },
+                Err(error @ hagency_matrix::Error::Busy) => {
+                    // Taken elsewhere (the coordinator completed the provision
+                    // before the fleet started, or the store lease is held):
+                    // ordinary discovery takes it, exactly once, as it always
+                    // did. Logged, because a worker that never starts here
+                    // would otherwise leave no line at all.
+                    warn_busy(&engagement, &error);
                 }
                 Err(error) => {
                     tracing::warn!(%engagement, ?error, "factory agent not re-attached");
@@ -563,8 +573,37 @@ impl Service {
                 let _ = self.register_root(engagement.clone(), None, None, status);
             }
         }
+        // ADR-199 P6: the reason and remedy of every stuck provision, on its
+        // row, so the owner and the operator read what to do.
+        let notes = self.provider.provision_notes();
+        for note in &notes {
+            let status = self.routes.entries.lock().ok().and_then(|entries| {
+                entries
+                    .get(&note.engagement)
+                    .filter(|e| is_provision_row(e.status.state()))
+                    .map(|e| e.status.clone())
+            });
+            match status {
+                Some(status) => status.provision_note(note.state, note.reason, note.remedy.clone()),
+                None => {
+                    let absent = self
+                        .routes
+                        .entries
+                        .lock()
+                        .map(|entries| !entries.contains_key(&note.engagement))
+                        .unwrap_or(false);
+                    if absent {
+                        let status = StatusHandle::for_mode(DriverMode::Continuous);
+                        status.provision_note(note.state, note.reason, note.remedy.clone());
+                        let _ = self.register_root(note.engagement.clone(), None, None, status);
+                    }
+                }
+            }
+        }
         for engagement in self.routes.awaiting_rows() {
-            if !waiting.iter().any(|(e, _)| *e == engagement) {
+            if !waiting.iter().any(|(e, _)| *e == engagement)
+                && !notes.iter().any(|n| n.engagement == engagement)
+            {
                 self.routes.remove_awaiting(&engagement);
             }
         }
@@ -690,10 +729,88 @@ impl Drop for Service {
     }
 }
 
+/// The state words of a row that exists only while a provision is stuck.
+fn is_provision_row(state: &str) -> bool {
+    matches!(
+        state,
+        "awaiting_owner" | "provision_retrying" | "provision_parked"
+    )
+}
+
+/// A re-attach that found the agent already owned: left to discovery.
+fn warn_busy(engagement: &str, error: &hagency_matrix::Error) {
+    tracing::warn!(%engagement, ?error, "factory agent already owned here; left to discovery");
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::file_service::{FileError, test_common};
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+    fn captured(emit: impl FnOnce()) -> String {
+        let out = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(out.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        String::from_utf8(out.0.lock().unwrap().clone()).unwrap()
+    }
+    #[test]
+    fn refusal_lines_name_the_engagement_and_the_error() {
+        use super::super::driver::{warn_refused, warn_retry};
+        let engagement = "en_logged";
+        let log = captured(|| {
+            warn_busy(engagement, &hagency_matrix::Error::Busy);
+            warn_refused(
+                engagement,
+                "Matrix refresh refused",
+                &hagency_matrix::Error::Generation,
+            );
+            warn_refused(
+                engagement,
+                "factory inbox observation refused",
+                &hagency_matrix::Error::Conflict,
+            );
+            warn_refused(
+                engagement,
+                "Matrix crypto enrollment refused",
+                &hagency_matrix::Error::Busy,
+            );
+            warn_retry(
+                engagement,
+                true,
+                Some("generation"),
+                Duration::from_millis(500),
+            );
+        });
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 5, "{log}");
+        for line in &lines {
+            assert_eq!(line.matches("en_logged").count(), 1, "{line}");
+        }
+        assert!(lines[0].contains("WARN") && lines[0].contains("error=Busy"));
+        assert!(lines[1].contains("error=Generation"));
+        assert!(lines[2].contains("error=Conflict"));
+        assert!(lines[3].contains("error=Busy"));
+        assert!(lines[4].contains("parked=true") && lines[4].contains("generation"));
+    }
     #[tokio::test]
     async fn native_factory_failure_diagnostics() {
         let f = test_common::Fixture::new();

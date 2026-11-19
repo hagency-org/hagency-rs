@@ -10,7 +10,7 @@ mod reissue;
 #[path = "approvals/responses.rs"]
 mod responses;
 use common::*;
-use hagency_core::{approvals::*, replies::*, tasks::*};
+use hagency_core::{approvals::*, project::EngagementState, replies::*, tasks::*};
 use hagency_store::{DomainRepository, DomainStore, EffectOutcome, Error};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -1150,6 +1150,29 @@ fn native_owner_approval_binding_rejects_another_project() {
     let mut room = f.rooms[0].clone();
     room.room_id = "!project:example.test".into();
     assert!(f.db.observe_approval_room(&room, 1012).is_err());
+}
+
+#[test]
+fn native_owner_approval_room_enrolls_before_reserved_engagement_activation() {
+    let mut f = Fixture::new(false);
+    let pool = resource("pool", "seat", 1000);
+    let request = request("reserved_owner", "reserved_agent", &pool, 20);
+    let proof = proof(&request);
+    let engagement = f.db.admit(&proof, 1000).unwrap();
+    let approved = f.db.approve("reserved_approve", &proof, 1000).unwrap();
+    assert_eq!(approved.state, EngagementState::Reserved);
+
+    let mut room = f.rooms[0].clone();
+    room.engagement_id = engagement.id.clone();
+    let authority = f.db.approval_room_authority(&engagement.id).unwrap();
+    assert_eq!(authority.room_id, room.room_id);
+    f.db.observe_approval_room(&room, 1001).unwrap();
+    assert!(f.db.approval_room_capture(&authority).unwrap().is_some());
+    assert!(
+        f.db.approval_bindings("reserved_agent", "", 10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

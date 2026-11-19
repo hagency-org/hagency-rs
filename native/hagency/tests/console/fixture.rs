@@ -2,6 +2,7 @@
 use hagency::{App, console::Console};
 use hagency_core::tasks::*;
 use hagency_metering::{Framework, observation::UsageObservation};
+use hagency_plugin::PluginService;
 use hagency_store::*;
 use salvo::prelude::*;
 use serde_json::{Value, json};
@@ -190,6 +191,7 @@ pub struct Fixture {
     pub console: Console,
     pub domain: DomainStore,
     pub custody: Store,
+    pub plugins: PluginService,
     pub engagement: String,
     pub root: tempfile::TempDir,
 }
@@ -210,15 +212,18 @@ impl Fixture {
         let custody = Store::start(Repository::open(&state).unwrap(), 16).unwrap();
         let (db, engagement) = seed(&state);
         let domain = DomainStore::start(db, 16).unwrap();
+        let plugins = PluginService::open(&state).unwrap();
         let app = App::new(custody.clone(), TOKEN.as_bytes(), address)
             .unwrap()
             .with_domain(domain.clone())
+            .with_plugins(plugins.clone())
             .with_console(console.clone());
         Self {
             app,
             console,
             domain,
             custody,
+            plugins,
             engagement,
             root,
         }
@@ -228,6 +233,7 @@ impl Fixture {
     }
     pub async fn close(self) {
         self.console.retire();
+        self.plugins.shutdown().unwrap();
         self.domain.shutdown().await.unwrap();
         self.custody.shutdown().await.unwrap();
     }

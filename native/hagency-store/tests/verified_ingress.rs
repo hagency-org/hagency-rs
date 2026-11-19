@@ -7,7 +7,10 @@ use common::*;
 use hagency_core::{
     commands::CommandNoticeRequest, ingress::*, messages::*, replies::*, task_intents::*, tasks::*,
 };
-use hagency_store::{DomainRepository, EffectOutcome, Error, OutcomeAction, OutcomeResolution};
+use hagency_store::{
+    AdmissionReason, DomainRepository, EffectOutcome, Error, OutcomeAction, OutcomeResolution,
+    OwnedFailure, OwnedObservation,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -1360,6 +1363,162 @@ fn native_runner_launch_retry_notice() {
     assert_eq!(
         body,
         "Runner could not start, but no work was executed and no input was lost. The dispatch remains queued and will retry automatically."
+    );
+}
+
+/// ADR-198: a dispatch the host refuses at admission says why in the thread,
+/// by a fixed named reason, and never shows setting values or secrets.
+#[test]
+fn room_notice_names_admission_reason_without_secrets() {
+    let mut f = Fixture::new(false);
+    let (_, seq, task) = setup_task(&mut f);
+    f.activate(1013);
+    f.db.enqueue_inbox_dispatch(&dispatch("first", &task), &[seq])
+        .unwrap();
+    let cap =
+        f.db.claim_dispatch("fixture_runner", 1015, 60000, 120000, 8)
+            .unwrap()
+            .unwrap();
+    f.db.observe_owned_failure(
+        &cap,
+        OwnedFailure::AdmissionRefused {
+            reason: AdmissionReason::HarnessTemplateMissing,
+        },
+        1016,
+    )
+    .unwrap();
+    let body: String = f
+        .sql()
+        .query_row(
+            "SELECT json_extract(config,'$.body') FROM task_notices WHERE json_extract(config,'$.kind')='admission_refused'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(body.contains("harness_template_missing"));
+    assert!(body.contains("nothing was sent"));
+    assert!(!body.to_lowercase().contains("interrupted"));
+    // Said once: a second observation of the same dispatch adds no notice.
+    f.db.observe_owned_failure(
+        &cap,
+        OwnedFailure::AdmissionRefused {
+            reason: AdmissionReason::HarnessTemplateMissing,
+        },
+        1017,
+    )
+    .unwrap();
+    let count: u64 = f
+        .sql()
+        .query_row(
+            "SELECT COUNT(*) FROM task_notices WHERE json_extract(config,'$.kind')='admission_refused'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+fn dispatch_state(f: &Fixture, id: &str) -> String {
+    f.sql()
+        .query_row(
+            "SELECT state FROM runner_dispatches WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+fn dropped_notices(f: &Fixture) -> Vec<String> {
+    let sql = f.sql();
+    let mut query = sql
+        .prepare("SELECT json_extract(config,'$.body') FROM task_notices WHERE json_extract(config,'$.kind')='dispatch_dropped'")
+        .unwrap();
+    query
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// ADR-199 P7: the host stopped (restart, shutdown) after the claim and before
+/// anything started. The message is not dropped: the dispatch is queued again
+/// with its input and is claimed again.
+#[test]
+fn cancelled_never_started_dispatch_is_requeued_not_superseded() {
+    let mut f = Fixture::new(false);
+    let (_, seq, task) = setup_task(&mut f);
+    f.activate(1013);
+    f.db.enqueue_inbox_dispatch(&dispatch("first", &task), &[seq])
+        .unwrap();
+    let cap =
+        f.db.claim_dispatch("fixture_runner", 1015, 60000, 120000, 8)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        f.db.observe_owned_failure(&cap, OwnedFailure::Cancelled, 1016)
+            .unwrap(),
+        OwnedObservation::Unstarted
+    );
+    assert_eq!(dispatch_state(&f, "first"), "queued");
+    assert!(dropped_notices(&f).is_empty(), "nothing was dropped");
+    let again =
+        f.db.claim_dispatch("fixture_runner", 1017, 60000, 120000, 8)
+            .unwrap()
+            .expect("the message is claimed again");
+    assert_eq!(again.dispatch_id, "first");
+    assert!(again.fence > cap.fence);
+}
+
+/// ADR-199 P7: a never-started dispatch that is refused for any other reason
+/// is dropped, and the thread is told so, once, with a fixed reason.
+#[test]
+fn refused_never_started_dispatch_tells_the_thread_it_was_dropped() {
+    let mut f = Fixture::new(false);
+    let (_, seq, task) = setup_task(&mut f);
+    f.activate(1013);
+    f.db.enqueue_inbox_dispatch(&dispatch("first", &task), &[seq])
+        .unwrap();
+    let cap =
+        f.db.claim_dispatch("fixture_runner", 1015, 60000, 120000, 8)
+            .unwrap()
+            .unwrap();
+    f.db.observe_owned_failure(&cap, OwnedFailure::SpawnFailed, 1016)
+        .unwrap();
+    assert_eq!(dispatch_state(&f, "first"), "superseded");
+    let notices = dropped_notices(&f);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].contains("was not started and was dropped"),
+        "{}",
+        notices[0]
+    );
+    assert!(
+        notices[0].contains("runtime could not be launched"),
+        "{}",
+        notices[0]
+    );
+    f.db.observe_owned_failure(&cap, OwnedFailure::SpawnFailed, 1017)
+        .unwrap();
+    assert_eq!(dropped_notices(&f).len(), 1, "said once");
+}
+
+/// A started dispatch is never replayed: cancelling it leaves it fenced with
+/// an unknown outcome, not queued (never-silent-redo).
+#[test]
+fn started_dispatch_is_never_requeued_by_cancellation() {
+    let mut f = Fixture::new(false);
+    let (_, seq, task) = setup_task(&mut f);
+    f.activate(1013);
+    let cap = f.start("first", &task, &[seq], 1015);
+    assert_eq!(
+        f.db.observe_owned_failure(&cap, OwnedFailure::Cancelled, 1020)
+            .unwrap(),
+        OwnedObservation::Fenced
+    );
+    assert_eq!(dispatch_state(&f, "first"), "outcome_unknown");
+    assert!(
+        f.db.claim_dispatch("fixture_runner", 1021, 60000, 120000, 8)
+            .unwrap()
+            .is_none()
     );
 }
 

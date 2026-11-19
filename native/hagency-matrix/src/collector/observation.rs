@@ -109,6 +109,7 @@ pub(crate) enum SdkCommand {
     OutgoingPossible,
     OutgoingAccept,
     OutgoingRefused,
+    OutgoingAbandon,
     OutgoingSettle,
     Cursor,
     Sync,

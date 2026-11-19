@@ -27,6 +27,7 @@ mod side_lifecycle;
 pub mod side_registration;
 mod stream;
 mod tasks;
+mod upgrades;
 mod usage;
 use crate::{App, refusal};
 use authority::{Authority, COOKIE, Session};
@@ -125,6 +126,7 @@ pub(crate) fn router() -> Router {
                 .push(exec_policy::router())
                 .push(stream::router())
                 .push(engagements::router())
+                .push(upgrades::router())
                 .push(setup::router())
                 .push(graphs::router())
                 .push(invites::router())
@@ -142,7 +144,7 @@ pub(crate) fn router() -> Router {
                 .push(accounts::router())
                 .push(matrix_diag::router())
                 .push(resource_configuration::router())
-                // Task #46: the operator-facing capability and framework reads
+                .push(crate::plugins::router())
                 // (GET /api/capability, /api/frameworks, /api/frameworks/detect)
                 // are session-scoped reads, mounted under the console API so
                 // the native console reaches them without an operator bearer.

@@ -72,7 +72,7 @@ fn rail_pages() -> Vec<String> {
         .collect();
     assert_eq!(
         keys.len(),
-        9,
+        10,
         "the native rail's link set changed size; re-derive and confirm the pages ship: {keys:?}"
     );
     keys.into_iter()

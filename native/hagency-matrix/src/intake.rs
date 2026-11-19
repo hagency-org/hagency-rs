@@ -749,7 +749,13 @@ impl Inner {
                 // turn.
                 Err(
                     error @ (Error::Unauthorized
-                    | Error::Domain("not_found" | "unqualified" | "invalid")),
+                    | Error::Domain(
+                        "not_found"
+                        | "unqualified"
+                        | "invalid"
+                        | "harness_template_missing"
+                        | "harness_template_invalid",
+                    )),
                 ) if msg.kind != "com.hagency.engagement.approval.v1" => {
                     eprintln!(
                         "reception request {} not admitted from Matrix ({error:?}); the fleet request lane keeps it",

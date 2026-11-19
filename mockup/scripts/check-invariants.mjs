@@ -29,7 +29,7 @@ const BASE = process.env.BASE ?? 'http://127.0.0.1:3100';
 
 const ROUTES = [
   '/resources', '/resources/new', '/workforce', '/capability', '/projects', '/engagements', '/usage',
-  '/alerts', '/config', '/onboard',
+  '/alerts', '/config', '/onboard', '/plugins',
   '/agents/claude-agent', '/agents/octos-agent', '/agents/codex-agent',
   '/agents/hermes-agent', '/agents/codex-acp-agent',
 ];

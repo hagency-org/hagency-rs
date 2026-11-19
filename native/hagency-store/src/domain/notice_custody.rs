@@ -320,6 +320,15 @@ impl DomainRepository {
         generation(fence)?;
         Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM task_notices WHERE id=?1 AND send_fence=?2 AND state='sending' AND cancel_requested=0)",params![id, fence], |row| row.get(0))?)
     }
+    /// Secret-free read for a resumed send: did the host itself cancel this
+    /// undelivered notice write (retirement or host cancellation)? Unlike a
+    /// send left `uncertain` by a restart, nobody wants it any more, so its
+    /// journal slot may be released without re-sending it.
+    pub fn verified_notice_send_cancelled(&self, id: &str, fence: u64) -> Result<bool, Error> {
+        identifier(id, 128)?;
+        generation(fence)?;
+        Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM task_notices WHERE id=?1 AND send_fence=?2 AND cancel_requested=1 AND state<>'delivered')",params![id, fence], |row| row.get(0))?)
+    }
     pub fn cancel_verified_task_notice(
         &mut self,
         id: &str,

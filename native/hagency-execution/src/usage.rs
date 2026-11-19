@@ -93,6 +93,53 @@ impl UsageRun {
             },
         })
     }
+    /// A plugin runtime's usage source: bound like any other, never attached to
+    /// a native stream (a plugin has none). Its one observation per turn comes
+    /// from `observe_plugin_turn`, always marked incomplete.
+    pub(super) async fn bind_plugin(
+        domain: DomainStore,
+        capability: RunnerCapability,
+        started: OwnedDispatchScope,
+    ) -> Result<Self, hagency_store::Error> {
+        let mut usage = Self::bind(domain, capability, started).await?;
+        usage.status.incomplete = true;
+        Ok(usage)
+    }
+    /// Retain the usage a plugin reported in `turn/result` as the one pending
+    /// observation. True only when something new is retained to record. A
+    /// count the runtime did not report stays unknown; nothing is invented.
+    pub(super) fn observe_plugin_turn(&mut self, usage: &hagency_plugin::RuntimeUsage) -> bool {
+        if self.status.closed {
+            return false;
+        }
+        if self.pending.is_some() {
+            self.fence(UsageFailure::Storage);
+            return false;
+        }
+        let counts = hagency_metering::TokenCounts {
+            input: usage.input,
+            output: usage.output,
+            cache_write: usage.cache_write,
+            cache_read: usage.cache_read,
+        };
+        self.status.observed += 1;
+        match UsageObservation::plugin_runtime(counts) {
+            Ok(observation) => {
+                self.pending = Some(Pending {
+                    call_id: "plugin_turn_result".into(),
+                    observation,
+                });
+                self.status.pending = true;
+                self.close();
+                true
+            }
+            Err(_) => {
+                self.status.rejected = true;
+                self.fence(UsageFailure::Normalization);
+                false
+            }
+        }
+    }
     pub(super) fn status(&self) -> UsageStatus {
         self.status
     }

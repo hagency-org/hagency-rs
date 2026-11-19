@@ -21,6 +21,8 @@ struct Server {
     /// ADR-184: the agent invited the owner to its DM (after enrollment).
     owner_invited: bool,
     inbox_cursor_reserved: bool,
+    /// The owner sent a message in the agent's DM after joining it.
+    owner_wrote: bool,
     posts: usize,
     owner_reads: usize,
     as_created: bool,
@@ -52,6 +54,7 @@ impl Server {
             owner: false,
             owner_invited: false,
             inbox_cursor_reserved: false,
+            owner_wrote: false,
             posts: 0,
             owner_reads: 0,
             as_created: false,
@@ -202,6 +205,30 @@ impl Server {
                     json!({"user_id":self.user,"device_id":self.device,"is_guest":false})
                 },
             );
+        }
+        if url.path().ends_with("/messages") {
+            // The DM's history, newest first, as a backward `/messages` page
+            // reaching the room's creation: clear senders, never decrypted.
+            assert!(!human && !rep && request.method == "GET");
+            assert!(request.target.contains("physically_created_agent_dm"));
+            let mut chunk = vec![];
+            if self.owner_wrote {
+                chunk.push(json!({"type":"m.room.encrypted","sender":OWNER,"content":{}}));
+            }
+            if self.owner_invited {
+                chunk.push(json!({"type":"m.room.member","state_key":OWNER,
+                    "sender":if self.owner {OWNER} else {self.user.as_str()},
+                    "content":{"membership":if self.owner {"join"} else {"invite"}}}));
+            }
+            for event in self.dm().as_array().unwrap().iter().rev() {
+                if event["state_key"] == OWNER {
+                    continue;
+                }
+                let mut event = event.clone();
+                event["sender"] = json!(self.user);
+                chunk.push(event);
+            }
+            return (200, json!({"chunk": chunk, "start": "s1"}));
         }
         if request.target.ends_with("/state") {
             assert!(!human);
@@ -1937,6 +1964,8 @@ async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
         }
         assert_eq!(server.peer.writes.len(), 5);
         assert_eq!(server.as_posts, 2);
+        // The owner joined and wrote in the DM: a new cursor could miss it.
+        server.owner_wrote = unsafe_invite;
         let before_rooms = server.posts;
         c.close().await.unwrap();
         drop(account);
@@ -1986,12 +2015,7 @@ async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
         let work = async {
             let mut account = operation.execute(&cancel).await?;
             account
-                .resume_before_owner_invite(
-                    REP_TOKEN,
-                    vec![(OWNER.into(), anchor)],
-                    inspection,
-                    &cancel,
-                )
+                .resume_enrolled(REP_TOKEN, vec![(OWNER.into(), anchor)], inspection, &cancel)
                 .await?;
             Ok::<_, Error>(account)
         };
@@ -2010,7 +2034,9 @@ async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
         assert_eq!(server.peer.writes.len(), 5);
         assert_eq!(server.as_posts, 2);
         if unsafe_invite {
-            assert!(recovered.is_err());
+            // ADR-199 P6: an unreadable/unsafe DM after the invite is not provable;
+            // it stays parked on its named error and nothing is replayed.
+            assert_eq!(recovered.err(), Some(Error::Recipients));
             assert_eq!(
                 effect_row(&f),
                 Some(("provision".into(), "uncertain".into()))
@@ -2055,6 +2081,359 @@ async fn native_provisioning_recovers_completed_keys_before_owner_invite() {
                     .await
                     .unwrap()
             );
+            account.close_enrollment_sdk().await.unwrap();
+        }
+        f.store.shutdown().await.unwrap();
+        fake.close().await;
+    }
+}
+
+/// One host `account` turn (the retry/resume entry), served by the fake server.
+async fn account_turn(
+    f: &common::Fixture,
+    fake: &mut common::Fake,
+    c: &Collector,
+    server: &mut Server,
+    mut change: impl FnMut(&common::Request, &mut (u16, Value)),
+) -> Result<(), Error> {
+    let host = c.inner.config.provisioning.as_ref().unwrap();
+    let cancel = CancellationToken::new();
+    let registration = common::domain::registration();
+    let engagement = admitted_id(f);
+    let operation = host.account(&f.store, &registration, &engagement, &cancel);
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            result=&mut operation=>break result,
+            request=fake.next()=>{
+                let mut response=server.reply(&request).await;
+                change(&request,&mut response);
+                request.json(response.0,response.1);
+            }
+        }
+    }
+}
+/// A 503 on the `nth` read of the agent's DM state after the owner invite has
+/// been answered: transient, after the invite is proven. A resumed attempt
+/// replays two enrollment reads of that state before its owner step reads it, so
+/// `nth` 3 spares the replay.
+fn dm_state_503(
+    invited: &mut bool,
+    nth: usize,
+) -> impl FnMut(&common::Request, &mut (u16, Value)) + '_ {
+    let mut reads = 0;
+    move |request, response| {
+        if request.target.ends_with("/invite")
+            && request.target.contains("physically_created_agent_dm")
+            && response.0 == 200
+        {
+            *invited = true;
+        }
+        if *invited
+            && request.method == "GET"
+            && request.target.contains("physically_created_agent_dm")
+            && request.target.ends_with("/state")
+        {
+            reads += 1;
+            if reads == nth {
+                *response = (503, json!({"errcode":"M_UNKNOWN"}));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn provision_retries_a_transient_failure_after_the_owner_invite_and_resumes() {
+    let home = HomeFixture::new();
+    let mut server = Server::new().await;
+    let (f, mut fake, c) = ready_appservice(&home, &server).await;
+    let mut invited = false;
+    let first = drive(
+        &f,
+        &mut fake,
+        &c,
+        &mut server,
+        false,
+        dm_state_503(&mut invited, 1),
+    )
+    .await;
+    assert_eq!(first.unwrap_err(), Error::Remote(503));
+    let host = c.inner.config.provisioning.as_ref().unwrap();
+    let engagement = admitted_id(&f);
+    // Nothing is observed unknown: the effect stays Started, a retry is scheduled.
+    assert_eq!(effect_row(&f), Some(("provision".into(), "started".into())));
+    let (attempts, next, parked) = host.observed_recovery(&engagement);
+    assert_eq!((attempts, parked), (1, None));
+    let next = next.expect("a retry is scheduled on the host clock");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(next > now && next <= now + crate::provisioning::retry_delay_ms(1));
+    assert!(observed_account(&f, &c).owner_step_retryable());
+    let notes = host.provision_notes();
+    assert_eq!(notes[0].state, "provision_retrying");
+    let (posts, writes, as_posts) = (server.posts, server.peer.writes.len(), server.as_posts);
+    // Not due: the cached failure is returned and nothing reaches the server.
+    let before = fake.requests();
+    assert_eq!(
+        account_turn(&f, &mut fake, &c, &mut server, |_, _| {})
+            .await
+            .unwrap_err(),
+        Error::Remote(503)
+    );
+    assert_eq!(fake.requests(), before);
+    // Due, and still transient: the next retry is scheduled, still Started.
+    host.make_retry_due(&engagement);
+    let mut invited = true;
+    assert_eq!(
+        account_turn(
+            &f,
+            &mut fake,
+            &c,
+            &mut server,
+            dm_state_503(&mut invited, 3)
+        )
+        .await
+        .unwrap_err(),
+        Error::Remote(503)
+    );
+    assert_eq!(host.observed_recovery(&engagement).0, 2);
+    assert_eq!(effect_row(&f), Some(("provision".into(), "started".into())));
+    // Due again, the server recovered and the owner joined: the provision resumes.
+    host.make_retry_due(&engagement);
+    let owner = tokio::spawn(owner_join(fake.endpoint.clone()));
+    account_turn(&f, &mut fake, &c, &mut server, |_, _| {})
+        .await
+        .unwrap();
+    owner.await.unwrap();
+    assert_eq!(host.observed_recovery(&engagement), (0, None, None));
+    assert!(host.provision_notes().is_empty());
+    // No second invite, no key write, no second account step.
+    assert_eq!(
+        (server.posts, server.peer.writes.len(), server.as_posts),
+        (posts, writes, as_posts)
+    );
+    finish(f, fake, c).await;
+}
+
+#[tokio::test]
+async fn provision_parks_with_a_named_reason_after_the_retries_are_exhausted() {
+    let home = HomeFixture::new();
+    let mut server = Server::new().await;
+    let (f, mut fake, c) = ready_appservice(&home, &server).await;
+    let mut invited = false;
+    let first = drive(
+        &f,
+        &mut fake,
+        &c,
+        &mut server,
+        false,
+        dm_state_503(&mut invited, 1),
+    )
+    .await;
+    assert_eq!(first.unwrap_err(), Error::Remote(503));
+    let host = c.inner.config.provisioning.as_ref().unwrap();
+    let engagement = admitted_id(&f);
+    for attempt in 2..=crate::provisioning::MAX_PROVISION_RETRIES {
+        host.make_retry_due(&engagement);
+        let mut invited = true;
+        account_turn(
+            &f,
+            &mut fake,
+            &c,
+            &mut server,
+            dm_state_503(&mut invited, 3),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(host.observed_recovery(&engagement).0, attempt);
+        assert_eq!(effect_row(&f), Some(("provision".into(), "started".into())));
+    }
+    // One failure beyond the bound: the effect is observed unknown and parked.
+    host.make_retry_due(&engagement);
+    let mut invited = true;
+    account_turn(
+        &f,
+        &mut fake,
+        &c,
+        &mut server,
+        dm_state_503(&mut invited, 3),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        effect_row(&f),
+        Some(("provision".into(), "uncertain".into()))
+    );
+    let (attempts, next, parked) = host.observed_recovery(&engagement);
+    assert_eq!(
+        (attempts, next, parked),
+        (
+            crate::provisioning::MAX_PROVISION_RETRIES,
+            None,
+            Some("owner_invite")
+        )
+    );
+    let notes = host.provision_notes();
+    assert_eq!(notes[0].state, "provision_parked");
+    assert_eq!(notes[0].reason, "transport_retry_exhausted");
+    finish(f, fake, c).await;
+}
+
+#[tokio::test]
+async fn native_provisioning_resumes_an_invited_or_silent_joined_owner_and_parks_one_who_wrote_without_replaying_a_write()
+ {
+    // ADR-199 P6: a restart after the owner invite resumes from the custody.
+    // `answered`: the invite response is stored. Otherwise the response is lost
+    // after the invite was sent (possible, no answer): inspected, never repeated.
+    // `joined`: the owner joined the DM before the restart. `wrote`: the owner
+    // also wrote there, so a new inbox cursor could miss it: it stays parked.
+    // A joined owner whose DM history proves no write resumes like an invited one.
+    for (answered, joined, wrote) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, true),
+        (true, true, false),
+    ] {
+        let home = HomeFixture::new();
+        let mut server = Server::new().await;
+        let (mut f, mut fake, c) = ready_appservice(&home, &server).await;
+        let mut invited = false;
+        let first = drive(
+            &f,
+            &mut fake,
+            &c,
+            &mut server,
+            false,
+            dm_state_503(&mut invited, 1),
+        )
+        .await;
+        assert_eq!(first.unwrap_err(), Error::Remote(503));
+        let root = room_root(&f);
+        assert!(root.join("owner-invite-possible").exists());
+        assert!(root.join("owner-invite-response").exists());
+        assert!(!root.join("complete").exists());
+        if !answered {
+            std::fs::remove_file(root.join("owner-invite-response")).unwrap();
+        }
+        if joined {
+            let join = tokio::spawn(owner_join(fake.endpoint.clone()));
+            let request = fake.next().await;
+            let response = server.reply(&request).await;
+            request.json(response.0, response.1);
+            join.await.unwrap();
+            server.owner_wrote = wrote;
+        }
+        let account = observed_account(&f, &c);
+        account.close_enrollment_sdk().await.unwrap();
+        let mut effect = f
+            .store
+            .effect(format!("provision_{}", admitted_id(&f)))
+            .await
+            .unwrap();
+        // A restart leaves the started provision uncertain.
+        f.store
+            .observe_effect(
+                effect.id.clone(),
+                effect.fence,
+                hagency_store::EffectOutcome::Unknown,
+            )
+            .await
+            .unwrap();
+        let (posts, writes, as_posts) = (server.posts, server.peer.writes.len(), server.as_posts);
+        c.close().await.unwrap();
+        drop(account);
+        drop(c);
+        f.store.shutdown().await.unwrap();
+        f.store = hagency_store::DomainStore::start(
+            hagency_store::DomainRepository::open(&f.root.path().join("domain")).unwrap(),
+            32,
+        )
+        .unwrap();
+        effect.state = hagency_store::EffectState::Started;
+        let registration = common::domain::registration();
+        let inspection = f
+            .store
+            .inspect_provision_scope(effect.clone(), registration.clone())
+            .await
+            .unwrap();
+        let plan = home.plan(
+            hagency_store::agent_home::ProjectMode::Copy,
+            "project_provision",
+        );
+        plan.reopen(&inspection, &effect, &registration).unwrap();
+        let operation = crate::TokenAccountProvision::application_service(
+            &registration,
+            &effect,
+            &fake.endpoint,
+            crate::ApplicationServiceCredential::new(AS_TOKEN, &format!("{}_", fleet_id()))
+                .unwrap(),
+            f.root.path().join("accounts"),
+            [73; 32],
+            common::load_limits(),
+        )
+        .unwrap()
+        .with_root_pem(include_bytes!("../fixtures/ca.pem"))
+        .unwrap()
+        .for_recovery()
+        .with_domain(f.store.clone(), effect.clone(), registration);
+        let cancel = CancellationToken::new();
+        let anchor = server.peer.anchor();
+        let anchor_again = anchor.clone();
+        server.inbox_cursor_reserved = false;
+        let endpoint = fake.endpoint.clone();
+        let work = async {
+            let mut account = operation.execute(&cancel).await?;
+            account
+                .resume_enrolled(REP_TOKEN, vec![(OWNER.into(), anchor)], inspection, &cancel)
+                .await?;
+            if wrote {
+                return Ok(None);
+            }
+            account.create_agent_rooms(REP_TOKEN, &cancel).await?;
+            account
+                .enroll_created_rooms(1, [73; 32], vec![(OWNER.into(), anchor_again)], &cancel)
+                .await?;
+            // The owner accepts, then the owner step reads the DM and never invites again.
+            if !joined {
+                owner_join(endpoint).await;
+            }
+            account.invite_owner(REP_TOKEN, &cancel).await?;
+            Ok::<_, Error>(Some(account))
+        };
+        tokio::pin!(work);
+        let account = loop {
+            tokio::select! {
+                result=&mut work => break result,
+                request=fake.next() => {
+                    let human = request.headers.get("authorization")
+                        == Some(&format!("Bearer {HUMAN_TOKEN}"));
+                    assert!(
+                        human
+                            || !["/invite", "/register", "/login", "/createRoom", "/keys/upload", "/keys/device_signing/upload"]
+                                .iter()
+                                .any(|w| request.target.ends_with(w))
+                                && !request.target.contains("/join/"),
+                        "resume must not write: {} {}",
+                        request.method,
+                        request.target
+                    );
+                    let response=server.reply(&request).await;request.json(response.0,response.1);
+                }
+            }
+        };
+        assert_eq!(
+            (server.posts, server.peer.writes.len(), server.as_posts),
+            (posts, writes, as_posts),
+            "no second invite, key upload or account write (answered={answered} joined={joined} wrote={wrote})"
+        );
+        if wrote {
+            assert_eq!(account.err(), Some(Error::Recipients));
+            assert!(!root.join("complete").exists());
+        } else {
+            assert!(root.join("complete").exists());
+            let account = account.unwrap().unwrap();
             account.close_enrollment_sdk().await.unwrap();
         }
         f.store.shutdown().await.unwrap();

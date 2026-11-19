@@ -91,6 +91,12 @@ Palpo homeserver  <── outbound HTTPS ──  hagency start (127.0.0.1:13300)
   [native/README.md](native/README.md) 列出了全部 crate。
 
 [代码导读](docs/architecture-walkthrough.zh-CN.md)按流程逐一走读代码，并附有图示。
+### Agent 平台、运行时适配器与项目工作区
+
+Hagency 与运行时无关：它是负责项目和 agent 记录、项目工作区、租约、审批、派发、用量、结果和清理的 agent 平台。Harness 适配器可以把项目／agent 上下文映射到提供方 target，并监管该 target。Agent runtime plugin 是提供方的执行侧，不是平台本身。
+
+项目房间是 Matrix 对话，工作区是主机上的文件系统租约，pane／target 是提供方本地的运行时会话。安装或选择插件本身不会自动创建这些对象。提供方特定的协议和 target 文档属于独立版本管理的 [Hagency 插件示例仓库](https://github.com/nizarfadlan/hagency-agent-plugins/blob/main/README.md)。
+
 
 ## 设置 Hagency
 

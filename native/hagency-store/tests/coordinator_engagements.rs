@@ -1200,7 +1200,7 @@ fn scoped_agent_rename_preserves_identity_budget_and_newer_name_across_restart()
     // Upgrade a copied schema-65 database without changing its existing grant.
     drop(db);
     let sql = rusqlite::Connection::open(dir.path().join("state/domain.sqlite3")).unwrap();
-    sql.execute_batch("DROP TABLE coordinator_migrations; DROP TABLE coordinator_project_setup; DROP TABLE coordinator_project_setup_attempts; DROP TABLE coordinator_agent_profiles; PRAGMA user_version=65;")
+    sql.execute_batch("DROP TABLE plugin_tool_calls; DROP TABLE plugin_invocations; DROP TABLE plugin_runtime_qualifications; DROP TABLE coordinator_migrations; DROP TABLE coordinator_project_setup; DROP TABLE coordinator_project_setup_attempts; DROP TABLE coordinator_agent_profiles; ALTER TABLE agent_definitions DROP COLUMN harness_template; PRAGMA user_version=65;")
         .unwrap();
     drop(sql);
     let mut db = DomainRepository::open(&dir.path().join("state")).unwrap();

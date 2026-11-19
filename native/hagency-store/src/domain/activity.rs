@@ -9,9 +9,9 @@
 //! row; tool events dedupe by event key, count on first insert only, and
 //! `tool_end` requires its `tool_start`.
 //!
-//! The BODY is verbatim TS (`activity.ts:64-75`): the icon set
-//! ✅/⚠️/⏸️/⏳, the phase words, and the counter line
-//! `已运行 N 秒 · 工具调用 T 次，已返回 F 次`. The coalescing windows are
+//! The BODY follows TS (`activity.ts:64-75`): an icon, the phase words,
+//! and a counter line, in the operator's [`NoticeLanguage`]; `zh` is the
+//! retained product's text verbatim. The coalescing windows are
 //! TS's too (`:56-62`): immediate for lifecycle phases and the FIRST
 //! tool, else due when `now - queued_at >= 30_000` (heartbeat) / `5_000`.
 //!
@@ -19,26 +19,37 @@
 //! COALESCE — the event every later revision edits in place.
 use super::DomainRepository;
 use crate::{Error, domain::task_intents, domain::verified_ingress};
-use hagency_core::project::identifier;
+use hagency_core::{notice::NoticeLanguage, project::identifier};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 
-/// The tool kinds a tool event names, with their TS display labels
-/// (`activity.ts:14-19`) — a map to the sentence fragment
-/// `正在${LABELS[kind]}`.
-const LABELS: &[(&str, &str)] = &[
-    ("command", "运行命令"),
-    ("files", "读取或修改文件"),
-    ("search", "搜索资料"),
-    ("delegate", "委派任务"),
-    ("tool", "调用工具"),
-];
+/// The tool kinds a tool event names (`activity.ts:14-19`). Only these
+/// kinds are admitted; each language words them in [`label`].
+const KINDS: &[&str] = &["command", "files", "search", "delegate", "tool"];
 
-fn label(kind: &str) -> Option<&'static str> {
-    LABELS
-        .iter()
-        .find(|(key, _)| *key == kind)
-        .map(|(_, label)| *label)
+/// The display label of a tool kind, or None for a kind the notice does not
+/// name: the fragment after "Now" / "Sedang" / `正在`.
+fn label(language: NoticeLanguage, kind: &str) -> Option<&'static str> {
+    if !KINDS.contains(&kind) {
+        return None;
+    }
+    Some(match (language, kind) {
+        (NoticeLanguage::En, "command") => "running a command",
+        (NoticeLanguage::En, "files") => "reading or changing files",
+        (NoticeLanguage::En, "search") => "searching",
+        (NoticeLanguage::En, "delegate") => "delegating a task",
+        (NoticeLanguage::En, _) => "calling a tool",
+        (NoticeLanguage::Id, "command") => "menjalankan perintah",
+        (NoticeLanguage::Id, "files") => "membaca atau mengubah file",
+        (NoticeLanguage::Id, "search") => "mencari informasi",
+        (NoticeLanguage::Id, "delegate") => "mendelegasikan tugas",
+        (NoticeLanguage::Id, _) => "memanggil tool",
+        (NoticeLanguage::Zh, "command") => "运行命令",
+        (NoticeLanguage::Zh, "files") => "读取或修改文件",
+        (NoticeLanguage::Zh, "search") => "搜索资料",
+        (NoticeLanguage::Zh, "delegate") => "委派任务",
+        (NoticeLanguage::Zh, _) => "调用工具",
+    })
 }
 
 /// One observation the lifecycle asks the store to keep. The TS
@@ -102,8 +113,10 @@ pub struct ActivityUpdate {
     pub body: String,
 }
 
-/// The notice body, verbatim TS (`activity.ts:64-75`).
+/// The notice body (`activity.ts:64-75`) in `language`: an icon, the phase
+/// words, then the elapsed time and the tool counters.
 pub fn activity_body(
+    language: NoticeLanguage,
     phase: &str,
     kind: Option<&str>,
     tools: i64,
@@ -119,20 +132,59 @@ pub fn activity_body(
         _ => "⏳",
     };
     let words = match phase {
-        "waiting" => "等待负责人授权；请在私人审批房间处理",
-        "completed" => "本轮处理已结束",
-        "interrupted" => "执行已中断，结果待确认",
-        "resumed" => "已收到审批决定，继续处理",
         "tool_start" => {
-            let label = kind.and_then(label).unwrap_or("调用工具");
-            return format!(
-                "{icon} 正在{label}\n已运行 {elapsed} 秒 · 工具调用 {tools} 次，已返回 {finished} 次"
-            );
+            let fallback = label(language, "tool").unwrap_or_default();
+            let label = kind
+                .and_then(|kind| label(language, kind))
+                .unwrap_or(fallback);
+            match language {
+                NoticeLanguage::En => format!("Now {label}"),
+                NoticeLanguage::Id => format!("Sedang {label}"),
+                NoticeLanguage::Zh => format!("正在{label}"),
+            }
         }
-        "tool_end" => "工具调用已返回，继续处理",
-        _ => "已开始处理，等待运行器的下一步事件",
+        phase => phase_words(language, phase).to_owned(),
     };
-    format!("{icon} {words}\n已运行 {elapsed} 秒 · 工具调用 {tools} 次，已返回 {finished} 次")
+    let counters = match language {
+        NoticeLanguage::En => {
+            format!("Running for {elapsed} s · {tools} tool calls, {finished} returned")
+        }
+        NoticeLanguage::Id => {
+            format!("Berjalan {elapsed} detik · {tools} panggilan tool, {finished} selesai")
+        }
+        NoticeLanguage::Zh => {
+            format!("已运行 {elapsed} 秒 · 工具调用 {tools} 次，已返回 {finished} 次")
+        }
+    };
+    format!("{icon} {words}\n{counters}")
+}
+
+/// The words of every phase but `tool_start` (which names its tool).
+fn phase_words(language: NoticeLanguage, phase: &str) -> &'static str {
+    match (language, phase) {
+        (NoticeLanguage::En, "waiting") => {
+            "Waiting for the owner's approval; answer it in your private approval room"
+        }
+        (NoticeLanguage::En, "completed") => "This turn is finished",
+        (NoticeLanguage::En, "interrupted") => "Interrupted; the result is not confirmed",
+        (NoticeLanguage::En, "resumed") => "Approval decision received; continuing",
+        (NoticeLanguage::En, "tool_end") => "Tool call returned; continuing",
+        (NoticeLanguage::En, _) => "Started; waiting for the runner's next event",
+        (NoticeLanguage::Id, "waiting") => {
+            "Menunggu persetujuan pemilik; jawab di room persetujuan pribadi Anda"
+        }
+        (NoticeLanguage::Id, "completed") => "Giliran ini selesai",
+        (NoticeLanguage::Id, "interrupted") => "Terhenti; hasilnya belum pasti",
+        (NoticeLanguage::Id, "resumed") => "Keputusan persetujuan diterima; melanjutkan",
+        (NoticeLanguage::Id, "tool_end") => "Panggilan tool selesai; melanjutkan",
+        (NoticeLanguage::Id, _) => "Mulai diproses; menunggu langkah runner berikutnya",
+        (NoticeLanguage::Zh, "waiting") => "等待负责人授权；请在私人审批房间处理",
+        (NoticeLanguage::Zh, "completed") => "本轮处理已结束",
+        (NoticeLanguage::Zh, "interrupted") => "执行已中断，结果待确认",
+        (NoticeLanguage::Zh, "resumed") => "已收到审批决定，继续处理",
+        (NoticeLanguage::Zh, "tool_end") => "工具调用已返回，继续处理",
+        (NoticeLanguage::Zh, _) => "已开始处理，等待运行器的下一步事件",
+    }
 }
 
 /// Read one dispatch's activity row, inside the caller's transaction.
@@ -164,6 +216,7 @@ pub(super) fn read(tx: &Transaction<'_>, dispatch_id: &str) -> Result<Option<Act
 /// when the event was refused or coalesced away.
 pub(super) fn update(
     tx: &Transaction<'_>,
+    language: NoticeLanguage,
     dispatch_id: &str,
     event: &ActivityEvent,
     now: i64,
@@ -204,9 +257,9 @@ pub(super) fn update(
     }
     match event {
         ActivityEvent::ToolStart { kind, event_id } | ActivityEvent::ToolEnd { kind, event_id } => {
-            let Some(_) = label(kind) else {
+            if !KINDS.contains(&kind.as_str()) {
                 return Ok(None);
-            };
+            }
             let key = format!("{}:{}", event.phase(), event_id);
             if matches!(event, ActivityEvent::ToolEnd { .. })
                 && !tx.query_row(
@@ -272,6 +325,7 @@ pub(super) fn update(
     Ok(Some(ActivityUpdate {
         revision: row.revision,
         body: activity_body(
+            language,
             &row.phase,
             row.kind.as_deref(),
             row.tools,
@@ -300,12 +354,13 @@ pub(super) fn delivered(tx: &Connection, dispatch_id: &str, event_id: &str) -> R
 /// over-budget notice uses — never a second routing authority.
 pub(super) fn update_and_enqueue(
     tx: &Transaction<'_>,
+    language: NoticeLanguage,
     dispatch_id: &str,
     event: &ActivityEvent,
     now: u64,
 ) -> Result<Option<ActivityUpdate>, Error> {
     let now_i64 = i64::try_from(now).map_err(|_| Error::Unavailable)?;
-    let Some(update) = update(tx, dispatch_id, event, now_i64)? else {
+    let Some(update) = update(tx, language, dispatch_id, event, now_i64)? else {
         return Ok(None);
     };
     // The anchor every later revision edits: the FIRST delivered activity
@@ -397,6 +452,7 @@ impl DomainRepository {
         ) {
             return Err(hagency_core::InvalidInput("runner cannot set lifecycle activity").into());
         }
+        let language = self.notice_language;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -434,7 +490,7 @@ impl DomainRepository {
             }
         }
         tx.execute_batch("SAVEPOINT activity_notice")?;
-        let result = match update_and_enqueue(&tx, dispatch_id, event, now) {
+        let result = match update_and_enqueue(&tx, language, dispatch_id, event, now) {
             Ok(value) => {
                 tx.execute_batch("RELEASE activity_notice")?;
                 value
@@ -452,9 +508,11 @@ impl DomainRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A store worded in `zh`: these cases pin the retained TS text verbatim.
     fn open() -> (tempfile::TempDir, crate::DomainRepository) {
         let root = tempfile::tempdir().unwrap();
-        let db = crate::DomainRepository::open(&root.path().join("domain")).unwrap();
+        let mut db = crate::DomainRepository::open(&root.path().join("domain")).unwrap();
+        db.set_notice_language(NoticeLanguage::Zh);
         (root, db)
     }
 
@@ -501,8 +559,10 @@ mod tests {
             event: &ActivityEvent,
             now: i64,
         ) -> Option<ActivityUpdate> {
+            let language = self.notice_language;
             let tx = self.db.transaction().expect("transaction opens");
-            let update = super::update(&tx, dispatch, event, now).expect("update applies");
+            let update =
+                super::update(&tx, language, dispatch, event, now).expect("update applies");
             tx.commit().expect("commit");
             update
         }

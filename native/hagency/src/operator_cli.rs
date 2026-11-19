@@ -55,7 +55,7 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-fn token(state: &Path) -> Result<String, Error> {
+pub(crate) fn token(state: &Path) -> Result<String, Error> {
     let bytes = private::read_secret(&state.join("operator.token")).map_err(|_| Error::Refused)?;
     let token = std::str::from_utf8(&bytes).map_err(|_| Error::Refused)?;
     if !(32..=256).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_graphic()) {
@@ -74,7 +74,7 @@ fn authorization(token: &str) -> Result<hyper::header::HeaderValue, Error> {
 /// One bounded operator exchange (GET or POST with an optional JSON body).
 /// The address must be loopback; the token is read from the private state
 /// directory and never logged.
-async fn exchange(
+pub(crate) async fn exchange(
     method: Method,
     path: &str,
     address: SocketAddr,

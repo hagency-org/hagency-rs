@@ -3,7 +3,9 @@ use hagency_store::{DomainStore, Error, Store};
 mod alerts;
 pub mod bootstrap;
 pub mod bot_commands;
+pub(crate) mod cleanup_state;
 pub mod console;
+pub mod descriptors;
 pub(crate) mod file_service;
 pub(crate) mod fleet_views;
 pub mod inspect;
@@ -11,6 +13,8 @@ pub mod mcp;
 mod operator;
 pub mod operator_cli;
 pub mod ops;
+pub mod plugin_cli;
+mod plugins;
 pub(crate) mod receive_service;
 mod resources;
 mod runner;
@@ -33,6 +37,7 @@ use tokio::sync::Semaphore;
 pub struct App {
     store: Store,
     domain: Option<DomainStore>,
+    plugins: Option<hagency_plugin::PluginService>,
     token_hash: [u8; 32],
     authority: String,
     requests: Arc<Semaphore>,
@@ -71,6 +76,7 @@ impl App {
         Ok(Self {
             store,
             domain: None,
+            plugins: None,
             token_hash: Sha256::digest(token).into(),
             authority: address.to_string(),
             requests: Arc::new(Semaphore::new(8)),
@@ -91,6 +97,13 @@ impl App {
     pub fn with_domain(mut self, domain: DomainStore) -> Self {
         self.domain = Some(domain);
         self
+    }
+    pub fn with_plugins(mut self, plugins: hagency_plugin::PluginService) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+    pub(crate) fn plugins(&self) -> Option<hagency_plugin::PluginService> {
+        self.plugins.clone()
     }
     /// Attach the owning native fleet's shared routing table before serving.
     /// Entries can only be installed by that original Host service.
@@ -213,6 +226,7 @@ impl App {
                     .push(console::operator_router())
                     .push(runtime::router())
                     .push(operator::router())
+                    .push(plugins::router())
                     .push(Router::with_path("custody").post(receive)),
             )
     }
@@ -572,7 +586,14 @@ fn readiness(depot: &mut Depot, res: &mut Response, refuse: bool) {
     // signals: servers/agents from the fleet + palpo above, the other four
     // components stated as their honest native value (no sync alert/runtime
     // read exists at this boundary).
+    let (fd_pressure, fd_open, fd_limit) = descriptors::snapshot();
     let components_health = serde_json::json!({
+        "descriptors": {
+            "status": fd_pressure.word(),
+            "open": fd_open,
+            "softLimit": fd_limit,
+            "nearPercent": 80,
+        },
         "servers": {
             "status": if servers == 0 { "unknown" }
                 else if online_servers < servers { "degraded" }
@@ -632,6 +653,7 @@ fn readiness(depot: &mut Depot, res: &mut Response, refuse: bool) {
     } else if components_health["servers"]["status"] == "degraded"
         || components_health["agents"]["status"] == "degraded"
         || components_health["runtime"]["status"] == "degraded"
+        || components_health["descriptors"]["status"] == "degraded"
     {
         "degraded"
     } else if servers == 0 && agents == 0 {

@@ -124,17 +124,18 @@ fn current(
     }
     Ok(())
 }
+type Snapshot = (Effect, Registration, Resource);
 /// The original claimed snapshot of a provision the inline factory completed,
-/// or None when this engagement is not one (absent, not Active, not Complete, or
-/// completed with another receipt). Read-only.
+/// or the reason this engagement is not one (absent, not Active, not Complete,
+/// or completed with another receipt). Read-only.
 fn inline_factory_snapshot(
     db: &Connection,
     engagement_id: &str,
-) -> Result<Option<(Effect, Registration, Resource)>, Error> {
+) -> Result<Result<Snapshot, &'static str>, Error> {
     let id = format!("provision_{engagement_id}");
     let actual = match read_effect(db, &id) {
         Ok(effect) => effect,
-        Err(Error::NotFound) => return Ok(None),
+        Err(Error::NotFound) => return Ok(Err("no provision effect")),
         Err(error) => return Err(error),
     };
     if actual.kind != "provision"
@@ -143,7 +144,9 @@ fn inline_factory_snapshot(
         || actual.fence == 0
         || read_engagement(db, engagement_id)?.state != EngagementState::Active
     {
-        return Ok(None);
+        return Ok(Err(
+            "provision effect is not a complete, fenced provision of an active engagement",
+        ));
     }
     let encoded: String = db.query_row(
         "SELECT r.config FROM registrations r JOIN engagements e ON e.fleet_id=r.fleet_id WHERE e.id=?1",
@@ -152,30 +155,101 @@ fn inline_factory_snapshot(
     )?;
     let registration: Registration = serde_json::from_str(&encoded)?;
     let Some(resource) = actual.payload.get("resource").cloned() else {
-        return Ok(None);
+        return Ok(Err("provision payload has no resource"));
     };
     let resource: Resource = serde_json::from_value(resource)?;
-    // The claim produced exactly this value; only its state has moved since.
+    // The claim produced exactly this value; only its state has moved since
+    // and, after an applied rebind, its resource.runtimePlugin.
     let effect = Effect {
         state: EffectState::Started,
         ..actual
     };
-    let receipt = format!(
-        "inline_factory_{}",
-        canonical::transport_digest(&json!([effect, registration]))?
-    );
-    let expected = canonical::digest(&serde_json::to_value(super::EffectOutcome::Applied {
-        receipt,
-    })?)?;
     let stored: Option<String> = db.query_row(
         "SELECT outcome_digest FROM effects WHERE id=?1",
         [&id],
         |r| r.get(0),
     )?;
-    if stored.as_deref() != Some(expected.as_str()) {
-        return Ok(None);
+    if !receipt_proven(db, &effect, &registration, stored.as_deref())? {
+        return Ok(Err(
+            "provision receipt does not match the payload or a recorded runtime rebind of it",
+        ));
     }
-    Ok(Some((effect, registration, resource)))
+    Ok(Ok((effect, registration, resource)))
+}
+fn receipt_digest(effect: &Effect, registration: &Registration) -> Result<String, Error> {
+    let receipt = format!(
+        "inline_factory_{}",
+        canonical::transport_digest(&json!([effect, registration]))?
+    );
+    Ok(canonical::digest(&serde_json::to_value(
+        super::EffectOutcome::Applied { receipt },
+    )?)?)
+}
+/// The receipt the completion stored proves this effect. It must match the
+/// payload as it is. The only payload change admitted is the resource's
+/// runtimePlugin, and only as the audit of applied rebinds and rollbacks
+/// (ADR-197, append-only) records it: the rows chain unbroken from the
+/// original identity to the current one, and the payload with the first row's
+/// old identity put back must reproduce the stored receipt. Anything else
+/// (another resource, request, plugin id or adapter id, or a runtimePlugin the
+/// audit does not end at) fails the digest or the chain.
+fn receipt_proven(
+    db: &Connection,
+    effect: &Effect,
+    registration: &Registration,
+    stored: Option<&str>,
+) -> Result<bool, Error> {
+    let Some(stored) = stored else {
+        return Ok(false);
+    };
+    if receipt_digest(effect, registration)? == stored {
+        return Ok(true);
+    }
+    type Pair = (Option<String>, Option<String>);
+    let rows = db
+        .prepare(
+            "SELECT old_package_sha256,old_settings_sha256,new_package_sha256,new_settings_sha256 \
+             FROM engagement_runtime_rebinds WHERE engagement_id=?1 \
+             AND ((action='rebind' AND outcome='applied') OR (action='rollback' AND outcome='rolled_back')) \
+             ORDER BY id",
+        )?
+        .query_map([&effect.engagement_id], |r| {
+            Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?)))
+        })?
+        .collect::<Result<Vec<(Pair, Pair)>, _>>()?;
+    let (Some((first, _)), Some((_, last))) = (rows.first(), rows.last()) else {
+        return Ok(false);
+    };
+    let mut previous: Option<&Pair> = None;
+    for (old, new) in &rows {
+        if old.0.is_none()
+            || old.1.is_none()
+            || new.0.is_none()
+            || new.1.is_none()
+            || previous.is_some_and(|p| p != old)
+        {
+            return Ok(false);
+        }
+        previous = Some(new);
+    }
+    let mut original = effect.clone();
+    let Some(plugin) = original
+        .payload
+        .pointer_mut("/resource/runtimePlugin")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(false);
+    };
+    let current = (
+        plugin.get("packageSha256").and_then(|v| v.as_str()),
+        plugin.get("settingsSha256").and_then(|v| v.as_str()),
+    );
+    if current.0 != last.0.as_deref() || current.1 != last.1.as_deref() {
+        return Ok(false);
+    }
+    plugin.insert("packageSha256".into(), json!(first.0));
+    plugin.insert("settingsSha256".into(), json!(first.1));
+    Ok(receipt_digest(&original, registration)? == stored)
 }
 impl DomainRepository {
     /// Original registry owner only; never reopen a writer or select an account
@@ -353,7 +427,7 @@ impl DomainRepository {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (effect, registration, resource) =
-            inline_factory_snapshot(&tx, engagement_id)?.ok_or(Error::State)?;
+            inline_factory_snapshot(&tx, engagement_id)?.map_err(|_| Error::State)?;
         let scope = OwnedProvisionScope {
             effect: effect.clone(),
             registration: registration.clone(),
@@ -403,10 +477,17 @@ impl DomainRepository {
             .collect::<Result<Vec<_>, _>>()?;
         let mut found = Vec::new();
         for id in ids {
-            if inline_factory_snapshot(&tx, &id)?
-                .is_some_and(|(_, actual, _)| &actual == registration)
-            {
-                found.push(id);
+            match inline_factory_snapshot(&tx, &id)? {
+                Ok((_, actual, _)) if &actual == registration => found.push(id),
+                Ok(_) => tracing::warn!(
+                    engagement = %id,
+                    reason = "engagement registration differs from this service's",
+                    "active engagement skipped by re-attach"
+                ),
+                Err(reason) => tracing::warn!(
+                    engagement = %id, reason,
+                    "active engagement skipped by re-attach"
+                ),
             }
         }
         tx.commit()?;

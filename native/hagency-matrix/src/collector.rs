@@ -125,6 +125,29 @@ impl Collector {
             .map_err(|_| Error::Busy)?;
         self.close_with_permit(_permit).await
     }
+    /// Close this agent's SDK store (its open database handles) and keep the
+    /// collector otherwise usable. A revoked engagement's worker calls this
+    /// once its retirement has been observed: nothing reads the store again,
+    /// and a store left open holds file descriptors until the service exits
+    /// (ADR-199 P5). A later `collect` reopens it, so nothing is fenced.
+    pub async fn release_store(&self) -> Result<(), Error> {
+        let _permit = self
+            .inner
+            .busy
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::Busy)?;
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = _permit;
+            if let Some(owner) = inner.owner.lock().await.take() {
+                owner.close().await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::OutcomeUnknown)?
+    }
     /// Reconcile this agent's Matrix display name from its own definition,
     /// throttled to the retained 300 s per agent (`reconcileAgentProfile`,
     /// bridge-matrix.js:5938-5955). The control plane is this port's local
@@ -508,7 +531,10 @@ impl Inner {
         // ADR-183: a homeserver that could not be read is not evidence about
         // this incarnation; the last complete batch stands and the next pass
         // reads again. Everything else keeps the original fence.
-        if error == Error::Cancelled || Self::unreachable(&error) {
+        // A local Capacity refusal (a batch larger than this host's own bounds)
+        // is not evidence about the incarnation either: fencing the transport
+        // for it would retire every route of a healthy device.
+        if error == Error::Cancelled || error == Error::Capacity || Self::unreachable(&error) {
             #[cfg(test)]
             observation::primary(error.clone());
             return Err(error);
@@ -565,10 +591,10 @@ impl Inner {
         }
         Err(error)
     }
-    /// Only original factory Group rooms may advance beyond startup metadata.
+    /// Only original factory rooms (group and direct) may advance beyond startup metadata.
     /// A current database row alone cannot replace this collector's own proof.
     pub(crate) async fn observed_room_generation(&self, target: &HostRoom) -> Result<u64, Error> {
-        if self.config.factory_rooms.is_none() || !matches!(target.privacy, RoomPrivacy::Group {}) {
+        if self.config.factory_rooms.is_none() {
             return Ok(target.generation);
         }
         let observation = self
@@ -645,7 +671,7 @@ impl Inner {
         // The prior read exists to retire stale positive evidence when the
         // fetch fails; a never-published room can hold none, so a verify-only
         // room skips it (the reception room has no scope row by design).
-        let prior = if publish {
+        let mut prior = if publish {
             self.domain
                 .matrix_room_state(t.engagement_id.clone(), target.room_id.clone())
                 .await?
@@ -701,23 +727,54 @@ impl Inner {
                 return Ok(observation);
             }
             observe!(RoomPublish);
-            if coordinator.is_some() {
-                observation.generation = prior.as_ref().map_or(1, |room| room.generation);
-                observation = self
-                    .domain
-                    .refresh_matrix_group_room(observation, prior.clone())
-                    .await?;
+            // A direct room with a stored scope at or beyond the configured
+            // generation is refreshed by the same compare-and-set rule as a
+            // group room. A configured generation ahead of the store is the
+            // re-attach seed and goes through the plain observation.
+            let refresh_direct = matches!(target.privacy, RoomPrivacy::Direct { .. })
+                && prior
+                    .as_ref()
+                    .is_some_and(|room| target.generation <= room.generation);
+            if coordinator.is_some() || refresh_direct {
+                let snapshot = observation.clone();
+                let mut attempt = 0;
+                observation = loop {
+                    let mut candidate = snapshot.clone();
+                    candidate.generation = prior.as_ref().map_or(1, |room| room.generation);
+                    let published = if coordinator.is_some() {
+                        self.domain
+                            .refresh_matrix_group_room(candidate, prior.clone())
+                            .await
+                    } else {
+                        self.domain
+                            .refresh_matrix_direct_room(candidate, prior.clone())
+                            .await
+                    };
+                    match published {
+                        Ok(published) => break published,
+                        // Another writer advanced the scope after `prior` was
+                        // read: read it again and decide once more, once.
+                        Err(hagency_store::Error::Generation) if attempt == 0 => {
+                            attempt += 1;
+                            prior = self
+                                .domain
+                                .matrix_room_state(t.engagement_id.clone(), target.room_id.clone())
+                                .await?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
             } else {
                 self.domain.observe_matrix_room(observation.clone()).await?;
-                if let Some(created_at) = own_created {
-                    self.domain
-                        .own_direct_room_created(
-                            t.engagement_id.clone(),
-                            target.room_id.clone(),
-                            created_at,
-                        )
-                        .await?;
-                }
+            }
+            if let Some(created_at) = own_created {
+                self.domain
+                    .own_direct_room_created(
+                        t.engagement_id.clone(),
+                        target.room_id.clone(),
+                        created_at,
+                    )
+                    .await?;
             }
             self.room_facts
                 .lock()
@@ -729,7 +786,13 @@ impl Inner {
                 .matrix_room_state(t.engagement_id.clone(), target.room_id.clone())
                 .await?;
             if !current.is_some_and(|s| s.available && s.generation == observation.generation) {
-                return Err(Error::Wire);
+                // A refreshed direct room the validator just retired is a
+                // refused generation, as its plain observation was.
+                return Err(if refresh_direct {
+                    Error::Generation
+                } else {
+                    Error::Wire
+                });
             }
             Ok(observation)
         }
@@ -1123,6 +1186,22 @@ mod tests {
     use super::fixtures as common;
     use super::*;
     #[tokio::test]
+    async fn revoked_engagement_matrix_store_is_closed() {
+        let f = common::Fixture::new();
+        let collector = Collector::new(f.config("https://127.0.0.1:1/"), f.store.clone()).unwrap();
+        let config = &collector.inner.config;
+        *collector.inner.owner.lock().await = Some(Owner::open(config).await.unwrap());
+        assert!(
+            matches!(Owner::open(config).await, Err(Error::Busy)),
+            "the open store holds the exclusive lease"
+        );
+        collector.release_store().await.unwrap();
+        assert!(collector.inner.owner.lock().await.is_none());
+        let reopened = Owner::open(config).await.unwrap();
+        reopened.close().await.unwrap();
+        collector.release_store().await.unwrap();
+    }
+    #[tokio::test]
     async fn native_factory_observed_group_generation() {
         let f = common::Fixture::new();
         let mut fake = common::Fake::start(false).await;
@@ -1221,6 +1300,296 @@ mod tests {
         second.close_refusal_owner().await.unwrap();
         f.store.shutdown().await.unwrap();
         fake.close().await;
+    }
+    fn recovery_config(
+        f: &common::Fixture,
+        endpoint: &str,
+        name: &str,
+        room: HostRoom,
+    ) -> HostConfig {
+        let mut config = f.config(endpoint);
+        config.root = f.root.path().join(name);
+        config.rooms = vec![room];
+        config.factory_rooms = Some(Arc::new(Mutex::new(())));
+        config
+    }
+    fn dm_room(generation: u64) -> HostRoom {
+        HostRoom {
+            room_id: "!direct:example.test".into(),
+            generation,
+            privacy: RoomPrivacy::Direct {
+                human_mxid: "@owner:example.test".into(),
+            },
+        }
+    }
+    fn member_added() -> Value {
+        let mut changed = common::state();
+        changed.as_array_mut().unwrap().push(json!({"type":"m.room.member","state_key":"@new_member:example.test","content":{"membership":"join"}}));
+        changed
+    }
+    fn owner_left() -> Value {
+        let mut left = common::state();
+        left.as_array_mut()
+            .unwrap()
+            .retain(|e| e["state_key"] != "@owner:example.test");
+        left
+    }
+    async fn session(
+        f: &common::Fixture,
+        id: &str,
+        room: &str,
+    ) -> Result<hagency_core::tasks::SessionBinding, hagency_store::Error> {
+        f.store
+            .resolve_verified_matrix_session(hagency_core::tasks::SessionBinding {
+                id: id.into(),
+                engagement_id: f.identity.transport.engagement_id.clone(),
+                room_id: room.into(),
+                thread_root: None,
+            })
+            .await
+    }
+    async fn room_state(f: &common::Fixture, room: &str) -> MatrixRoomState {
+        f.store
+            .matrix_room_state(f.identity.transport.engagement_id.clone(), room.into())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn pass(
+        collector: &Collector,
+        fake: &mut common::Fake,
+        state: Value,
+    ) -> Result<MatrixRoomObservation, Error> {
+        let cancel = CancellationToken::new();
+        let target = collector.inner.config.rooms[0].clone();
+        let (result, _) = tokio::join!(
+            collector.inner.collect_room_observation(&target, &cancel),
+            async {
+                fake.next().await.json(200, state);
+            }
+        );
+        result
+    }
+    /// A lagging collector of a shared project room reads the generation
+    /// another agent advanced and the session of that generation resolves.
+    #[tokio::test]
+    async fn native_lagging_collector_resolves_the_advanced_project_session() {
+        let f = common::Fixture::new();
+        let mut fake = common::Fake::start(false).await;
+        let project = HostRoom {
+            room_id: "!project:example.test".into(),
+            generation: 1,
+            privacy: RoomPrivacy::Group {},
+        };
+        let coordinator = Arc::new(Mutex::new(()));
+        let mut config = recovery_config(&f, &fake.endpoint, "first", project.clone());
+        config.factory_rooms = Some(coordinator.clone());
+        let first = Collector::new(config, f.store.clone()).unwrap();
+        let mut config = recovery_config(&f, &fake.endpoint, "second", project);
+        config.factory_rooms = Some(coordinator);
+        let second = Collector::new(config, f.store.clone()).unwrap();
+        f.store
+            .observe_matrix_transport(f.identity.transport.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            pass(&first, &mut fake, common::state())
+                .await
+                .unwrap()
+                .generation,
+            1
+        );
+        let room = first.inner.config.rooms[0].room_id.clone();
+        let engagement = f.identity.transport.engagement_id.clone();
+        let old = format!("project_{engagement}_1_1");
+        session(&f, &old, &room).await.unwrap();
+        assert_eq!(
+            pass(&second, &mut fake, member_added())
+                .await
+                .unwrap()
+                .generation,
+            2
+        );
+        assert_eq!(
+            first
+                .inner
+                .observed_room_generation(&first.inner.config.rooms[0])
+                .await,
+            Err(Error::Generation)
+        );
+        assert_eq!(
+            pass(&first, &mut fake, member_added())
+                .await
+                .unwrap()
+                .generation,
+            2
+        );
+        let new = format!("project_{engagement}_1_2");
+        assert_eq!(session(&f, &new, &room).await.unwrap().id, new);
+        assert_eq!(session(&f, &old, &room).await.unwrap().id, new);
+        first.close_refusal_owner().await.unwrap();
+        second.close_refusal_owner().await.unwrap();
+        f.store.shutdown().await.unwrap();
+        fake.close().await;
+    }
+    /// Another writer advances the scope between this pass's prior read and
+    /// its publish; the pass heals in the same call.
+    #[tokio::test]
+    async fn native_stale_prior_is_retried_once_in_the_same_pass() {
+        let f = common::Fixture::new();
+        let mut fake = common::Fake::start(false).await;
+        let project = HostRoom {
+            room_id: "!project:example.test".into(),
+            generation: 1,
+            privacy: RoomPrivacy::Group {},
+        };
+        let first = Collector::new(
+            recovery_config(&f, &fake.endpoint, "first", project.clone()),
+            f.store.clone(),
+        )
+        .unwrap();
+        f.store
+            .observe_matrix_transport(f.identity.transport.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            pass(&first, &mut fake, common::state())
+                .await
+                .unwrap()
+                .generation,
+            1
+        );
+        let target = first.inner.config.rooms[0].clone();
+        let engagement = f.identity.transport.engagement_id.clone();
+        let cancel = CancellationToken::new();
+        let (result, _) = tokio::join!(
+            first.inner.collect_room_observation(&target, &cancel),
+            async {
+                let request = fake.next().await;
+                // The prior (generation 1) was read before this request.
+                let (mut bumped, _) = first.inner.room(&target, member_added()).unwrap();
+                bumped.generation = 1;
+                f.store
+                    .refresh_matrix_group_room(
+                        bumped,
+                        Some(MatrixRoomState {
+                            generation: 1,
+                            available: true,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                request.json(200, member_added());
+            }
+        );
+        assert_eq!(result.unwrap().generation, 2);
+        let current = room_state(&f, &target.room_id).await;
+        assert!(current.available);
+        assert_eq!(current.generation, 2);
+        assert_eq!(first.inner.observed_room_generation(&target).await, Ok(2));
+        let new = format!("project_{engagement}_1_2");
+        assert_eq!(session(&f, &new, &target.room_id).await.unwrap().id, new);
+        first.close_refusal_owner().await.unwrap();
+        f.store.shutdown().await.unwrap();
+        fake.close().await;
+    }
+    /// A running DM collector follows a DM scope that another observation
+    /// advanced, and the DM session of the new generation resolves.
+    #[tokio::test]
+    async fn native_running_collector_follows_an_advanced_dm_scope() {
+        let f = common::Fixture::new();
+        let mut fake = common::Fake::start(false).await;
+        let collector = Collector::new(
+            recovery_config(&f, &fake.endpoint, "dm", dm_room(1)),
+            f.store.clone(),
+        )
+        .unwrap();
+        f.store
+            .observe_matrix_transport(f.identity.transport.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            pass(&collector, &mut fake, common::state())
+                .await
+                .unwrap()
+                .generation,
+            1
+        );
+        let target = collector.inner.config.rooms[0].clone();
+        let engagement = f.identity.transport.engagement_id.clone();
+        let old = format!("session_{engagement}");
+        session(&f, &old, &target.room_id).await.unwrap();
+        let (mut bumped, _) = collector.inner.room(&target, common::state()).unwrap();
+        bumped.generation = 2;
+        f.store.observe_matrix_room(bumped).await.unwrap();
+        assert_eq!(
+            collector.inner.observed_room_generation(&target).await,
+            Err(Error::Generation)
+        );
+        assert_eq!(
+            pass(&collector, &mut fake, common::state())
+                .await
+                .unwrap()
+                .generation,
+            2
+        );
+        assert_eq!(
+            collector.inner.observed_room_generation(&target).await,
+            Ok(2)
+        );
+        let new = format!("session_{engagement}_1_2");
+        assert_eq!(session(&f, &new, &target.room_id).await.unwrap().id, new);
+        assert_eq!(session(&f, &old, &target.room_id).await.unwrap().id, new);
+        collector.close_refusal_owner().await.unwrap();
+        f.store.shutdown().await.unwrap();
+        fake.close().await;
+    }
+    /// A room retired for an authority change (the owner left) stays retired
+    /// and the pass reports the refusal, for a direct room and a project room.
+    #[tokio::test]
+    async fn native_owner_left_rooms_stay_retired() {
+        for direct in [true, false] {
+            let f = common::Fixture::new();
+            let mut fake = common::Fake::start(false).await;
+            let room = if direct {
+                dm_room(1)
+            } else {
+                HostRoom {
+                    room_id: "!project:example.test".into(),
+                    generation: 1,
+                    privacy: RoomPrivacy::Group {},
+                }
+            };
+            let collector = Collector::new(
+                recovery_config(&f, &fake.endpoint, "left", room),
+                f.store.clone(),
+            )
+            .unwrap();
+            f.store
+                .observe_matrix_transport(f.identity.transport.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                pass(&collector, &mut fake, common::state())
+                    .await
+                    .unwrap()
+                    .generation,
+                1
+            );
+            let target = collector.inner.config.rooms[0].clone();
+            assert!(pass(&collector, &mut fake, owner_left()).await.is_err());
+            assert!(!room_state(&f, &target.room_id).await.available);
+            assert!(pass(&collector, &mut fake, common::state()).await.is_err());
+            let current = room_state(&f, &target.room_id).await;
+            assert!(!current.available, "direct={direct}");
+            assert_eq!(
+                collector.inner.observed_room_generation(&target).await,
+                Err(Error::Generation)
+            );
+            collector.close_refusal_owner().await.unwrap();
+            f.store.shutdown().await.unwrap();
+            fake.close().await;
+        }
     }
     #[tokio::test]
     async fn native_matrix_sync_scope_narrows_ignored_server_filter_after_full_bounds() {

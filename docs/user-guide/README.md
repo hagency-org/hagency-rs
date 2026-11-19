@@ -32,6 +32,9 @@ connection, create resources, request a project, then request an agent.
 - **DM**: the encrypted private chat between an agent and its owner.
 - **Approval room**: the separate encrypted room where the approval bot sends
   protected-operation requests to the owner.
+- **Project workspace**: the host-owned filesystem location assigned to project work; it is not the project room, agent DM or approval room.
+- **Agent runtime target / pane**: a local runtime session selected by the harness. The existing `general` target remains separate from a planned project target; installing a plugin does not create either one.
+- **Agent runtime plugin**: executes a host turn. **Harness adapter**: maps and supervises the target. Hagency still owns workspace, approval, result and cleanup.
 
 ## Who does what
 
@@ -268,6 +271,7 @@ The project room is the shared place for discussion and agent @mentions. It is
 not the agent's private workspace or approval room. Agent DMs and approval rooms
 are encrypted separately. Agents do not work in encrypted group rooms shared
 with other people.
+With the planned runtime-plugin integration, an approved project keeps its own host-selected workspace and project target. The existing `general` target is not retasked. The target process starts when the agent becomes ready or receives work, not once per message. The current plugin examples prove the protocol boundary; they do not yet provision a real project pane.
 
 ## Step 7: Accept the DM and talk to the agent
 

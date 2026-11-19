@@ -1,4 +1,4 @@
-//! Separate fixed encrypted room-write custody; partial records never rearm.
+//! Separate fixed encrypted room-write custody; room-side partial records never rearm, but the pre-create marker is safe to resume.
 use crate::Error;
 use hagency_store::private;
 use matrix_sdk_store_encryption::StoreCipher;
@@ -24,6 +24,9 @@ pub(super) const STAGES: &[&str] = &[
     "agent-rooms",
     "owner-invite-possible",
     "owner-invite-response",
+    // A project join the server refused (403) and that was sent again once the
+    // refusal's cause was removed. Written only for a successful join.
+    "join-retry-response",
 ];
 const PLAIN: usize = 32 * 1024;
 const ENVELOPE: usize = 256 * 1024;

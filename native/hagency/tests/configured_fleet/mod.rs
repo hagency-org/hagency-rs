@@ -1646,10 +1646,12 @@ impl Peer {
                                 "the activity summary carries its phase line and the counter line",
                             );
                             assert!(!head.is_empty(), "activity summary phase line: {head:?}");
+                            // The default notice language is English.
                             assert!(
-                                tail.starts_with("已运行 ")
-                                    && tail.contains(" 秒 · 工具调用 ")
-                                    && tail.ends_with(" 次"),
+                                tail.starts_with("Running for ")
+                                    && tail.contains(" s · ")
+                                    && tail.contains(" tool calls, ")
+                                    && tail.ends_with(" returned"),
                                 "activity summary counters: {tail:?}"
                             );
                         }

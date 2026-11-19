@@ -50,6 +50,15 @@ pub fn owned_task_tools(send: bool, receive: bool) -> Vec<&'static str> {
     }
     tools
 }
+/// Owned-plugin catalog: the owned task tools plus, only when the host opted in,
+/// the coordination group. Octos and Claude keep using `owned_task_tools`.
+pub fn owned_plugin_tools(send: bool, receive: bool, coordination: bool) -> Vec<&'static str> {
+    let mut tools = owned_task_tools(send, receive);
+    if coordination {
+        tools.extend(COORDINATION_TOOLS);
+    }
+    tools
+}
 pub(crate) struct Profile {
     pub(crate) executable: String,
     pub(crate) task_id: String,
@@ -62,6 +71,9 @@ impl Profile {
     /// Presentation marker only; the native service independently checks scope.
     pub const FILE_TOOLS_ENV: &'static str = "HAGENCY_FILE_TOOLS";
     pub const RECEIVE_TOOLS_ENV: &'static str = "HAGENCY_RECEIVE_FILE_TOOLS";
+    /// Presentation marker for the owned plugin profile; the host owner gate and
+    /// the native service enforce the authority.
+    pub const COORDINATION_TOOLS_ENV: &'static str = "HAGENCY_COORDINATION_TOOLS";
 
     pub fn new(
         executable: PathBuf,

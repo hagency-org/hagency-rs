@@ -33,6 +33,7 @@ pub struct WarmHostPlan {
     local_codex: Option<Arc<crate::LocalBinding>>,
     claude: Option<ClaudePlan>,
     octos: Option<OctosPlan>,
+    plugin_service: Option<hagency_plugin::PluginService>,
 }
 /// ADR-192: what a Claude agent's Host is built from, beside the Codex plan.
 struct ClaudePlan {
@@ -137,6 +138,7 @@ impl WarmHostPlan {
             local_codex: None,
             claude: None,
             octos: None,
+            plugin_service: None,
         })
     }
     /// ADR-192: a plan for a machine that runs Claude Code only. Add the Claude
@@ -163,6 +165,7 @@ impl WarmHostPlan {
             local_codex: None,
             claude: None,
             octos: None,
+            plugin_service: None,
         })
     }
     /// ADR-192: also run Claude Code agents, from this executable and, when the
@@ -235,6 +238,17 @@ impl WarmHostPlan {
         self.local_codex = Some(local.clone());
         Ok(self)
     }
+    /// Enable qualified runtime and harness plugin dispatch for factory agents.
+    pub fn with_plugin_service(
+        mut self,
+        service: hagency_plugin::PluginService,
+    ) -> Result<Self, Failure> {
+        if self.plugin_service.is_some() {
+            return Err(Failure::Admission);
+        }
+        self.plugin_service = Some(service);
+        Ok(self)
+    }
     /// Fixed presentation/capture limits, shared with the owning service's
     /// per-agent file backends. This grants no workspace or SDK authority.
     pub fn with_file_access(
@@ -271,6 +285,9 @@ impl WarmHostPlan {
         scope: OwnedProvisionScope,
         home: Arc<ManagedAgentHome>,
     ) -> Result<FactoryRuntime, Failure> {
+        if scope.resource().runtime_plugin.is_some() {
+            return self.plugin_runtime(domain, scope, home, false).await;
+        }
         match scope.resource().framework.as_str() {
             "claude" => return self.claude_runtime(domain, scope, home, false).await,
             "octos" => return self.octos_runtime(domain, scope, home, false).await,
@@ -367,6 +384,9 @@ impl WarmHostPlan {
         scope: OwnedProvisionScope,
         home: Arc<ManagedAgentHome>,
     ) -> Result<FactoryRuntime, Failure> {
+        if scope.resource().runtime_plugin.is_some() {
+            return self.plugin_runtime(domain, scope, home, true).await;
+        }
         match scope.resource().framework.as_str() {
             "claude" => return self.claude_runtime(domain, scope, home, true).await,
             "octos" => return self.octos_runtime(domain, scope, home, true).await,
@@ -678,28 +698,98 @@ impl WarmHostPlan {
         .await
         .map_err(|_| Failure::Worker)?
     }
+    /// A plugin-backed agent has no warm child. Its first task is launched by
+    /// the runtime plugin and harness through the ordinary follow-up binding.
+    async fn plugin_runtime(
+        &self,
+        domain: DomainStore,
+        scope: OwnedProvisionScope,
+        home: Arc<ManagedAgentHome>,
+        original: bool,
+    ) -> Result<FactoryRuntime, Failure> {
+        let plugin_service = self.plugin_service.clone().ok_or(Failure::Admission)?;
+        if scope.requires_managed_account() {
+            return Err(Failure::Admission);
+        }
+        let executable = self.codex_executable()?;
+        let until = Instant::now() + Duration::from_millis(self.limits.initialize.operation_ms);
+        let guardian = self.guardian.clone();
+        let environment = self.environment.clone();
+        let helper = self.bridge.helper.clone();
+        let address = self.bridge.address;
+        let approvals = self.approvals.clone();
+        let files = self.files;
+        let coordination = self.coordination;
+        let activation_ms = self.limits.initialize.response_ms;
+        tokio::task::spawn_blocking(move || {
+            if Instant::now() >= until {
+                return Err(Failure::Deadline);
+            }
+            if original {
+                scope.claim_warm().map_err(|_| Failure::Admission)?;
+            }
+            let runtime_lease = scope.claim_runtime().map_err(|_| Failure::Admission)?;
+            let workspace = format!("work_{}", scope.engagement_id());
+            let work = home.workdir_path().map_err(|_| Failure::Admission)?;
+            let mut host = Host::new(
+                guardian,
+                executable,
+                environment,
+                BTreeMap::from([(workspace.clone(), work)]),
+            )?
+            .with_plugin_service(plugin_service)?
+            .with_task_helper(helper, address)?
+            .with_approvals(approvals)?;
+            if let Some((limit, send, receive)) = files {
+                host = host.with_file_limit(limit)?;
+                if send {
+                    host = host.with_file_tools()?;
+                }
+                if receive {
+                    host = host.with_receive_tools()?;
+                }
+            }
+            if coordination {
+                host = host.with_coordination_tools()?;
+            }
+            let root = host.reattach_root(&scope, &home, &workspace)?;
+            let binding =
+                crate::warm::Binding::reattached(scope, runtime_lease, home, root, workspace, None);
+            Ok(FactoryRuntime {
+                host: host.into_shared(),
+                domain,
+                warm: None,
+                activation_ms,
+                phase: Phase::Reattached(Box::new(binding)),
+                last: None,
+                cancelled: AtomicBool::new(false),
+            })
+        })
+        .await
+        .map_err(|_| Failure::Worker)?
+    }
+}
+fn attached_host_allowed(host: &Host) -> bool {
+    host.plugin_enabled()
+        || matches!(
+            host.runner,
+            crate::host::Runner::Claude | crate::host::Runner::Octos
+        )
 }
 impl FactoryRuntime {
     pub async fn ready(&mut self) -> Result<(), Failure> {
         match self.warm.as_mut() {
             Some(warm) => warm.ready().await,
-            // ADR-192, ADR-193: a Claude or Octos agent has no warm child
-            // before its first task; it is ready while its own root and local
-            // folder check.
+            // ADR-192, ADR-193, plugin agents: no warm child before the first
+            // task; each checks its own root and launches on dispatch.
             None => self.attached()?.check_attached(),
         }
     }
-    /// The binding of a Claude or Octos agent attached without a warm child,
-    /// before its first dispatch. Anything else has no attached-only
-    /// readiness.
+    /// The binding of a no-warm-child agent before its first dispatch.
+    /// Anything else has no attached-only readiness.
     fn attached(&self) -> Result<&crate::warm::Binding, Failure> {
         match &self.phase {
-            Phase::Reattached(binding)
-                if matches!(
-                    self.host.0.runner,
-                    crate::host::Runner::Claude | crate::host::Runner::Octos
-                ) =>
-            {
+            Phase::Reattached(binding) if attached_host_allowed(self.host.0.as_ref()) => {
                 Ok(binding)
             }
             _ => Err(Failure::Admission),
@@ -830,5 +920,28 @@ impl FactoryRuntime {
         };
         self.phase = Phase::Running(operation.continuation());
         Ok(operation)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::BTreeMap, fs};
+
+    #[test]
+    fn qualified_plugin_host_is_eligible_for_attached_runtime() {
+        let state = tempfile::tempdir().unwrap();
+        let work = state.path().join("work");
+        hagency_store::private::directory(&work).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let host = Host::new(
+            executable.clone(),
+            executable,
+            BTreeMap::new(),
+            BTreeMap::from([("work".into(), fs::canonicalize(work).unwrap())]),
+        )
+        .unwrap()
+        .with_plugin_service(hagency_plugin::PluginService::open(state.path()).unwrap())
+        .unwrap();
+        assert!(attached_host_allowed(&host));
     }
 }

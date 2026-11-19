@@ -367,6 +367,7 @@ fn owned_failure_label(error: &hagency_execution::Failure) -> &'static str {
     use hagency_execution::Failure::*;
     match error {
         Admission => "admission",
+        AdmissionRefused(reason) => reason.as_str(),
         Cancelled => "cancelled",
         StartUnknown => "start_unknown",
         UsageBinding => "usage_binding",
@@ -385,6 +386,7 @@ fn owned_failure_label(error: &hagency_execution::Failure) -> &'static str {
         // native runner. The framework itself stays out of this fixed label
         // vocabulary; the operator-facing word is the failure variant's own.
         UnsupportedRunner { .. } => "unsupported_runner",
+        RuntimeNotReady { .. } => "runtime_not_ready",
     }
 }
 /// Bounded projection of why a guardian stopped observing its tree. Diagnostic
@@ -564,6 +566,12 @@ pub struct Status {
     /// reads it to decide anything, and the wait has no deadline.
     #[serde(skip_serializing_if = "Option::is_none")]
     awaiting_owner_since_ms: Option<u64>,
+    /// ADR-199 P6: why a provision is waiting, retrying or parked, and what to
+    /// do. Fixed reason code plus a plain remedy; never a secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provision_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provision_remedy: Option<String>,
     settlement: Option<&'static str>,
     error: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -607,6 +615,8 @@ impl StatusHandle {
             refresh_failures: 0,
             refresh_since_ms: None,
             awaiting_owner_since_ms: None,
+            provision_reason: None,
+            provision_remedy: None,
             settlement: None,
             error: None,
             matrix_error: None,
@@ -697,6 +707,14 @@ impl StatusHandle {
         status.state = "awaiting_owner";
         status.awaiting_owner_since_ms = Some(since_ms);
     }
+    /// ADR-199 P6: a provision that is retrying or parked, or a wait for the
+    /// owner with its concrete remedy. Status only.
+    fn provision_note(&self, state: &'static str, reason: &'static str, remedy: String) {
+        let mut status = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        status.state = state;
+        status.provision_reason = Some(reason);
+        status.provision_remedy = Some(remedy);
+    }
     fn begin_attempt(&self) {
         let mut status = self.0.lock().unwrap_or_else(|e| e.into_inner());
         status.state = "refreshing";
@@ -705,6 +723,8 @@ impl StatusHandle {
         status.cleanup = None;
         status.stop_cause = None;
         status.awaiting_owner_since_ms = None;
+        status.provision_reason = None;
+        status.provision_remedy = None;
         status.settlement = None;
         status.error = None;
         status.matrix_error = None;
@@ -1588,9 +1608,11 @@ impl Bootstrap {
             _ => None,
         };
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: app_entered");
+        let plugins = hagency_plugin::PluginService::open(&state).map_err(|_| Failure::Startup)?;
         let mut app = crate::App::new(store.clone(), &token, listen)
             .map_err(|_| Failure::Startup)?
             .with_domain(domain.clone())
+            .with_plugins(plugins)
             .with_development(status.clone())
             .with_palpo(palpo_status.clone());
         let mut palpo = palpo::Live::new(
@@ -1766,6 +1788,9 @@ impl Bootstrap {
             pump.close().await?;
         }
         self.approval = None;
+        if let Some(plugins) = self.app.plugins() {
+            plugins.shutdown().map_err(|_| Failure::OutcomeUnknown)?;
+        }
         if !self.domain_closed {
             self.domain
                 .shutdown()
@@ -1786,6 +1811,34 @@ impl Bootstrap {
         }
         Ok(())
     }
+    /// ADR-197: tell the plugin registry which package revisions live
+    /// engagements are frozen on, then collect the installed revisions nothing
+    /// references. A store that cannot answer collects nothing.
+    async fn collect_plugin_revisions(&self) {
+        let Some(plugins) = self.app.plugins() else {
+            return;
+        };
+        let references = match self.domain.engagement_runtime_references().await {
+            Ok(references) => references,
+            Err(_) => {
+                tracing::warn!(
+                    "[plugins] engagement package references unavailable; no revision collected"
+                );
+                return;
+            }
+        };
+        let collected = tokio::task::spawn_blocking(move || {
+            plugins.set_revision_references(references)?;
+            for record in plugins.list()? {
+                plugins.collect_obsolete(&record.id)?;
+            }
+            Ok::<(), hagency_plugin::PluginError>(())
+        })
+        .await;
+        if !matches!(collected, Ok(Ok(()))) {
+            tracing::warn!("[plugins] unreferenced revision collection did not complete");
+        }
+    }
     pub async fn serve(&mut self, shutdown: &CancellationToken) -> Result<(), Failure> {
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: bind_entered");
         let acceptor = TcpListener::new(self.listen)
@@ -1798,6 +1851,8 @@ impl Bootstrap {
         // tick channel from the first request, or readiness would report the
         // loop `disabled` forever (brief 19). The handle is shared: bootstrap
         // keeps it to abort at shutdown, `/health` observes liveness.
+        crate::descriptors::start(shutdown.clone());
+        self.collect_plugin_revisions().await;
         let (ceiling_sweep, sweep_tick) = start_ceiling_sweep(
             self.domain.clone(),
             shutdown.clone(),
@@ -1846,6 +1901,9 @@ impl Bootstrap {
         // Poll the real server first. Its listener/router exist before any child
         // or helper can try to connect; no fixture-only readiness setter.
         tokio::select! { biased; result=&mut serving=>{result.map_err(|_|Failure::Server)?;return Err(Failure::Server);}, _=tokio::task::yield_now()=>{} }
+        if let Some(plugins) = self.app.plugins() {
+            plugins.start().map_err(|_| Failure::Startup)?;
+        }
         tracing::trace!(target: "hagency_startup_observation", "native startup boundary: driver_entered");
         for prepared in std::mem::take(&mut self.palpo_prepared) {
             self.palpo.start(prepared).await?;

@@ -344,6 +344,18 @@ impl DomainRepository {
             |row| row.get(0),
         )?)
     }
+    /// Secret-free read for a resumed send: did the host itself cancel this
+    /// undelivered command answer? Its journal slot may then be released
+    /// without re-sending it.
+    pub fn command_notice_send_cancelled(&self, id: &str, fence: u64) -> Result<bool, Error> {
+        identifier(id, 128)?;
+        generation(fence)?;
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM command_notices WHERE id=?1 AND fence=?2 AND cancel_requested=1 AND state<>'delivered')",
+            params![id, fence],
+            |row| row.get(0),
+        )?)
+    }
     /// The admitted `!` lines in this session that have no answer queued yet,
     /// oldest first. A command is answered once: the answer's id is derived from
     /// the session and the source event, so a line already answered (or being

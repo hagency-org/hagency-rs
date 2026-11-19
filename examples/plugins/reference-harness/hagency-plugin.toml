@@ -1,0 +1,30 @@
+schema = "hagency.plugin/v1"
+id = "reference.harness"
+name = "Reference Harness"
+version = "1.0.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[harnesses]]
+id = "reference"
+command = ["python3", "reference_harness.py"]
+protocol = "hagency.harness/v1"
+
+[[harnesses.configuration]]
+id = "reference_target"
+label = "Reference target"
+kind = "text"
+required = true
+
+[[harnesses.configuration]]
+id = "reference_ownership"
+label = "Reference ownership"
+kind = "select"
+options = ["existing", "managed"]
+default = "existing"
+
+[[panes]]
+id = "main"
+title = "Reference"
+harness = "reference"
+command = ["python3", "reference_harness.py"]

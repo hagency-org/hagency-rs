@@ -19,6 +19,9 @@ use tokio::time::{Instant, timeout_at};
 
 pub(crate) struct Scope {
     recovering: bool,
+    /// ADR-199 P6: the rooms custody records the owner invite, so a recovery
+    /// may find the owner invited (never joined) in the agent's DM.
+    owner_invited: bool,
     effect: Effect,
     registration: Registration,
     request: ProjectRequest,
@@ -75,6 +78,7 @@ impl Scope {
         }
         Ok(Self {
             recovering: false,
+            owner_invited: false,
             effect,
             registration,
             request,
@@ -82,6 +86,11 @@ impl Scope {
     }
     pub(crate) fn for_recovery(mut self) -> Self {
         self.recovering = true;
+        self
+    }
+    /// ADR-199 P6: a recovery whose rooms custody records the owner invite.
+    pub(crate) fn with_recorded_owner_invite(mut self) -> Self {
+        self.owner_invited = true;
         self
     }
     pub(crate) async fn current(
@@ -147,9 +156,18 @@ impl Scope {
             if self.recovering
                 && matches!(target.privacy, RoomPrivacy::Direct { .. })
                 && owner_membership.is_some()
+                && !(self.owner_invited && owner_membership == Some(json!("invite")))
+                && !(self.owner_invited
+                    && owner_membership == Some(json!("join"))
+                    && owner_silent(inner, &target.room_id, &self.request.owner_mxid, cancel)
+                        .await?)
             {
                 // The pre-invite checkpoint must still precede the first DM.
                 // Never reserve a new cursor after the owner could have written.
+                // ADR-199 P6: an owner who is only invited, by the invite the
+                // rooms custody records, cannot have written yet; a joined
+                // owner could have, so that state stays parked unless the
+                // room's whole history proves the owner wrote nothing.
                 return Err(Error::Recipients);
             }
             let (room, facts) = inner.room(target, value)?;
@@ -250,6 +268,67 @@ impl Activation {
             Self::Failed(error) => Err(error.clone()),
         }
     }
+}
+/// A recovery whose owner already joined the agent's DM: whether the room's
+/// WHOLE history, read back to its `m.room.create`, has no event from the
+/// owner except membership. Only then could the owner not have written, so a
+/// new receive cursor misses nothing. Encrypted events are judged by their
+/// clear sender and type and never decrypted. A history longer than the
+/// bounded read is not proven and stays parked.
+async fn owner_silent(
+    inner: &Inner,
+    room: &str,
+    owner: &str,
+    cancel: &CancellationToken,
+) -> Result<bool, Error> {
+    const PAGES: usize = 5;
+    let mut from: Option<String> = None;
+    for _ in 0..PAGES {
+        let mut query = vec![("dir", "b"), ("limit", "100")];
+        if let Some(token) = from.as_deref() {
+            query.push(("from", token));
+        }
+        let value = inner
+            .http
+            .request(
+                &["_matrix", "client", "v3", "rooms", room, "messages"],
+                Some(&query),
+                cancel,
+            )
+            .await?
+            .success()?;
+        let (silent, complete) = owner_silent_page(&value, owner)?;
+        if !silent {
+            eprintln!("provision recovery: owner {owner} wrote in {room}; stays parked");
+            return Ok(false);
+        }
+        if complete {
+            return Ok(true);
+        }
+        from = value["end"].as_str().map(str::to_owned);
+        if from.is_none() {
+            return Ok(false);
+        }
+    }
+    eprintln!("provision recovery: history of {room} exceeds the bounded read; stays parked");
+    Ok(false)
+}
+/// One backward `/messages` page: (no owner event but membership, the page
+/// reached the room's creation). Pure, so the proof is testable offline.
+fn owner_silent_page(value: &serde_json::Value, owner: &str) -> Result<(bool, bool), Error> {
+    let chunk = value["chunk"].as_array().ok_or(Error::Wire)?;
+    let mut complete = false;
+    for event in chunk {
+        let kind = event["type"].as_str().ok_or(Error::Wire)?;
+        let sender = event["sender"].as_str().ok_or(Error::Wire)?;
+        if sender == owner && kind != "m.room.member" {
+            return Ok((false, false));
+        }
+        if kind == "m.room.create" && event["state_key"] == "" {
+            complete = true;
+        }
+    }
+    Ok((true, complete))
 }
 /// A failed final Active read must fence a positive collect already committed
 /// by this job. CAS never revives or retires another owner.
@@ -692,5 +771,55 @@ impl Jobs {
         Some(result.map(|_| Collector {
             inner: job.collector.inner.clone(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod owner_silent_tests {
+    use super::owner_silent_page;
+    use serde_json::json;
+    const OWNER: &str = "@admin:example.org";
+    const AGENT: &str = "@agent:example.org";
+    fn page(events: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({ "chunk": events })
+    }
+    fn event(kind: &str, sender: &str) -> serde_json::Value {
+        json!({ "type": kind, "sender": sender, "state_key": "" })
+    }
+    #[test]
+    fn a_dm_with_only_setup_and_the_owner_join_is_silent_and_complete() {
+        let value = page(vec![
+            event("m.room.member", OWNER),
+            event("m.room.member", AGENT),
+            event("m.room.encryption", AGENT),
+            event("m.room.power_levels", AGENT),
+            event("m.room.create", AGENT),
+        ]);
+        assert_eq!(owner_silent_page(&value, OWNER).unwrap(), (true, true));
+    }
+    #[test]
+    fn any_owner_event_but_membership_is_writing() {
+        for kind in [
+            "m.room.encrypted",
+            "m.room.message",
+            "m.reaction",
+            "m.room.name",
+        ] {
+            let value = page(vec![event(kind, OWNER), event("m.room.create", AGENT)]);
+            assert_eq!(owner_silent_page(&value, OWNER).unwrap(), (false, false));
+        }
+    }
+    #[test]
+    fn a_page_without_the_create_event_is_not_complete() {
+        let value = page(vec![
+            event("m.room.member", OWNER),
+            event("m.room.message", AGENT),
+        ]);
+        assert_eq!(owner_silent_page(&value, OWNER).unwrap(), (true, false));
+    }
+    #[test]
+    fn an_unreadable_page_is_refused() {
+        assert!(owner_silent_page(&json!({}), OWNER).is_err());
+        assert!(owner_silent_page(&page(vec![json!({"type": "m.room.message"})]), OWNER).is_err());
     }
 }

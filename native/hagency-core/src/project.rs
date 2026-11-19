@@ -3,6 +3,7 @@ use crate::{
     InvalidInput,
     allocation::{Ceiling, Declaration, Tokens},
 };
+use hagency_plugin::HarnessTemplateDocument;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -81,6 +82,9 @@ pub struct AgentDefinition {
     /// a requester's event, and they name a folder the host creates and a
     /// command it runs outside any sandbox, so a request carrying any of them
     /// is refused (`verify_request`). Kept only so a stored request still reads.
+    /// Optional per-agent harness package selected by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_plugin: Option<HarnessPluginIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,11 +96,15 @@ impl AgentDefinition {
     /// Whether this definition names a workspace mode, worktrees folder or
     /// bootstrap command: the machine owner's settings, never a requester's.
     pub fn carries_workspace_settings(&self) -> bool {
-        self.workspace_mode.is_some()
+        self.harness_plugin.is_some()
+            || self.workspace_mode.is_some()
             || self.worktrees_dir.is_some()
             || !self.worktree_bootstrap.is_empty()
     }
     pub fn validate(&self) -> Result<(), InvalidInput> {
+        if let Some(harness) = &self.harness_plugin {
+            harness.validate()?;
+        }
         let suffix = self
             .resource_id
             .strip_prefix("resource_")
@@ -141,6 +149,88 @@ impl AgentDefinition {
     }
 }
 
+/// Immutable identity of the adapter package that owns a plugin-backed runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RuntimePluginIdentity {
+    pub plugin_id: String,
+    pub adapter_id: String,
+    pub package_sha256: String,
+    pub settings_sha256: String,
+}
+impl RuntimePluginIdentity {
+    pub fn validate(&self) -> Result<(), InvalidInput> {
+        if self.plugin_id.is_empty()
+            || self.plugin_id.len() > 128
+            || !self
+                .plugin_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            return Err(InvalidInput("invalid runtime plugin ID"));
+        }
+        identifier(&self.adapter_id, 128)?;
+        if self.package_sha256.len() != 64
+            || !self
+                .package_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(InvalidInput("invalid runtime plugin package digest"));
+        }
+        if self.settings_sha256.len() != 64
+            || !self
+                .settings_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(InvalidInput("invalid runtime plugin settings digest"));
+        }
+        Ok(())
+    }
+}
+
+/// Immutable identity of the harness package selected for one agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HarnessPluginIdentity {
+    pub plugin_id: String,
+    pub harness_id: String,
+    pub package_sha256: String,
+    pub settings_sha256: String,
+}
+impl HarnessPluginIdentity {
+    pub fn validate(&self) -> Result<(), InvalidInput> {
+        if self.plugin_id.is_empty()
+            || self.plugin_id.len() > 128
+            || !self
+                .plugin_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            return Err(InvalidInput("invalid harness plugin ID"));
+        }
+        identifier(&self.harness_id, 128)?;
+        if self.package_sha256.len() != 64
+            || !self
+                .package_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(InvalidInput("invalid harness plugin package digest"));
+        }
+        if self.settings_sha256.len() != 64
+            || !self
+                .settings_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(InvalidInput("invalid harness plugin settings digest"));
+        }
+        Ok(())
+    }
+}
+
 /// Provider configuration. `roles` is a derived cache, never an eligibility grant. Execution
 /// adapters must independently verify runtime readiness before provisioning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +246,12 @@ pub struct Resource {
     /// the resource's model (ADR-193 decision 7). No other framework names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub octos_profile: Option<String>,
+    /// Exact harness package identity used when a plugin-backed resource dispatches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_plugin: Option<HarnessPluginIdentity>,
+    /// Exact plugin/package identity; changing it while engaged is refused by the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_plugin: Option<RuntimePluginIdentity>,
     #[serde(default)]
     pub roles: Vec<String>,
     pub ceiling: Option<Ceiling>,
@@ -196,6 +292,17 @@ impl Resource {
         {
             return Err(InvalidInput("invalid Octos profile"));
         }
+        if let Some(harness) = &self.harness_plugin {
+            harness.validate()?;
+        }
+        if let Some(runtime) = &self.runtime_plugin {
+            if matches!(self.framework.as_str(), "codex" | "claude" | "octos") {
+                return Err(InvalidInput(
+                    "built-in runtime cannot use a plugin identity",
+                ));
+            }
+            runtime.validate()?;
+        }
         Ok(())
     }
     pub fn id(&self) -> String {
@@ -205,7 +312,11 @@ impl Resource {
         self.published
             && self.provisionable()
             && self.ceiling.as_ref().and_then(|c| c.tokens).is_some()
-            && crate::qualification::qualifies(&self.profile(), requested_role, None)
+            && if self.runtime_plugin.is_some() {
+                self.roles.iter().any(|role| role == requested_role)
+            } else {
+                crate::qualification::qualifies(&self.profile(), requested_role, None)
+            }
     }
     pub fn profile(&self) -> crate::qualification::ModelProfile {
         crate::qualification::ModelProfile {
@@ -216,7 +327,8 @@ impl Resource {
         }
     }
     pub fn provisionable(&self) -> bool {
-        matches!(self.framework.as_str(), "claude" | "codex")
+        self.runtime_plugin.is_some()
+            || matches!(self.framework.as_str(), "claude" | "codex")
             || (self.framework == "octos" && self.octos_profile.is_some())
     }
     pub fn eligible_roles(&self) -> Vec<String> {
@@ -235,6 +347,7 @@ impl Resource {
             tier: crate::qualification::model(&self.profile()).0,
             roles: self.eligible_roles(),
             ceiling: self.ceiling.clone(),
+            runtime_plugin: self.runtime_plugin.clone(),
         }
     }
 }
@@ -249,6 +362,8 @@ pub struct CatalogResource {
     pub tier: Option<crate::qualification::Tier>,
     pub roles: Vec<String>,
     pub ceiling: Option<Ceiling>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_plugin: Option<RuntimePluginIdentity>,
 }
 /// Operator-only configuration, including resources explicitly withdrawn.
 #[derive(Debug, Serialize)]
@@ -325,6 +440,10 @@ pub struct Engagement {
     /// way, and the projection then serializes exactly as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocated_tokens: Option<Tokens>,
+    /// Frozen per-agent harness configuration; absent means the resource's
+    /// default harness entry and manifest defaults apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_template: Option<HarnessTemplateDocument>,
 }
 impl Engagement {
     /// The tokens this engagement holds: the granted amount when one is set,

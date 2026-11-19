@@ -33,6 +33,8 @@ pub(super) struct ResourceRow {
     provider: Option<String>,
     reasoning: Option<String>,
     ceiling: Option<Ceiling>,
+    runtime_plugin: Option<hagency_core::project::RuntimePluginIdentity>,
+    harness_plugin: Option<hagency_core::project::HarnessPluginIdentity>,
     published: bool,
     roles: Vec<String>,
     revision: String,
@@ -42,17 +44,21 @@ impl ResourceRow {
     pub(super) fn from_resource(
         resource: hagency_core::project::Resource,
     ) -> Result<Self, hagency_store::Error> {
+        let roles = resource.eligible_roles();
+        let revision = resource_publication_revision(&resource)?;
         Ok(Self {
             engagement_resources: Vec::new(),
             id: resource.id(),
-            revision: resource_publication_revision(&resource)?,
-            roles: resource.eligible_roles(),
             framework: resource.framework,
             model: resource.model,
             provider: resource.provider,
             reasoning: resource.reasoning,
             ceiling: resource.ceiling,
+            runtime_plugin: resource.runtime_plugin,
+            harness_plugin: resource.harness_plugin,
             published: resource.published,
+            roles,
+            revision,
         })
     }
 }
@@ -145,6 +151,8 @@ async fn configurations(req: &mut Request, depot: &mut Depot, res: &mut Response
                     provider: r.config.provider,
                     reasoning: r.config.reasoning,
                     ceiling: r.config.ceiling,
+                    runtime_plugin: r.config.runtime_plugin,
+                    harness_plugin: r.config.harness_plugin,
                     published: r.config.published,
                     roles: r.config.roles,
                     revision,

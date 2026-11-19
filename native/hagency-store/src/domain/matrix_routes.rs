@@ -396,37 +396,43 @@ impl DomainRepository {
             params![c.registration.server_name,input.room_id,c.registration.fleet_id,c.project,c.registration.generation,c.owner,privacy,input.encrypted,input.invite_only,joined],
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
         let mut observed = input.clone();
-        match (prior, expected) {
-            (None, None) if input.generation == 1 => {}
-            (Some((generation, true, true, same_members, _)), Some(expected))
-                if expected.available
-                    && expected.generation == generation
-                    && input.generation == generation =>
-            {
-                observed.generation = if same_members {
-                    generation
-                } else {
-                    generation.checked_add(1).ok_or(Error::Capacity)?
-                };
-            }
-            // A room retired only because a read of its state FAILED (a
-            // homeserver restart, a network drop) is not a verdict about the
-            // room: a fresh complete observation of that exact retired
-            // generation re-validates it at the next generation, through the
-            // same validator below. A room retired for an authority change
-            // (owner left, unsafe member) still needs a human.
-            (Some((generation, false, _, _, Some(reason))), Some(expected))
-                if reason == hagency_core::replies::OBSERVATION_FAILED
-                    && !expected.available
-                    && expected.generation == generation
-                    && input.generation == generation =>
-            {
-                observed.generation = generation.checked_add(1).ok_or(Error::Capacity)?;
-            }
-            _ => return Err(Error::Generation),
-        }
+        observed.generation = refresh_generation(prior, expected, input.generation)?;
         // The SAME validator owns active identity, original transport, unsafe
         // member refusal, membership publication and old-scope retirement.
+        Self::observe_room(&tx, &observed, now)?;
+        tx.commit()?;
+        Ok(observed)
+    }
+    /// Direct-room twin of `refresh_matrix_group_room`: the same two arms
+    /// (shared `refresh_generation`), for a room whose scope is a direct room
+    /// of this agent. The result still goes through `observe_room`.
+    pub fn refresh_matrix_direct_room(
+        &mut self,
+        input: &MatrixRoomObservation,
+        expected: Option<&MatrixRoomState>,
+        now: u64,
+    ) -> Result<MatrixRoomObservation, Error> {
+        clock(now)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let c = context(&tx, &input.engagement_id)?;
+        if !matches!(input.privacy, RoomPrivacy::Direct { .. }) {
+            return Err(Error::RunnerAuthority);
+        }
+        if input.joined.len() > 1000
+            || input.joined.iter().map(String::len).sum::<usize>() > 48 * 1024
+        {
+            return Err(Error::Capacity);
+        }
+        let privacy = serialize(&input.privacy)?;
+        let joined = serialize(&input.joined)?;
+        let prior: Option<(u64,bool,bool,bool,Option<String>)>=tx.query_row(
+            "SELECT generation,available,registration_generation=?5 AND owner_mxid=?6 AND privacy=?7 AND encrypted=?8 AND invite_only=?9 AND direct_sender IS NOT NULL,joined=?10,invalidation FROM matrix_room_scopes WHERE server_name=?1 AND room_id=?2 AND fleet_id=?3 AND project_id=?4",
+            params![c.registration.server_name,input.room_id,c.registration.fleet_id,c.project,c.registration.generation,c.owner,privacy,input.encrypted,input.invite_only,joined],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        let mut observed = input.clone();
+        observed.generation = refresh_generation(prior, expected, input.generation)?;
         Self::observe_room(&tx, &observed, now)?;
         tx.commit()?;
         Ok(observed)
@@ -609,6 +615,44 @@ impl DomainRepository {
         let value = resolve(&tx, binding, now)?;
         tx.commit()?;
         Ok(value)
+    }
+}
+
+/// The one generation rule for a refreshed room (group or direct). `prior` is
+/// (generation, available, identity-equal, same members, invalidation).
+fn refresh_generation(
+    prior: Option<(u64, bool, bool, bool, Option<String>)>,
+    expected: Option<&MatrixRoomState>,
+    input_generation: u64,
+) -> Result<u64, Error> {
+    match (prior, expected) {
+        (None, None) if input_generation == 1 => Ok(1),
+        (Some((generation, true, true, same_members, _)), Some(expected))
+            if expected.available
+                && expected.generation == generation
+                && input_generation == generation =>
+        {
+            if same_members {
+                Ok(generation)
+            } else {
+                generation.checked_add(1).ok_or(Error::Capacity)
+            }
+        }
+        // A room retired only because a read of its state FAILED (a
+        // homeserver restart, a network drop) is not a verdict about the
+        // room: a fresh complete observation of that exact retired
+        // generation re-validates it at the next generation, through the
+        // same validator. A room retired for an authority change (owner
+        // left, unsafe member) still needs a human.
+        (Some((generation, false, _, _, Some(reason))), Some(expected))
+            if reason == hagency_core::replies::OBSERVATION_FAILED
+                && !expected.available
+                && expected.generation == generation
+                && input_generation == generation =>
+        {
+            generation.checked_add(1).ok_or(Error::Capacity)
+        }
+        _ => Err(Error::Generation),
     }
 }
 

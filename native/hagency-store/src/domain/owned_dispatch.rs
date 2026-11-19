@@ -8,6 +8,7 @@ use hagency_core::{
     project::Resource,
     tasks::{DispatchInput, RunnerCapability, Task, TaskState, clock},
 };
+use hagency_plugin::HarnessTemplateDocument;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::json;
@@ -219,6 +220,8 @@ pub struct OwnedDispatchScope {
     pub(super) account: Option<super::accounts::Association>,
     fingerprint: String,
     engagement_id: String,
+    allocation_id: String,
+    agent_name: String,
     /// The session's Matrix thread root (`SessionBinding.thread_root`), carried
     /// through so a worktree-mode dispatch can resolve its per-thread worktree.
     /// `None` for a non-threaded (top-level) session, which keeps the shared
@@ -232,6 +235,7 @@ pub struct OwnedDispatchScope {
     workspace_mode: String,
     worktrees_dir: Option<String>,
     worktree_bootstrap: Vec<String>,
+    harness_template: Option<HarnessTemplateDocument>,
     started: Option<(String, u64, String)>,
 }
 impl OwnedDispatchScope {
@@ -245,10 +249,13 @@ impl OwnedDispatchScope {
             &self.account,
             &self.fingerprint,
             &self.engagement_id,
+            &self.allocation_id,
+            &self.agent_name,
             &self.thread_root,
             &self.workspace_mode,
             &self.worktrees_dir,
             &self.worktree_bootstrap,
+            &self.harness_template,
             &self.started,
         )
     }
@@ -278,8 +285,17 @@ impl OwnedDispatchScope {
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
+    pub fn allocation_id(&self) -> &str {
+        &self.allocation_id
+    }
+    pub fn agent_name(&self) -> &str {
+        &self.agent_name
+    }
     pub fn engagement_id(&self) -> &str {
         &self.engagement_id
+    }
+    pub fn harness_template(&self) -> Option<&HarnessTemplateDocument> {
+        self.harness_template.as_ref()
     }
     /// The session's Matrix thread root, if any. A worktree-mode dispatch uses
     /// this to resolve its per-thread worktree; `None` keeps the engagement
@@ -303,10 +319,56 @@ impl OwnedDispatchScope {
     }
 }
 
+/// Why the host refused a dispatch before anything started (ADR-198). A
+/// fixed vocabulary: it names the cause for the room notice and the console,
+/// and never carries settings values, paths or secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionReason {
+    /// The engagement froze no harness template and none resolves from defaults.
+    HarnessTemplateMissing,
+    /// The frozen harness template does not match the resource's harness plugin.
+    HarnessTemplateMismatch,
+    /// A plugin package the resource binds cannot be launched now.
+    PluginPackageNotLaunchable,
+}
+impl AdmissionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HarnessTemplateMissing => "harness_template_missing",
+            Self::HarnessTemplateMismatch => "harness_template_mismatch",
+            Self::PluginPackageNotLaunchable => "plugin_package_not_launchable",
+        }
+    }
+    /// The thread-visible notice. Admission is refused before a runner starts,
+    /// so the words say nothing was sent and nothing will be redone.
+    pub fn notice(self) -> String {
+        let cause = match self {
+            Self::HarnessTemplateMissing => {
+                "this agent has no harness template. An operator must set a default harness template on its resource or create an agent definition for it, then the agent must be rebound"
+            }
+            Self::HarnessTemplateMismatch => {
+                "the harness template this agent froze does not match its resource's harness plugin. An operator must review the resource's harness settings"
+            }
+            Self::PluginPackageNotLaunchable => {
+                "a plugin this agent's resource binds cannot be launched. An operator must check that plugin's status"
+            }
+        };
+        format!(
+            "Not started ({}): {cause}. No work was executed and nothing was sent to the runner; this dispatch will not be retried automatically.",
+            self.as_str()
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnedFailure {
     Admission,
+    /// Admission refused with a named cause (ADR-198).
+    AdmissionRefused {
+        reason: AdmissionReason,
+    },
     Cancelled,
     StartUnknown,
     SpawnFailed,
@@ -323,6 +385,25 @@ pub enum OwnedFailure {
         framework: String,
     },
     PeerUnavailable,
+}
+/// What the thread is told when a never-started dispatch is dropped: that the
+/// message did not run, why in a fixed word, and that it can be sent again.
+fn dropped_notice(failure: &OwnedFailure) -> String {
+    let why = match failure {
+        OwnedFailure::Admission | OwnedFailure::AdmissionRefused { .. } => {
+            "the host refused to admit it"
+        }
+        OwnedFailure::Cancelled => "the host was stopped",
+        OwnedFailure::StartUnknown => "the host could not confirm that it started",
+        OwnedFailure::SpawnFailed => "its runtime could not be launched",
+        OwnedFailure::LostAuthority => "its authority was lost before it started",
+        OwnedFailure::UnsupportedRunner { .. } => "no runner exists for its framework",
+        OwnedFailure::PeerUnavailable => "the runner's peer was not available",
+        _ => "the host could not start it",
+    };
+    format!(
+        "This message was not started and was dropped: {why}. Nothing ran. Send it again to retry."
+    )
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnedObservation {
@@ -392,6 +473,24 @@ fn project_dispatch(
         [session.engagement_id()], |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let effect: serde_json::Value = serde_json::from_str(&effect)?;
+    let harness_template: Option<HarnessTemplateDocument> = effect
+        .get("harnessTemplate")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
+    let allocation_id = effect
+        .get("request")
+        .and_then(|request| request.get("resourceAllocationId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        // Non-coordinator engagements have no allocation row; the engagement
+        // id remains the stable scope key even when a harness target is frozen.
+        .unwrap_or_else(|| engagement.id.clone());
+    let agent_name = engagement.agent_name.as_str().to_owned();
+    if harness_template != engagement.harness_template {
+        return Err(Error::RunnerAuthority);
+    }
     let resource: Resource =
         serde_json::from_value(effect.get("resource").cloned().ok_or(Error::Schema)?)?;
     resource.validate()?;
@@ -441,15 +540,19 @@ fn project_dispatch(
     let fingerprint = canonical::payload_digest(&json!({
         "input":input,"task_id":task.id,"task_epoch":completed_epoch.unwrap_or(task.execution_epoch),
         "session":session,"engagement":engagement.id,"generation":generation,
-        "resource":resource,"runtime_name":engagement.runtime_name,"account":account,
+        "allocation_id":allocation_id,"agent_name":agent_name,
+        "resource":resource,"harness_template":harness_template,"runtime_name":engagement.runtime_name,"account":account,
     }))?;
     Ok(OwnedDispatchScope {
         input,
         task,
         resource,
         account,
+        harness_template,
         fingerprint,
         engagement_id: engagement.id,
+        allocation_id,
+        agent_name,
         thread_root,
         // Every stored workspace setting came from a request (board #78),
         // which can no longer carry one: an agent admitted before that keeps
@@ -592,7 +695,57 @@ impl DomainRepository {
         if value.fingerprint != expected {
             return Err(Error::RunnerAuthority);
         }
+        // A plugin runtime that finishes with plain final text (no
+        // complete_task_with_reply tool, e.g. the Herdr runtime) must still
+        // answer the room. Do what complete_task_with_reply does: move the task
+        // to Done while the dispatch is still started, then record the text as
+        // that execution's final reply on its route. Built-in runners keep
+        // their contract: only complete_task_with_reply answers the room.
+        let plugin_runtime = value.resource().runtime_plugin.is_some();
+        let reply_text = output
+            .get("upstream_text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| plugin_runtime && !text.is_empty())
+            .map(|text| text.chars().take(16_000).collect::<String>());
+        // Only a session with a current Matrix route has a room to answer;
+        // any other session keeps the plain completion exactly as before.
+        let reply = reply_text.and_then(|text| {
+            super::matrix_routes::route(&tx, &value.task.session_id)
+                .ok()
+                .map(|route| (text, route))
+        });
+        let mut done_task = None;
+        if let Some((text, _)) = &reply {
+            let call_id = format!("upstream_final_{}", cap.dispatch_id);
+            let digest = hagency_core::canonical::digest(&json!([
+                "upstream_final_reply",
+                cap.dispatch_id,
+                cap.fence,
+                text
+            ]))?;
+            // A task that cannot move to Done keeps the plain completion
+            // without a reply, exactly as before this path existed.
+            done_task = execution::mutate_in_transaction(
+                &tx,
+                cap,
+                &value.task.id,
+                &call_id,
+                &hagency_core::tasks::TaskMutation::Transition {
+                    status: hagency_core::tasks::TaskState::Done,
+                    waiting_reason: None,
+                    waiting_until: None,
+                },
+                &digest,
+                now,
+            )
+            .ok()
+            .map(|result| result.task);
+        }
         execution::complete_in_transaction(&tx, cap, output, now)?;
+        if let (Some((text, route)), Some(task)) = (reply, done_task) {
+            super::replies::insert_intent(&tx, &task, &cap.dispatch_id, &route, &text, false, now)?;
+        }
         tx.commit()?;
         Ok(value.task)
     }
@@ -688,8 +841,49 @@ impl DomainRepository {
         )?;
         let result = if d.fence != cap.fence {
             OwnedObservation::Historical
+        } else if d.state == "leased" && matches!(failure, OwnedFailure::Cancelled) {
+            // The host was stopped (a restart or shutdown) after the claim and
+            // before anything started. Nothing ran, so the message is not
+            // dropped: the dispatch returns to the queue with its inputs and is
+            // claimed again, exactly as a lease the restart found (ADR-199 P7).
+            execution::lose(&tx, &cap.dispatch_id, now, "cancelled_before_start")?;
+            OwnedObservation::Unstarted
         } else if ["leased", "started", "parked"].contains(&d.state.as_str()) {
-            if d.state != "leased" {
+            if d.state == "leased" {
+                // Refused before anything started: say why, once, in the
+                // thread. Best effort in its own savepoint, like the notice
+                // below, so recording the failure never fails on it.
+                if !matches!(failure, OwnedFailure::AdmissionRefused { .. }) {
+                    tx.execute_batch("SAVEPOINT dropped_notice")?;
+                    match super::task_intents::waiting_notice(
+                        &tx,
+                        &cap.dispatch_id,
+                        "dispatch_dropped",
+                        &dropped_notice(&failure),
+                        now,
+                    ) {
+                        Ok(()) => tx.execute_batch("RELEASE dropped_notice")?,
+                        Err(_) => {
+                            tx.execute_batch("ROLLBACK TO dropped_notice; RELEASE dropped_notice")?
+                        }
+                    }
+                }
+                if let OwnedFailure::AdmissionRefused { reason } = &failure {
+                    tx.execute_batch("SAVEPOINT admission_notice")?;
+                    match super::task_intents::waiting_notice(
+                        &tx,
+                        &cap.dispatch_id,
+                        "admission_refused",
+                        &reason.notice(),
+                        now,
+                    ) {
+                        Ok(()) => tx.execute_batch("RELEASE admission_notice")?,
+                        Err(_) => tx.execute_batch(
+                            "ROLLBACK TO admission_notice; RELEASE admission_notice",
+                        )?,
+                    }
+                }
+            } else {
                 // A started run that failed has an unknown outcome: say so in the
                 // thread, as the retained product does. Only here, never in the
                 // fence itself, which a successful completion also passes through.

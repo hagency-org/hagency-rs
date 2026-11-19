@@ -91,6 +91,10 @@ struct Journal {
     outgoing: Option<crate::outgoing::state::Attempt>,
     #[serde(default)]
     outgoing_receipts: Vec<crate::outgoing::state::Receipt>,
+    /// Sends the host cancelled before they were known to be delivered,
+    /// released from `outgoing` without a re-send. Evidence only, bounded.
+    #[serde(default)]
+    outgoing_abandoned: Vec<crate::outgoing::state::Attempt>,
 }
 enum Command {
     ApprovalDelivery(
@@ -667,6 +671,7 @@ impl Owner {
                     Outgoing::Possible(..) => SdkCommand::OutgoingPossible,
                     Outgoing::Accept(..) => SdkCommand::OutgoingAccept,
                     Outgoing::Refused => SdkCommand::OutgoingRefused,
+                    Outgoing::Abandon => SdkCommand::OutgoingAbandon,
                     Outgoing::Settle => SdkCommand::OutgoingSettle,
                 })
             }
@@ -1306,7 +1311,7 @@ impl Sdk {
                         .acknowledgements
                         .len()
                         .checked_add(receipt.filtered)
-                        .is_none_or(|n| n > crate::event_batch::MAX_TIMELINE)
+                        .is_none_or(|n| n > crate::event_batch::MAX_TOTAL_TIMELINE)
                     || !journal
                         .receipts
                         .contains(&(receipt.token.clone(), receipt.digest.clone()))

@@ -15,17 +15,18 @@
  * decision" is the engagement STATE column (pending → reserved/active …),
  * which is exactly what renders here.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import PageHead from '@/components/PageHead';
 import NativeServerEngagements from '@/components/NativeServerEngagements';
 import NativeSettlement from '@/components/NativeSettlement';
+import NativeUpgrade from '@/components/NativeUpgrade';
 import NativeStatusStrip from '@/components/NativeStatusStrip';
 import { NativeAccessNotice } from '@/components/NativeUsage';
 import { useT } from '@/components/Prefs';
 import { errorText } from '@/lib/i18n';
 import { useData } from '@/components/Data';
 import { fmtTokens } from '@/lib/mock-data';
-import { raiseEngagementAllocation, retireEngagement, retryEngagementCleanup } from '@/lib/native-api';
+import { fetchCleanupState, raiseEngagementAllocation, retireEngagement, retryEngagementCleanup } from '@/lib/native-api';
 
 const NATIVE_STATES = ['pending', 'reserved', 'active', 'rejected', 'revoked', 'failed'];
 /* The command id is the store's idempotency key: minted here, never by the
@@ -49,6 +50,16 @@ export default function NativeEngagements({ lead = null, pending = null, other =
   /* ADR-186 §C: the open "Add tokens" form — `{id, amount}`, one row at a
    * time, never carried onto another row. */
   const [topUp, setTopUp] = useState(null);
+  /* ADR-199: pending identity cleanup per engagement id, refreshed with the
+   * list. A failed read leaves the map empty; it never blocks the page. */
+  const [cleanupById, setCleanupById] = useState({});
+  useEffect(() => {
+    let live = true;
+    fetchCleanupState()
+      .then((rows) => { if (live) setCleanupById(Object.fromEntries(rows.map((c) => [c.id, c]))); })
+      .catch(() => { if (live) setCleanupById({}); });
+    return () => { live = false; };
+  }, [engagements]);
 
   const agentNames = useMemo(
     () => [...new Set(engagements.map((e) => e.agentName))].filter(Boolean),
@@ -243,7 +254,13 @@ export default function NativeEngagements({ lead = null, pending = null, other =
                   <td>
                     {/* #44 item 10 — the row links to its own usage detail. */}
                     <a href={`/console/usage/?engagement_id=${encodeURIComponent(e.id)}`}>{t('ng.viewUsage')}</a>{' '}
+                    {e.state === 'revoked' && cleanupById[e.id] && (
+                      <small className="dim" data-cleanup-state={cleanupById[e.id].attempts}>
+                        {t('ng.cleanupState', { n: cleanupById[e.id].attempts, error: cleanupById[e.id].lastError, at: new Date(cleanupById[e.id].nextAttemptAtMs).toLocaleTimeString() })}
+                      </small>
+                    )}{' '}
                     {e.coordinatorManaged && e.state === 'revoked' && <NativeSettlement agent={e} onSaved={data.refresh} />}
+                    {(e.state === 'reserved' || e.state === 'active') && <NativeUpgrade agent={e} />}
                     {/* Exile + confirm (AgentActions.jsx, lane apwait #45): the
                         confirmation names THIS row's id, so a slip on one row
                         can never retire another. Both fixes share the cell. */}

@@ -108,6 +108,30 @@ impl WorkspaceAccess {
         entries.remove(&capability.dispatch_id);
         Ok(())
     }
+    /// `release` for an attempt that failed. Such an attempt may never have
+    /// reached the post-Started handoff (a runtime that was not ready, an
+    /// admission refusal), so nothing is registered under its capability and
+    /// there is nothing to release. A retired access, or an entry that
+    /// belongs to another capability, is still a refusal.
+    pub(super) fn release_if_registered(
+        &self,
+        capability: &RunnerCapability,
+    ) -> Result<(), Failure> {
+        let registered = {
+            if self.retired.load(Ordering::Acquire) {
+                return Err(Failure::Registration);
+            }
+            self.entries
+                .lock()
+                .map_err(|_| Failure::Registration)?
+                .contains_key(&capability.dispatch_id)
+        };
+        if registered {
+            self.release(capability)
+        } else {
+            Ok(())
+        }
+    }
     pub async fn check(&self, capability: &RunnerCapability) -> Result<(), Failure> {
         self.acquire(capability).await.map(|_| ())
     }
@@ -192,5 +216,36 @@ impl WorkspaceGuard {
             return Err(Failure::Registration);
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    fn capability() -> RunnerCapability {
+        RunnerCapability {
+            dispatch_id: "dispatch".into(),
+            runner_id: "runner".into(),
+            fence: 1,
+            secret: "s".repeat(64),
+        }
+    }
+
+    #[test]
+    fn a_failed_attempt_that_never_registered_a_workspace_does_not_end_the_worker() {
+        let access = WorkspaceAccess::new();
+        assert!(
+            access.release(&capability()).is_err(),
+            "a completed attempt must still have registered"
+        );
+        assert!(access.release_if_registered(&capability()).is_ok());
+    }
+
+    #[test]
+    fn a_retired_workspace_access_still_refuses_release() {
+        let access = WorkspaceAccess::new();
+        access.retire();
+        assert!(access.release_if_registered(&capability()).is_err());
     }
 }

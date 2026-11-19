@@ -39,6 +39,7 @@ pub struct Context {
     task_id: String,
     file_tools: bool,
     receive_tools: bool,
+    coordination_tools: bool,
 }
 impl Context {
     pub fn new(
@@ -65,6 +66,7 @@ impl Context {
             task_id,
             file_tools: false,
             receive_tools: false,
+            coordination_tools: false,
         })
     }
     pub(crate) fn task_id(&self) -> &str {
@@ -75,6 +77,9 @@ impl Context {
     }
     pub(crate) fn receive_tools(&self) -> bool {
         self.receive_tools
+    }
+    pub(crate) fn coordination_tools(&self) -> bool {
+        self.coordination_tools
     }
     pub fn from_env() -> Result<Self, Error> {
         let get = |name, max| {
@@ -96,6 +101,12 @@ impl Context {
             };
         context.receive_tools =
             match std::env::var(hagency_runtime::codex::session::TaskMcp::RECEIVE_TOOLS_ENV) {
+                Ok(value) if value == "1" => true,
+                Err(std::env::VarError::NotPresent) => false,
+                _ => return Err(Error::Invalid),
+            };
+        context.coordination_tools =
+            match std::env::var(hagency_runtime::codex::session::TaskMcp::COORDINATION_TOOLS_ENV) {
                 Ok(value) if value == "1" => true,
                 Err(std::env::VarError::NotPresent) => false,
                 _ => return Err(Error::Invalid),

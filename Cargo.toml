@@ -1,5 +1,5 @@
 [workspace]
-members = ["native/hagency-core", "native/hagency-store", "native/hagency", "native/hagency-crypto-proof", "native/hagency-platform", "native/hagency-runtime", "native/hagency-palpo", "native/hagency-permissions", "native/hagency-matrix", "native/hagency-matrix-format", "native/hagency-metering", "native/hagency-progress", "native/hagency-execution", "native/hagency-progress-runtime", "native/hagency-files", "native/hagency-media", "native/hagency-media-store"]
+members = ["native/hagency-core", "native/hagency-store", "native/hagency", "native/hagency-crypto-proof", "native/hagency-platform", "native/hagency-runtime", "native/hagency-palpo", "native/hagency-permissions", "native/hagency-matrix", "native/hagency-matrix-format", "native/hagency-metering", "native/hagency-progress", "native/hagency-execution", "native/hagency-progress-runtime", "native/hagency-files", "native/hagency-media", "native/hagency-media-store", "native/hagency-plugin"]
 resolver = "3"
 
 [workspace.package]
@@ -16,6 +16,10 @@ thiserror = "2.0.18"
 sha2 = "0.10.9"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
 tempfile = "3.24.0"
+toml = "1.1.5"
+semver = { version = "1.0.28", features = ["serde"] }
+url = "2.5.8"
+hagency-platform = { path = "native/hagency-platform" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

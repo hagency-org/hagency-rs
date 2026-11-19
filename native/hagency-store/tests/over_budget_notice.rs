@@ -206,7 +206,10 @@ fn native_over_budget_notice_queued_once() {
         )
         .unwrap();
     assert_eq!(kind, "over_budget");
-    assert_eq!(body, hagency_store::over_budget_notice_body(125_000));
+    assert_eq!(
+        body,
+        hagency_store::over_budget_notice_body(hagency_core::notice::NoticeLanguage::En, 125_000)
+    );
     assert!(
         body.starts_with("Still running after 2 min"),
         "fixed words around the elapsed time: {body}"
@@ -217,7 +220,10 @@ fn native_over_budget_notice_queued_once() {
     assert_eq!(room, ROOM);
     assert_eq!(sender, f.engagement);
     // Below a minute the body counts seconds; never free text either way.
-    assert!(hagency_store::over_budget_notice_body(45_500).starts_with("Still running after 45 s"));
+    assert!(
+        hagency_store::over_budget_notice_body(hagency_core::notice::NoticeLanguage::En, 45_500)
+            .starts_with("Still running after 45 s")
+    );
     // A second elapse of the same attempt adds nothing.
     assert_eq!(
         f.db.queue_over_budget_notice(&cap.dispatch_id, 200_000, 3200)

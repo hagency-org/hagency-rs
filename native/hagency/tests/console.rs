@@ -76,6 +76,8 @@ mod stream;
 mod tasks;
 #[path = "console/ts_oracle_approvals.rs"]
 mod ts_oracle_approvals;
+#[path = "console/upgrades.rs"]
+mod upgrades;
 use fixture::*;
 use hagency_core::tasks::{DispatchInput, ResourceLease, SessionBinding};
 use salvo::{

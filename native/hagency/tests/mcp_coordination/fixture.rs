@@ -165,6 +165,9 @@ impl Fixture {
             address,
         }
     }
+    pub async fn owned_client(&self, marker: Option<&str>) -> Client {
+        Client::owned(self.address, &self.cap, &self.parent.task_id, marker).await
+    }
     pub async fn client(&self) -> Client {
         Client::new(self.address, &self.cap, &self.parent.task_id).await
     }
@@ -307,8 +310,27 @@ impl Client {
         }
     }
     pub async fn new(address: SocketAddr, cap: &RunnerCapability, task: &str) -> Self {
+        Self::spawn(address, cap, task, &["mcp"], None).await
+    }
+    /// The owned plugin profile (`mcp --owned-task-profile`) with an optional
+    /// raw `HAGENCY_COORDINATION_TOOLS` marker value.
+    pub async fn owned(
+        address: SocketAddr,
+        cap: &RunnerCapability,
+        task: &str,
+        marker: Option<&str>,
+    ) -> Self {
+        Self::spawn(address, cap, task, &["mcp", "--owned-task-profile"], marker).await
+    }
+    async fn spawn(
+        address: SocketAddr,
+        cap: &RunnerCapability,
+        task: &str,
+        args: &[&str],
+        marker: Option<&str>,
+    ) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hagency"));
-        cmd.arg("mcp")
+        cmd.args(args)
             .env_clear()
             .env("HAGENCY_RUNNER_API_ADDR", address.to_string())
             .env(
@@ -320,6 +342,9 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(marker) = marker {
+            cmd.env("HAGENCY_COORDINATION_TOOLS", marker);
+        }
         #[cfg(windows)]
         if let Some(root) = std::env::var_os("SystemRoot") {
             cmd.env("SystemRoot", root);
@@ -330,6 +355,15 @@ impl Client {
                 .await
                 .unwrap();
         Self { service, child }
+    }
+    pub async fn tool_names(&self) -> Vec<String> {
+        self.service
+            .list_all_tools()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
     }
     pub async fn call(&self, name: &str, args: Value) -> Value {
         let response = tokio::time::timeout(

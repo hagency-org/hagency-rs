@@ -9,6 +9,8 @@ pub struct TaskMcp {
 impl TaskMcp {
     pub const FILE_TOOLS_ENV: &'static str = crate::task_mcp::Profile::FILE_TOOLS_ENV;
     pub const RECEIVE_TOOLS_ENV: &'static str = crate::task_mcp::Profile::RECEIVE_TOOLS_ENV;
+    pub const COORDINATION_TOOLS_ENV: &'static str =
+        crate::task_mcp::Profile::COORDINATION_TOOLS_ENV;
     pub fn new(
         executable: PathBuf,
         task_id: String,

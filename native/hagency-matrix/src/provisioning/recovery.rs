@@ -39,6 +39,7 @@ impl TokenProvisioningHost {
             result: Mutex::new(None),
             effect: Mutex::new(Some(effect.clone())),
             awaiting_since: Mutex::new(None),
+            recovery: Mutex::new(Recovery::default()),
         });
         {
             let mut jobs = self.jobs.lock().map_err(|_| Error::OutcomeUnknown)?;
@@ -90,7 +91,7 @@ impl TokenProvisioningHost {
             let mut account = operation.execute(cancel).await?;
             stage = "inspect_enrollment";
             account
-                .resume_before_owner_invite(&plan.representative, anchors, inspection, cancel)
+                .resume_enrolled(&plan.representative, anchors, inspection, cancel)
                 .await?;
             let account = Arc::new(account);
             *job.account.lock().map_err(|_| Error::OutcomeUnknown)? = Some(account.clone());
@@ -107,8 +108,26 @@ impl TokenProvisioningHost {
         eprintln!(
             "provision recovery stage={stage} effect={} result={:?}",
             effect.id,
-            result.as_ref().map(|_| ())
+            result.as_ref().map(|_| ()),
         );
+        // ADR-199 P6: never silent. A recovery that cannot prove the state stays
+        // parked with the stage and error it stopped at, for the status note.
+        if let Err(error) = &result
+            && !matches!(error, Error::AwaitingOwner | Error::AwaitingSetup)
+        {
+            let (reason, remedy) = parked_reason(stage, error);
+            eprintln!(
+                "provision parked: effect={} stage={stage} reason={reason} remedy={remedy}",
+                effect.id
+            );
+            if let Ok(mut recovery) = job.recovery.lock() {
+                recovery.parked = Some(Parked {
+                    stage,
+                    error: error.clone(),
+                    since_ms: (self.clock)(),
+                });
+            }
+        }
         let response = result.as_ref().map(|_| ()).map_err(Clone::clone);
         *job.result.lock().map_err(|_| Error::OutcomeUnknown)? = Some(result);
         response
