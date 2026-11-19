@@ -60,6 +60,11 @@ struct Fixture {
     engagements: Vec<String>,
 }
 fn fixture(count: usize) -> Fixture {
+    fixture_with(count, false)
+}
+/// `inline` completes each provision as the inline factory does, so a restart
+/// can re-attach it; otherwise an operator-style receipt is stored.
+fn fixture_with(count: usize, inline: bool) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let mut db = DomainRepository::open(&root.path().join("state")).unwrap();
     db.register(&registration()).unwrap();
@@ -94,14 +99,22 @@ fn fixture(count: usize) -> Fixture {
         db.approve(&format!("approve{index}"), &proof, 1000)
             .unwrap();
         let effect = db.claim_effect().unwrap().unwrap();
-        db.observe_effect(
-            &effect.id,
-            effect.fence,
-            &EffectOutcome::Applied {
-                receipt: "fixture".into(),
-            },
-        )
-        .unwrap();
+        if inline {
+            let scope = db
+                .provision_runtime_scope(&effect, &registration())
+                .unwrap();
+            scope.claim_warm().unwrap();
+            db.complete_original_provision(&scope).unwrap();
+        } else {
+            db.observe_effect(
+                &effect.id,
+                effect.fence,
+                &EffectOutcome::Applied {
+                    receipt: "fixture".into(),
+                },
+            )
+            .unwrap();
+        }
         engagements.push(engagement.id);
     }
     // The rollout walks engagements in id order.
@@ -570,4 +583,124 @@ fn engagement_rebind_refuses_a_target_the_registry_cannot_launch() {
         f.db.engagement_runtime_upgrades(None).unwrap()[0].state,
         UpgradeState::UpgradePending
     );
+}
+
+/// A restart: the writer reopens with no in-memory scope.
+fn restart(f: Fixture) -> Fixture {
+    let Fixture {
+        root,
+        db,
+        pool,
+        engagements,
+    } = f;
+    drop(db);
+    let db = DomainRepository::open(&root.path().join("state")).unwrap();
+    Fixture {
+        root,
+        db,
+        pool,
+        engagements,
+    }
+}
+fn listed(f: &mut Fixture) -> Vec<String> {
+    f.db.inline_factory_engagements(&registration()).unwrap()
+}
+fn reattachable(f: &mut Fixture, id: &str) -> bool {
+    f.db.reattach_provision_scope(id).is_ok()
+}
+
+#[test]
+fn rebound_engagement_is_listed_and_reattached_after_a_restart() {
+    let mut f = fixture_with(1, true);
+    let id = f.engagements[0].clone();
+    assert_eq!(listed(&mut f), std::slice::from_ref(&id));
+    f.mark();
+    assert!(f.rebind(&id).applied);
+    assert_eq!(f.frozen(&id), runtime('d', 'e'));
+    let mut f = restart(f);
+    assert_eq!(listed(&mut f), std::slice::from_ref(&id));
+    let (effect, _, scope) = f.db.reattach_provision_scope(&id).unwrap();
+    assert_eq!(scope.engagement_id(), id);
+    assert_eq!(
+        effect.payload["resource"]["runtimePlugin"]["packageSha256"],
+        "d".repeat(64)
+    );
+    f.db.validate_warm_runtime_scope(&scope).unwrap();
+}
+
+#[test]
+fn rolled_back_engagement_is_still_reattached_after_a_restart() {
+    let mut f = fixture_with(1, true);
+    let id = f.engagements[0].clone();
+    f.mark();
+    assert!(f.rebind(&id).applied);
+    assert!(
+        f.db.rollback_engagement_runtime(&id, ACTOR, 3000)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(f.frozen(&id), runtime('a', 'b'));
+    let mut f = restart(f);
+    assert_eq!(listed(&mut f), std::slice::from_ref(&id));
+    assert!(reattachable(&mut f, &id));
+}
+
+#[test]
+fn a_payload_changed_other_than_by_a_recorded_rebind_is_refused() {
+    let tamper = |sql: &str, rebind: bool| {
+        let mut f = fixture_with(1, true);
+        let id = f.engagements[0].clone();
+        if rebind {
+            f.mark();
+            assert!(f.rebind(&id).applied);
+        }
+        f.sql().execute(sql, [&id]).unwrap();
+        let mut f = restart(f);
+        assert!(listed(&mut f).is_empty(), "{sql} rebind={rebind}");
+        assert!(!reattachable(&mut f, &id), "{sql} rebind={rebind}");
+    };
+    for rebind in [false, true] {
+        // A different resource or request.
+        tamper(
+            "UPDATE effects SET payload=json_set(payload,'$.resource.model','gpt-other') WHERE engagement_id=?1 AND kind='provision'",
+            rebind,
+        );
+        tamper(
+            "UPDATE effects SET payload=json_set(payload,'$.request.name','Other') WHERE engagement_id=?1 AND kind='provision'",
+            rebind,
+        );
+        // A runtime that is not the recorded identity.
+        tamper(
+            &format!(
+                "UPDATE effects SET payload=json_set(payload,'$.resource.runtimePlugin.packageSha256','{}') WHERE engagement_id=?1 AND kind='provision'",
+                "f".repeat(64)
+            ),
+            rebind,
+        );
+        tamper(
+            "UPDATE effects SET payload=json_set(payload,'$.resource.runtimePlugin.adapterId','other') WHERE engagement_id=?1 AND kind='provision'",
+            rebind,
+        );
+    }
+}
+
+#[test]
+fn a_runtime_edited_back_to_the_original_after_a_rebind_is_refused() {
+    let mut f = fixture_with(1, true);
+    let id = f.engagements[0].clone();
+    f.mark();
+    assert!(f.rebind(&id).applied);
+    // The audit records d/e as the current runtime; a payload back at a/b was
+    // not recorded by any rebind or rollback.
+    f.sql()
+        .execute(
+            &format!(
+                "UPDATE effects SET payload=json_set(payload,'$.resource.runtimePlugin.packageSha256','{}') WHERE engagement_id=?1 AND kind='provision'",
+                "a".repeat(64)
+            ),
+            [&id],
+        )
+        .unwrap();
+    let mut f = restart(f);
+    assert!(listed(&mut f).is_empty());
 }
