@@ -13,14 +13,14 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "io-util"] }
-tokio-util = { version = "=0.7.19", features = ["rt"] }
+tokio-util = { version = "=0.7.20", features = ["rt"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }
 time = { version = "=0.3.55", default-features = false, features = ["parsing", "std"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite = { version = "=0.37.0", default-features = false, features = ["bundled"] }
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true
